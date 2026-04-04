@@ -1241,7 +1241,179 @@ All reads/writes happen inside Lua scripts — accessing 3 keys costs the same a
 
 ---
 
-## 14. Architecture
+## 14. Graceful Cancellation
+
+Distinct `"cancelled"` state. Not failed — cancelled.
+
+```typescript
+const handle = longTask.dispatch({ url: "https://example.com/huge.csv" })
+
+// Cancel from outside
+await handle.cancel({ reason: "User requested" })
+
+await handle.getState() // "cancelled" — NOT "failed"
+```
+
+### Cancel hook
+
+```typescript
+const importTask = app.task("import-csv", {
+  onCancel: async (data, ctx) => {
+    // Cleanup partial results
+    await db.deletePartialImport(data.importId)
+    await storage.delete(data.tempFile)
+  },
+
+  handler: async (data, ctx) => {
+    for (const chunk of chunks) {
+      ctx.signal.throwIfAborted() // AbortSignal fires on cancel
+      await processChunk(chunk)
+    }
+  },
+})
+```
+
+### Cascade cancellation
+
+Cancelling a workflow cancels all pending steps:
+
+```typescript
+const workflow = chain(
+  fetchData.s({ url: "..." }),
+  transform.s(),
+  upload.s(),
+)
+
+const handle = await workflow.dispatch()
+await handle.cancel() // fetchData active → cancelled, transform & upload waiting → cancelled
+```
+
+---
+
+## 15. Test Utilities
+
+`taskora/test` — in-memory runner, time control, zero Redis.
+
+```typescript
+import { createTestRunner } from "taskora/test"
+
+const runner = createTestRunner()
+
+test("processes job correctly", async () => {
+  const result = await runner.run(sendEmail, {
+    to: "a@b.com",
+    subject: "Hi",
+  })
+  expect(result).toEqual({ messageId: expect.any(String) })
+})
+
+test("delayed job", async () => {
+  const handle = await runner.dispatch(sendEmail, data, { delay: "5m" })
+  expect(await handle.getState()).toBe("delayed")
+
+  runner.advanceTime("5m")
+
+  expect(await handle.getState()).toBe("completed")
+})
+
+test("collect accumulation", async () => {
+  await runner.dispatch(processVotes, { pollId: "1", choice: "A" })
+  await runner.dispatch(processVotes, { pollId: "1", choice: "B" })
+  await runner.dispatch(processVotes, { pollId: "1", choice: "C" })
+
+  runner.advanceTime("30s") // trigger flush
+
+  // handler received array of 3 votes
+  expect(runner.lastHandlerInput).toHaveLength(3)
+})
+
+test("retry behavior", async () => {
+  let attempts = 0
+  const flaky = app.task("flaky", {
+    retry: { max: 3, backoff: "fixed" },
+    handler: async () => {
+      attempts++
+      if (attempts < 3) throw new Error("not yet")
+      return { ok: true }
+    },
+  })
+
+  const result = await runner.run(flaky, {})
+  expect(result).toEqual({ ok: true })
+  expect(attempts).toBe(3)
+})
+```
+
+### Runner API
+
+| Method | Description |
+|---|---|
+| `runner.run(task, data)` | Execute synchronously, return result |
+| `runner.dispatch(task, data, opts?)` | Enqueue in memory, return handle |
+| `runner.advanceTime(duration)` | Fast-forward delayed jobs and schedules |
+| `runner.flush(task, key?)` | Trigger collect flush manually |
+| `runner.jobs` | List all jobs with current states |
+| `runner.clear()` | Reset all state between tests |
+
+---
+
+## 16. OpenTelemetry
+
+Built-in, not a plugin. Automatic spans with context propagation from producer → consumer → steps.
+
+```typescript
+import { otel } from "taskora/telemetry"
+
+const app = taskora({
+  backend: redisAdapter("redis://localhost:6379"),
+  telemetry: otel({ serviceName: "my-workers" }),
+})
+```
+
+Automatic trace:
+
+```
+HTTP POST /api/orders
+  └─ taskora.dispatch(process-order)         [2ms]
+      └─ taskora.process(process-order)      [670ms]
+          ├─ step(charge-card)               [200ms]
+          ├─ step(reserve-shipping)          [350ms]
+          └─ step(send-confirmation)         [120ms]
+```
+
+Span attributes: `taskora.task`, `taskora.job_id`, `taskora.attempt`, `taskora.version`.
+
+---
+
+## 17. Realtime Frontend Hooks
+
+Stream job progress to UI. Framework-agnostic SSE + React hook.
+
+```typescript
+// Backend: any HTTP framework
+import { createJobStream } from "taskora/stream"
+
+app.get("/api/jobs/:id/stream", (req, res) => {
+  createJobStream(app, req.params.id).pipe(res) // SSE
+})
+```
+
+```tsx
+// Frontend: React
+import { useJobStatus } from "taskora/react"
+
+function ExportProgress({ jobId }: { jobId: string }) {
+  const { state, progress, result } = useJobStatus(jobId)
+
+  if (state === "completed") return <Download url={result.fileUrl} />
+
+  return <ProgressBar value={progress} label={state} />
+}
+```
+
+---
+
+## 18. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -1405,3 +1577,7 @@ App developers: types are inferred, namespace rarely needed directly.
 | Job TTL | None | `expires` on apply_async | Built-in with fail/discard policy |
 | Singleton | None | None | Global across workers |
 | Serialization | JSON only | JSON/pickle/msgpack/yaml | Pluggable (json/msgpack/cbor) |
+| Cancellation | No distinct state (3yr open issue) | `revoke()` | First-class `"cancelled"` state + cascade + cleanup hooks |
+| Test utilities | None (needs real Redis) | None | In-memory runner + time control |
+| OpenTelemetry | Plugin (fragile) | None | Built-in spans + context propagation |
+| Realtime UI | None (need Bull Board) | Flower (admin only) | SSE stream + React hooks |

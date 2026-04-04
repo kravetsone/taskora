@@ -549,11 +549,112 @@ tests/
 
 ---
 
-### Phase 13: Workflows (Canvas) — Phase 2
+### Phase 13: Graceful Cancellation
 
-**Goal**: Signatures, chain, group, chord. Type-safe composition.
+**Goal**: First-class job cancellation with distinct state, cleanup hooks, and cascade.
 
-> This is a major feature. Design is in API_DESIGN.md, implement after core is battle-tested.
+BullMQ issue #632 — requested for 3+ years. No clean solution exists.
+
+**Tasks**:
+- [ ] New `JobState`: `"cancelled"` — distinct from `"failed"`
+- [ ] `handle.cancel({ reason? })` — cancel a dispatched job
+- [ ] `cancel.lua` — if waiting/delayed: move to cancelled set. If active: set abort flag
+- [ ] Worker: check abort flag → fire `AbortSignal` on `ctx.signal`
+- [ ] `onCancel` hook on task definition — cleanup logic
+- [ ] Cascade: cancelling a workflow/chain cancels all pending child jobs
+- [ ] `cancelled` event on task and app
+- [ ] Inspector: `inspector.cancelled()` query
+
+**Tests**:
+- Integration: cancel waiting job → state is "cancelled" not "failed"
+- Integration: cancel active job → ctx.signal fires, onCancel runs
+- Integration: cancel chain → all pending steps cancelled
+- Unit: cancelled jobs don't count toward retry stats
+
+---
+
+### Phase 14: Test Utilities
+
+**Goal**: `taskora/test` — in-memory runner, time manipulation, zero Redis dependency for unit tests.
+
+**Tasks**:
+- [ ] `src/test/index.ts` — `"taskora/test"` entrypoint
+- [ ] `createTestRunner()` — in-memory adapter implementing `Taskora.Adapter`
+- [ ] In-memory: Lists, Sorted Sets, Hashes in plain JS Maps (minimal Redis emulation)
+- [ ] `runner.run(task, data)` — execute handler synchronously, return result
+- [ ] `runner.dispatch(task, data, opts?)` — enqueue in memory
+- [ ] `runner.advanceTime(duration)` — fast-forward delayed jobs and schedules
+- [ ] `runner.flush(task, key?)` — trigger collect flush manually
+- [ ] `runner.steps` — inspect completed steps for durable step workflows
+- [ ] `runner.jobs` — list all jobs with states
+- [ ] `runner.clear()` — reset state between tests
+
+**Tests**:
+- Unit: runner processes jobs without Redis
+- Unit: advanceTime promotes delayed jobs
+- Unit: collect accumulator flushes on advanceTime
+- Unit: runner.run returns typed result
+
+---
+
+### Phase 15: OpenTelemetry
+
+**Goal**: Built-in tracing — automatic spans for every job, context propagation from producer to consumer.
+
+**Tasks**:
+- [ ] `src/telemetry.ts` — telemetry interface + noop default
+- [ ] `taskora/telemetry` entrypoint — `otel()` adapter using `@opentelemetry/api`
+- [ ] Dispatch: create span `taskora.dispatch(<task>)`, inject trace context into job hash
+- [ ] Worker: extract trace context from job hash, create span `taskora.process(<task>)`
+- [ ] Steps: child span per `ctx.step()` call
+- [ ] Attributes: `taskora.task`, `taskora.job_id`, `taskora.attempt`, `taskora.version`
+- [ ] Error: record exception on span when job fails
+- [ ] `@opentelemetry/api` as optional peer dep
+- [ ] App option: `telemetry: true` (auto-detect) or `telemetry: otel({ serviceName })` (explicit)
+
+**Produces traces like:**
+```
+trace: HTTP POST /api/orders
+  └─ span: taskora.dispatch(process-order)
+      └─ span: taskora.process(process-order)
+          ├─ span: step(charge-card)         [200ms]
+          ├─ span: step(reserve-shipping)    [350ms]
+          └─ span: step(send-confirmation)   [120ms]
+```
+
+**Tests**:
+- Unit: noop telemetry has zero overhead
+- Integration: spans created with correct parent-child relationships
+- Integration: trace context propagates from dispatch to worker
+
+---
+
+### Phase 16: Realtime Frontend Hooks
+
+**Goal**: Stream job progress to frontend via SSE. React hooks for subscribing.
+
+**Tasks**:
+- [ ] `src/stream.ts` — `createJobStream(app, jobId)` → ReadableStream / SSE
+- [ ] SSE events: state changes, progress updates, step completions, result
+- [ ] Backed by Redis Stream subscription (events stream, filtered by jobId)
+- [ ] `taskora/react` entrypoint — `useJobStatus(jobId, options)` hook
+- [ ] Hook returns: `{ state, progress, steps, result, error }`
+- [ ] Auto-reconnect on connection drop
+- [ ] Framework-agnostic: `createJobStream` works with any HTTP framework
+- [ ] React as optional peer dep
+
+**Tests**:
+- Integration: SSE stream delivers state changes in order
+- Integration: stream closes when job completes
+- Unit: React hook updates on incoming events
+
+---
+
+### Phase 17: Workflows (Canvas) — Phase 2
+
+**Goal**: Signatures, chain, group, chord. Type-safe composition. Durable steps and wait-for-event as natural extensions of the pipe/graph model.
+
+> Design discussion required before implementation — rethink durable steps and wait-for-event as workflow graph primitives, not separate concepts.
 
 **Tasks**:
 - [ ] `src/workflow/signature.ts` — `.s()` method on Task, Signature class
@@ -564,6 +665,9 @@ tests/
 - [ ] `.map()` and `.chunk()` on Task
 - [ ] Workflow state tracking (store DAG in Redis)
 - [ ] Atomic workflow dispatch (all-or-nothing)
+- [ ] Durable steps — memoized step results within workflow graph (rethink as graph nodes)
+- [ ] Wait-for-event — pause node in graph until external signal arrives
+- [ ] Fan-out / fan-in — dynamic parallelism within graph
 
 ---
 
@@ -730,13 +834,17 @@ const sendEmail = app.task("send-email", {
 sendEmail.on("completed", (e) => console.log(`Done in ${e.duration}ms`))
 ```
 
-### 1.0 (Phases 10–12)
+### 1.0 (Phases 10–14)
 
-Inspector, DLQ, middleware, flow control (debounce/throttle/dedup/TTL/singleton). Full feature parity with BullMQ + better DX.
+Inspector, DLQ, middleware, flow control, cancellation, test utilities. Full BullMQ replacement + better DX.
 
-### 2.0 (Phase 13)
+### 1.x (Phases 15–16)
 
-Workflows. The Celery Canvas killer feature, with TypeScript type safety.
+OpenTelemetry, realtime frontend hooks. Production observability.
+
+### 2.0 (Phase 17)
+
+Workflows (Canvas) with durable steps, wait-for-event, fan-out/fan-in as graph primitives. The feature that makes taskora a workflow engine, not just a job queue.
 
 ---
 
