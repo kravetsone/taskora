@@ -77,17 +77,16 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Currently on **Phase 0: Project Skeleton**. See `docs/IMPLEMENTATION.md` for full phase breakdown.
+Currently on **Phase 1: Core Engine (MVP)** — completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 2: Schema Validation + Type Inference**.
 
-Phase 0 scope:
-- Reset repo to taskora identity
-- package.json with multi-entrypoint exports
-- tsconfig.json (strict, ESM, NodeNext)
-- Biome config (2 spaces, double quotes)
-- src/types.ts — minimal Taskora namespace (Adapter, JobState, JobOptions, RawJob)
-- src/errors.ts — real error classes with cause chaining
-- src/index.ts — taskora() typed shell
-- src/redis/index.ts — redisAdapter() typed shell
-- Test infra: testcontainers global setup
-- Smoke test: imports resolve + Redis ping
-- CI: GitHub Actions test workflow
+Phase 1 delivered:
+- Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
+- 7 atomic Lua scripts with split storage + XADD events (enqueue, enqueueDelayed, dequeue, ack, fail, nack, extendLock)
+- Redis backend: SCRIPT LOAD/EVALSHA with NOSCRIPT fallback, lazyConnect, {hash tag} Cluster compat
+- `Taskora.Serializer` interface + `json()` default
+- `Task<TInput, TOutput>` class with `dispatch()` / `dispatchMany()`
+- `Worker`: exponential backoff polling (50ms→1s), concurrency control, lock extension (30s/10s), graceful shutdown with AbortSignal
+- `App`: task registry, `start()` / `close()`, auto-connect on first dispatch
+- Property name: `adapter` (not `backend`) — consistent with `Taskora.Adapter` / `redisAdapter()`
+- Key prefix optional, omitted by default: `taskora:{task}:key`
+- 13 integration tests (lifecycle, delayed, concurrency, shutdown, bulk, connection modes)
