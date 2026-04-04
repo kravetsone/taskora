@@ -49,11 +49,19 @@ export namespace Taskora {
   export interface Adapter {
     connect(): Promise<void>;
     disconnect(): Promise<void>;
-    enqueue(task: string, data: string, options: { _v: number } & JobOptions): Promise<string>;
+    enqueue(
+      task: string,
+      jobId: string,
+      data: string,
+      options: { _v: number } & JobOptions,
+    ): Promise<void>;
     dequeue(task: string, lockTtl: number, token: string): Promise<DequeueResult | null>;
     ack(task: string, jobId: string, token: string, result: string): Promise<void>;
     fail(task: string, jobId: string, token: string, error: string): Promise<void>;
     nack(task: string, jobId: string, token: string): Promise<void>;
     extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean>;
+    getState(task: string, jobId: string): Promise<JobState | null>;
+    getResult(task: string, jobId: string): Promise<string | null>;
+    getError(task: string, jobId: string): Promise<string | null>;
   }
 }

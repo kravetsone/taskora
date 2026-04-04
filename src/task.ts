@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { ResultHandle } from "./result.js";
 import { validateSchema } from "./schema.js";
 import type { Taskora } from "./types.js";
 
@@ -39,27 +41,32 @@ export class Task<TInput, TOutput> {
     this.outputSchema = schemas?.output;
   }
 
-  async dispatch(data: TInput, options?: Taskora.JobOptions): Promise<string> {
-    await this.deps.ensureConnected();
-    if (this.inputSchema) {
-      await validateSchema(this.inputSchema, data);
-    }
-    const serialized = this.deps.serializer.serialize(data);
-    return this.deps.adapter.enqueue(this.name, serialized, {
-      _v: 1,
-      ...options,
-    });
+  dispatch(data: TInput, options?: Taskora.JobOptions): ResultHandle<TOutput> {
+    const id = randomUUID();
+    const enqueuePromise = (async () => {
+      await this.deps.ensureConnected();
+      if (this.inputSchema) {
+        await validateSchema(this.inputSchema, data);
+      }
+      const serialized = this.deps.serializer.serialize(data);
+      await this.deps.adapter.enqueue(this.name, id, serialized, {
+        _v: 1,
+        ...options,
+      });
+    })();
+
+    return new ResultHandle<TOutput>(
+      id,
+      this.name,
+      this.deps.adapter,
+      this.deps.serializer,
+      enqueuePromise,
+    );
   }
 
-  async dispatchMany(
+  dispatchMany(
     jobs: Array<{ data: TInput; options?: Taskora.JobOptions }>,
-  ): Promise<string[]> {
-    await this.deps.ensureConnected();
-    const ids: string[] = [];
-    for (const job of jobs) {
-      const id = await this.dispatch(job.data, job.options);
-      ids.push(id);
-    }
-    return ids;
+  ): ResultHandle<TOutput>[] {
+    return jobs.map((job) => this.dispatch(job.data, job.options));
   }
 }

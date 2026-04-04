@@ -44,3 +44,27 @@ export class StalledError extends TaskoraError {
     this.jobId = jobId;
   }
 }
+
+export class JobFailedError extends TaskoraError {
+  readonly jobId: string;
+  readonly taskName: string;
+
+  constructor(jobId: string, taskName: string, message: string) {
+    super(message);
+    this.name = "JobFailedError";
+    this.jobId = jobId;
+    this.taskName = taskName;
+  }
+}
+
+export class TimeoutError extends TaskoraError {
+  readonly jobId: string;
+  readonly timeoutMs: number;
+
+  constructor(jobId: string, timeoutMs: number) {
+    super(`Job ${jobId} did not complete within ${timeoutMs}ms`);
+    this.name = "TimeoutError";
+    this.jobId = jobId;
+    this.timeoutMs = timeoutMs;
+  }
+}

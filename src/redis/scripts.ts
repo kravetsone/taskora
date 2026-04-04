@@ -11,71 +11,69 @@
  */
 
 // ── enqueue ──────────────────────────────────────────────────────────
-// KEYS[1] = <task>:id        (job ID counter)
-// KEYS[2] = <task>:wait      (wait list)
-// KEYS[3] = <task>:events    (event stream)
+// KEYS[1] = <task>:wait      (wait list)
+// KEYS[2] = <task>:events    (event stream)
 // ARGV[1] = jobPrefix        (e.g. "taskora:{send-email}:")
-// ARGV[2] = serialized data
-// ARGV[3] = timestamp (ms)
-// ARGV[4] = _v (version)
-// ARGV[5] = priority
-// Returns: jobId (number)
+// ARGV[2] = jobId            (client-generated UUID)
+// ARGV[3] = serialized data
+// ARGV[4] = timestamp (ms)
+// ARGV[5] = _v (version)
+// ARGV[6] = priority
+// Returns: 1
 export const ENQUEUE = `
-local jobId = redis.call('INCR', KEYS[1])
-local jobKey = ARGV[1] .. jobId
+local jobKey = ARGV[1] .. ARGV[2]
 local dataKey = jobKey .. ':data'
 
 redis.call('HSET', jobKey,
-  'ts', ARGV[3],
-  '_v', ARGV[4],
+  'ts', ARGV[4],
+  '_v', ARGV[5],
   'attempt', 1,
   'state', 'waiting',
-  'priority', ARGV[5])
+  'priority', ARGV[6])
 
-redis.call('SET', dataKey, ARGV[2])
-redis.call('LPUSH', KEYS[2], jobId)
+redis.call('SET', dataKey, ARGV[3])
+redis.call('LPUSH', KEYS[1], ARGV[2])
 
-redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
-  'event', 'waiting', 'jobId', tostring(jobId))
+redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
+  'event', 'waiting', 'jobId', ARGV[2])
 
-return jobId
+return 1
 `;
 
 // ── enqueueDelayed ───────────────────────────────────────────────────
-// KEYS[1] = <task>:id
-// KEYS[2] = <task>:delayed   (delayed sorted set)
-// KEYS[3] = <task>:events
+// KEYS[1] = <task>:delayed   (delayed sorted set)
+// KEYS[2] = <task>:events
 // ARGV[1] = jobPrefix
-// ARGV[2] = serialized data
-// ARGV[3] = timestamp (ms)
-// ARGV[4] = _v
-// ARGV[5] = delay (ms)
-// ARGV[6] = priority
-// Returns: jobId (number)
+// ARGV[2] = jobId            (client-generated UUID)
+// ARGV[3] = serialized data
+// ARGV[4] = timestamp (ms)
+// ARGV[5] = _v
+// ARGV[6] = delay (ms)
+// ARGV[7] = priority
+// Returns: 1
 export const ENQUEUE_DELAYED = `
-local jobId = redis.call('INCR', KEYS[1])
-local jobKey = ARGV[1] .. jobId
+local jobKey = ARGV[1] .. ARGV[2]
 local dataKey = jobKey .. ':data'
 
-local ts = tonumber(ARGV[3])
-local delay = tonumber(ARGV[5])
-local score = (ts + delay) * 0x1000 + (jobId % 0x1000)
+local ts = tonumber(ARGV[4])
+local delay = tonumber(ARGV[6])
+local score = ts + delay
 
 redis.call('HSET', jobKey,
-  'ts', ARGV[3],
-  'delay', ARGV[5],
-  '_v', ARGV[4],
+  'ts', ARGV[4],
+  'delay', ARGV[6],
+  '_v', ARGV[5],
   'attempt', 1,
   'state', 'delayed',
-  'priority', ARGV[6])
+  'priority', ARGV[7])
 
-redis.call('SET', dataKey, ARGV[2])
-redis.call('ZADD', KEYS[2], score, tostring(jobId))
+redis.call('SET', dataKey, ARGV[3])
+redis.call('ZADD', KEYS[1], score, ARGV[2])
 
-redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
-  'event', 'delayed', 'jobId', tostring(jobId))
+redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
+  'event', 'delayed', 'jobId', ARGV[2])
 
-return jobId
+return 1
 `;
 
 // ── dequeue ──────────────────────────────────────────────────────────
@@ -95,7 +93,7 @@ local token = ARGV[3]
 local now = tonumber(ARGV[4])
 
 -- Promote delayed jobs whose due time <= now (up to 100)
-local maxScore = now * 0x1000 + 0xFFF
+local maxScore = now
 local delayed = redis.call('ZRANGEBYSCORE', KEYS[3], 0, maxScore, 'LIMIT', 0, 100)
 if #delayed > 0 then
   redis.call('ZREM', KEYS[3], unpack(delayed))

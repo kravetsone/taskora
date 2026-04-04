@@ -75,7 +75,8 @@ describe("schema validation — worker output", () => {
       },
     });
 
-    await task.dispatch({});
+    const handle = task.dispatch({});
+    const jobId = await handle;
     await app.start();
 
     await waitFor(async () => {
@@ -83,7 +84,7 @@ describe("schema validation — worker output", () => {
       return failedCount === 1;
     });
 
-    const error = await redis.hget("taskora:{bad-output}:1", "error");
+    const error = await redis.hget(`taskora:{bad-output}:${jobId}`, "error");
     expect(error).toContain("Validation failed");
 
     await app.close();
@@ -100,7 +101,8 @@ describe("schema validation — worker output", () => {
       },
     });
 
-    await task.dispatch({ name: "Alice" });
+    const handle = task.dispatch({ name: "Alice" });
+    const jobId = await handle;
     await app.start();
 
     await waitFor(async () => {
@@ -108,7 +110,7 @@ describe("schema validation — worker output", () => {
       return completedCount === 1;
     });
 
-    const result = await redis.get("taskora:{good-output}:1:result");
+    const result = await redis.get(`taskora:{good-output}:${jobId}:result`);
     expect(JSON.parse(result as string)).toEqual({ greeting: "Hello, Alice!" });
 
     await app.close();

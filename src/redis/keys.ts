@@ -2,7 +2,6 @@ export function buildKeys(task: string, prefix?: string) {
   const base = prefix ? `taskora:${prefix}:{${task}}` : `taskora:{${task}}`;
 
   return {
-    id: `${base}:id`,
     wait: `${base}:wait`,
     active: `${base}:active`,
     delayed: `${base}:delayed`,

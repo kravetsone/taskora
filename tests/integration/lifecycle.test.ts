@@ -43,8 +43,10 @@ describe("job lifecycle", () => {
       return { ok: true };
     });
 
-    const jobId = await sendEmail.dispatch({ to: "alice@example.com" });
-    expect(jobId).toBe("1");
+    const handle = sendEmail.dispatch({ to: "alice@example.com" });
+    const jobId = await handle;
+    expect(typeof jobId).toBe("string");
+    expect(jobId.length).toBe(36);
 
     await app.start();
 
@@ -56,7 +58,7 @@ describe("job lifecycle", () => {
     expect(completedCount).toBe(1);
 
     // Verify result is stored
-    const result = await redis.get("taskora:{send-email}:1:result");
+    const result = await redis.get(`taskora:{send-email}:${jobId}:result`);
     expect(result).toBeDefined();
     expect(JSON.parse(result as string)).toEqual({ ok: true });
 
@@ -74,7 +76,8 @@ describe("job lifecycle", () => {
       throw new Error("boom");
     });
 
-    await task.dispatch({});
+    const handle = task.dispatch({});
+    const jobId = await handle;
     await app.start();
 
     await waitFor(async () => {
@@ -83,7 +86,7 @@ describe("job lifecycle", () => {
     });
 
     // Verify error stored in metadata
-    const error = await redis.hget("taskora:{failing-task-dispatch}:1", "error");
+    const error = await redis.hget(`taskora:{failing-task-dispatch}:${jobId}`, "error");
     expect(error).toBe("boom");
 
     await app.close();
@@ -99,6 +102,7 @@ describe("job lifecycle", () => {
       return null;
     });
 
+    // Enqueue sequentially to guarantee FIFO ordering
     await task.dispatch({ n: 1 });
     await task.dispatch({ n: 2 });
     await task.dispatch({ n: 3 });
@@ -124,7 +128,8 @@ describe("delayed jobs", () => {
       return null;
     });
 
-    await task.dispatch({ msg: "hello" }, { delay: 500 });
+    const handle = task.dispatch({ msg: "hello" }, { delay: 500 });
+    await handle;
 
     // Should be in delayed set, not wait list
     const delayedCount = await redis.zcard("taskora:{delayed-task}:delayed");
@@ -167,9 +172,11 @@ describe("concurrency", () => {
     });
 
     // Dispatch 20 jobs
+    const handles = [];
     for (let i = 0; i < 20; i++) {
-      await task.dispatch({ id: String(i) });
+      handles.push(task.dispatch({ id: String(i) }));
     }
+    await Promise.all(handles);
 
     await app.start();
     await waitFor(() => processedIds.size === 20);
@@ -204,7 +211,8 @@ describe("graceful shutdown", () => {
       return null;
     });
 
-    await task.dispatch({});
+    const handle = task.dispatch({});
+    await handle;
     await app.start();
 
     await waitFor(() => jobStarted);
@@ -229,13 +237,15 @@ describe("bulk dispatch", () => {
       return null;
     });
 
-    const ids = await task.dispatchMany([
+    const handles = task.dispatchMany([
       { data: { name: "a" } },
       { data: { name: "b" } },
       { data: { name: "c" } },
     ]);
 
-    expect(ids).toEqual(["1", "2", "3"]);
+    expect(handles).toHaveLength(3);
+    const ids = await Promise.all(handles);
+    for (const id of ids) expect(typeof id).toBe("string");
 
     await app.start();
     await waitFor(() => processed.length === 3);
@@ -251,7 +261,8 @@ describe("connection modes", () => {
   it("accepts a connection URL string", async () => {
     const app = taskora({ adapter: redisAdapter(url()) });
     const task = app.task("url-test", async () => null);
-    await task.dispatch({});
+    const handle = task.dispatch({});
+    await handle;
     await app.close();
   });
 
@@ -265,7 +276,8 @@ describe("connection modes", () => {
       }),
     });
     const task = app.task("opts-test", async () => null);
-    await task.dispatch({});
+    const handle = task.dispatch({});
+    await handle;
     await app.close();
   });
 
@@ -273,7 +285,8 @@ describe("connection modes", () => {
     const client = new Redis(url());
     const app = taskora({ adapter: redisAdapter(client) });
     const task = app.task("instance-test", async () => null);
-    await task.dispatch({});
+    const handle = task.dispatch({});
+    await handle;
     await app.close();
     // Client should still be usable (we don't own it)
     expect(await client.ping()).toBe("PONG");

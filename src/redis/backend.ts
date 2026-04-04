@@ -55,42 +55,42 @@ export class RedisBackend implements Taskora.Adapter {
 
   async enqueue(
     task: string,
+    jobId: string,
     data: string,
     options: { _v: number } & Taskora.JobOptions,
-  ): Promise<string> {
+  ): Promise<void> {
     const keys = buildKeys(task, this.prefix);
     const now = String(Date.now());
 
     if (options.delay && options.delay > 0) {
-      const result = await this.eval(
+      await this.eval(
         "enqueueDelayed",
-        3,
-        keys.id,
+        2,
         keys.delayed,
         keys.events,
         keys.jobPrefix,
+        jobId,
         data,
         now,
         String(options._v),
         String(options.delay),
         String(options.priority ?? 0),
       );
-      return String(result);
+      return;
     }
 
-    const result = await this.eval(
+    await this.eval(
       "enqueue",
-      3,
-      keys.id,
+      2,
       keys.wait,
       keys.events,
       keys.jobPrefix,
+      jobId,
       data,
       now,
       String(options._v),
       String(options.priority ?? 0),
     );
-    return String(result);
   }
 
   async dequeue(
@@ -160,6 +160,22 @@ export class RedisBackend implements Taskora.Adapter {
   async nack(task: string, jobId: string, token: string): Promise<void> {
     const keys = buildKeys(task, this.prefix);
     await this.eval("nack", 3, keys.active, keys.wait, keys.events, keys.jobPrefix, jobId, token);
+  }
+
+  async getState(task: string, jobId: string): Promise<Taskora.JobState | null> {
+    const keys = buildKeys(task, this.prefix);
+    const state = await this.client.hget(`${keys.jobPrefix}${jobId}`, "state");
+    return (state as Taskora.JobState) ?? null;
+  }
+
+  async getResult(task: string, jobId: string): Promise<string | null> {
+    const keys = buildKeys(task, this.prefix);
+    return this.client.get(`${keys.jobPrefix}${jobId}:result`);
+  }
+
+  async getError(task: string, jobId: string): Promise<string | null> {
+    const keys = buildKeys(task, this.prefix);
+    return this.client.hget(`${keys.jobPrefix}${jobId}`, "error");
   }
 
   async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {
