@@ -474,7 +474,64 @@ tests/
 
 ---
 
-### Phase 12: Workflows (Canvas) — Phase 2
+### Phase 12: Flow Control
+
+**Goal**: Debounce, throttle, deduplication, TTL, singleton, concurrency per key, cron overlap prevention.
+
+**Tasks**:
+
+1. **Debounce** (Lua: replace existing delayed job with same key)
+   - [ ] `debounce.lua` — HGET debounce key → if exists: DEL old job, create new delayed job
+   - [ ] Dispatch option: `debounce: { key, delay }`
+   - [ ] Redis key: `taskora:<pfx>:<task>:debounce:<key>` → jobId mapping
+
+2. **Throttle** (Lua: check counter, drop if over limit)
+   - [ ] `throttle.lua` — INCR counter with PX window, reject if > max
+   - [ ] Dispatch option: `throttle: { key, max, window }`
+   - [ ] Redis key: `taskora:<pfx>:<task>:throttle:<key>` → counter with PX
+   - [ ] Return `null` handle when dropped
+
+3. **Deduplication** (Lua: check existence before enqueue)
+   - [ ] Extend `enqueue.lua` — check dedup key, skip if exists
+   - [ ] Dispatch option: `deduplicate: { key, while? }`
+   - [ ] Redis key: `taskora:<pfx>:<task>:dedup:<key>` → jobId
+   - [ ] Clean dedup key on job completion/failure
+
+4. **TTL / Expiration**
+   - [ ] Store `expireAt` in job hash
+   - [ ] Worker: check TTL before processing, skip expired
+   - [ ] `promoteDelayed.lua`: skip expired delayed jobs
+   - [ ] Task option + dispatch option: `ttl`
+   - [ ] `onExpire: "fail" | "discard"` behavior
+
+5. **Singleton**
+   - [ ] Task option: `singleton: true`
+   - [ ] `dequeue.lua`: check active count for task before claiming
+   - [ ] Global lock across workers (not per-worker concurrency)
+
+6. **Concurrency per key**
+   - [ ] Dispatch option: `concurrencyKey` + `concurrencyLimit`
+   - [ ] Redis key: `taskora:<pfx>:<task>:conc:<key>` → active count
+   - [ ] `dequeue.lua`: check per-key count before claiming
+   - [ ] Decrement on ack/fail
+
+7. **Cron overlap prevention**
+   - [ ] Schedule option: `overlap: false`
+   - [ ] Scheduler: check if previous run is still active before dispatching
+   - [ ] Redis key: `taskora:<pfx>:schedules:<name>:active` → jobId
+
+**Tests**:
+- Integration: debounce — 5 dispatches, only last runs
+- Integration: throttle — exceeding limit drops jobs
+- Integration: deduplication — second dispatch returns existing handle
+- Integration: TTL — expired job not processed
+- Integration: singleton — second job waits for first to complete
+- Integration: concurrency per key — respects per-key limit
+- Integration: cron overlap — skips when previous still active
+
+---
+
+### Phase 13: Workflows (Canvas) — Phase 2
 
 **Goal**: Signatures, chain, group, chord. Type-safe composition.
 
@@ -655,11 +712,11 @@ const sendEmail = app.task("send-email", {
 sendEmail.on("completed", (e) => console.log(`Done in ${e.duration}ms`))
 ```
 
-### 1.0 (Phases 10–11)
+### 1.0 (Phases 10–12)
 
-Inspector, DLQ, middleware. Full feature parity with BullMQ + better DX.
+Inspector, DLQ, middleware, flow control (debounce/throttle/dedup/TTL/singleton). Full feature parity with BullMQ + better DX.
 
-### 2.0 (Phase 12)
+### 2.0 (Phase 13)
 
 Workflows. The Celery Canvas killer feature, with TypeScript type safety.
 

@@ -887,7 +887,181 @@ await app.deadLetters.retryAll({ task: "send-email" })
 
 ---
 
-## 11. Lifecycle
+## 11. Flow Control
+
+### Debounce
+
+Multiple dispatches within a window → only the **last** one runs. Timer resets on each dispatch.
+
+Use case: reindex search after rapid edits, invalidate cache after burst of updates.
+
+```typescript
+const reindex = app.task("reindex-user", {
+  handler: async (data: { userId: string }) => {
+    await searchIndex.rebuild(data.userId)
+  },
+})
+
+// User edits profile 5 times in 2 seconds — only the last dispatch runs
+await reindex.dispatch({ userId: "123" }, {
+  debounce: { key: "user:123", delay: "2s" },
+})
+```
+
+Under the hood: each dispatch with the same key **replaces** the previous delayed job. The delay restarts from zero.
+
+```
+dispatch(key="user:123")  →  [delayed 2s]
+dispatch(key="user:123")  →  prev cancelled, [delayed 2s] ← timer restarted
+dispatch(key="user:123")  →  prev cancelled, [delayed 2s] ← timer restarted
+                              ... 2s passes ...
+                              → runs once with last data
+```
+
+### Throttle
+
+At most N executions per key per time window. Extra dispatches are **dropped** (not queued).
+
+Use case: limit API calls per customer, prevent notification spam.
+
+```typescript
+const notify = app.task("send-notification", {
+  handler: async (data: { userId: string; msg: string }) => {
+    await push.send(data)
+  },
+})
+
+await notify.dispatch({ userId: "123", msg: "New message" }, {
+  throttle: { key: "user:123", max: 3, window: "1m" },
+})
+// 4th dispatch within 1 minute → silently dropped, returns null handle
+```
+
+Different from task-level `rateLimit`: throttle is **per-key** and drops excess jobs. `rateLimit` is **per-task** and delays excess jobs.
+
+| | `rateLimit` | `throttle` |
+|---|---|---|
+| Scope | per-task (all jobs) | per-key (e.g. per user) |
+| Excess jobs | queued, processed later | **dropped** |
+| Configured on | task definition | dispatch call |
+
+### Deduplication
+
+Only one job with this key can exist in the queue at a time. Second dispatch is a no-op.
+
+Use case: "sync user data" — no point queuing 10 identical syncs.
+
+```typescript
+await syncUser.dispatch({ userId: "123" }, {
+  deduplicate: { key: "sync:123" },
+})
+
+// Already in queue? → no-op, returns handle to existing job
+await syncUser.dispatch({ userId: "123" }, {
+  deduplicate: { key: "sync:123" },
+})
+```
+
+Options:
+
+```typescript
+deduplicate: {
+  key: "sync:123",
+  // Which states count as "existing"?
+  while: ["waiting", "delayed", "active"],  // default: all three
+  // OR: only deduplicate while waiting (allow re-dispatch once active)
+  while: ["waiting", "delayed"],
+}
+```
+
+### TTL / Expiration
+
+Job expires if not **started** within a time window. Stale jobs are pointless.
+
+Use case: time-sensitive notifications, real-time data processing.
+
+```typescript
+await sendOTP.dispatch({ phone: "+1234567890", code: "4821" }, {
+  ttl: "5m", // useless if not processed within 5 minutes
+})
+```
+
+Expired jobs move to `failed` with `ExpiredError` (or silently removed — configurable):
+
+```typescript
+const sendOTP = app.task("send-otp", {
+  ttl: { max: "5m", onExpire: "discard" }, // "fail" (default) | "discard"
+  handler: async (data) => { /* ... */ },
+})
+```
+
+### Singleton
+
+Only one job of this task can be **active** at a time. Others wait in queue.
+
+Use case: database migrations, global cache rebuild, report generation.
+
+```typescript
+const rebuildCache = app.task("rebuild-cache", {
+  singleton: true, // only one active at a time, others wait their turn
+  handler: async () => {
+    await cache.rebuildAll()
+  },
+})
+```
+
+Different from `concurrency: 1` — singleton is **global** across all workers. `concurrency: 1` is per-worker.
+
+### Concurrency per key
+
+Process multiple jobs simultaneously, but limit concurrency per logical group.
+
+Use case: 10 jobs total, but max 1 per user (don't overwhelm one user's API).
+
+```typescript
+const syncRepo = app.task("sync-repo", {
+  concurrency: 10,  // 10 jobs total across workers
+  handler: async (data: { orgId: string; repoId: string }) => {
+    await github.sync(data.repoId)
+  },
+})
+
+await syncRepo.dispatch({ orgId: "acme", repoId: "api" }, {
+  concurrencyKey: "org:acme",  // max 1 active job per org
+  concurrencyLimit: 2,         // actually, allow 2 per org
+})
+```
+
+### Cron overlap prevention
+
+If the previous scheduled run hasn't finished → skip this one.
+
+Use case: report that takes 10 minutes on a 5-minute schedule — don't stack them.
+
+```typescript
+app.schedule("heavy-report", {
+  task: generateReport,
+  every: "5m",
+  overlap: false,  // skip if previous run is still active (default: false)
+})
+```
+
+### Summary
+
+| Feature | Scope | Excess jobs | Configured on |
+|---|---|---|---|
+| **debounce** | per-key | replaced (last wins) | dispatch options |
+| **throttle** | per-key | dropped | dispatch options |
+| **deduplicate** | per-key | no-op (first wins) | dispatch options |
+| **rateLimit** | per-task | delayed | task definition |
+| **ttl** | per-job | expired/failed | dispatch or task |
+| **singleton** | per-task | queued (wait) | task definition |
+| **concurrencyKey** | per-key | queued (wait) | dispatch options |
+| **overlap: false** | per-schedule | skipped | schedule definition |
+
+---
+
+## 12. Lifecycle
 
 ```typescript
 // Start processing all defined tasks
@@ -902,7 +1076,7 @@ await app.close({ timeout: 30_000 })
 
 ---
 
-## 12. Serialization
+## 13. Serialization
 
 ### Pluggable serializer
 
@@ -974,7 +1148,7 @@ All reads/writes happen inside Lua scripts — accessing 3 keys costs the same a
 
 ---
 
-## 13. Architecture
+## 14. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -1132,3 +1306,9 @@ App developers: types are inferred, namespace rarely needed directly.
 | Dead letter queue | Manual | Built-in | Built-in with retry API |
 | Schema versioning | None | None | Built-in migrations with type-safe chain |
 | Migration pruning | N/A | N/A | `since` + inspector to check safety |
+| Debounce | None | None | Per-key, last dispatch wins |
+| Throttle | None | `rate_limit` decorator | Per-key, drop excess |
+| Deduplication | Manual (jobId) | None | Per-key with configurable states |
+| Job TTL | None | `expires` on apply_async | Built-in with fail/discard policy |
+| Singleton | None | None | Global across workers |
+| Serialization | JSON only | JSON/pickle/msgpack/yaml | Pluggable (json/msgpack/cbor) |
