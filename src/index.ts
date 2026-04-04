@@ -1,11 +1,26 @@
-import type { ConnectionOptions } from "bullmq";
-import { Job } from "./define-job.js";
-import type { Shift } from "./utils.js";
+export type { Taskora } from "./types.js";
+export { TaskoraError, ValidationError, RetryError, StalledError } from "./errors.js";
 
-export * from "./define-job.js";
+import type { Taskora } from "./types.js";
 
-export function initJobify(connection: ConnectionOptions) {
-	return (...args: Shift<ConstructorParameters<typeof Job>>) => {
-		return new Job(connection, ...args);
-	};
+export interface TaskoraOptions {
+  backend: Taskora.Adapter;
+  defaults?: {
+    retry?: { max?: number; backoff?: "exponential" | "linear" | "fixed" };
+    timeout?: number;
+  };
+}
+
+export function taskora(_options: TaskoraOptions) {
+  return {
+    task: (_name: string, _handler: unknown) => {
+      throw new Error("Not implemented: task registration comes in Phase 1");
+    },
+    start: async () => {
+      throw new Error("Not implemented: worker start comes in Phase 1");
+    },
+    close: async () => {
+      throw new Error("Not implemented: graceful shutdown comes in Phase 1");
+    },
+  };
 }

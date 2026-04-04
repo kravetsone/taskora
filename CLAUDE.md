@@ -17,8 +17,8 @@ Task queue library for Node.js. TypeScript-first, Celery-inspired, BullMQ replac
 - **Lint/format**: Biome — 2 spaces, double quotes, organize imports, `noExplicitAny: off`
 - **Test framework**: Vitest (pool: forks, singleFork: true)
 - **Test infra**: `@testcontainers/redis` — no docker-compose, no local Redis needed
-- **Test runner**: Node.js (not Bun) — `npx vitest` in CI and locally
-- **CI**: GitHub Actions — ubuntu-latest, setup-node, Docker (testcontainers auto-pulls redis:7-alpine)
+- **Package manager**: Bun
+- **CI**: GitHub Actions — ubuntu-latest, setup-bun + setup-node, Docker (testcontainers auto-pulls redis:7-alpine)
 - **Redis client**: ioredis (peer dep of `taskora/redis`)
 - **Redis version**: 7.0+
 - **Schema validation**: `@standard-schema/spec` (peer dep, types only)
@@ -68,11 +68,11 @@ src/
 ## Commands
 
 ```bash
-npm install              # install deps
-npm run build            # pkgroll build
-npm test                 # vitest (needs Docker for integration tests)
-npm run lint             # biome check
-npm run format           # biome format --write
+bun install              # install deps
+bun run build            # pkgroll build
+bun test                 # vitest (needs Docker for integration tests)
+bun run lint             # biome check
+bun run format           # biome format --write
 ```
 
 ## Implementation phases

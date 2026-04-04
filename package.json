@@ -1,37 +1,47 @@
 {
-	"name": "jobify",
-	"main": "./dist/index.cjs",
-	"types": "./dist/index.d.ts",
-	"module": "./dist/index.js",
-	"exports": {
-		".": {
-			"types": "./dist/index.d.ts",
-			"import": "./dist/index.js",
-			"require": "./dist/index.cjs"
-		},
-		"./bullmq": {
-			"types": "./dist/bullmq-export.d.ts",
-			"import": "./dist/bullmq-export.js",
-			"require": "./dist/bullmq-export.cjs"
-		}
-	},
-	"description": "Right way to work with jobs",
-	"keywords": ["jobs", "queue", "bullmq", "bull", "pg-boss"],
-	"version": "0.1.6",
-	"type": "module",
-	"devDependencies": {
-		"@biomejs/biome": "^1.9.4",
-		"@types/bun": "latest",
-		"ioredis": "^5.4.1",
-		"pkgroll": "^2.5.1",
-		"typescript": "^5.7.2",
-		"bullmq": "^5.31.1"
-	},
-	"peerDependencies": {
-		"bullmq": "^5.25.6"
-	},
-	"scripts": {
-		"prepublishOnly": "bun test && bunx pkgroll && bunx publint"
-	},
-	"files": ["dist"]
+  "name": "taskora",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Task queue for Node.js. TypeScript-first, Celery-inspired, batteries-included.",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./redis": {
+      "types": "./dist/redis/index.d.mts",
+      "import": "./dist/redis/index.mjs",
+      "require": "./dist/redis/index.cjs"
+    }
+  },
+  "peerDependencies": {
+    "ioredis": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@testcontainers/redis": "^10.18.0",
+    "@types/node": "^22.0.0",
+    "ioredis": "^5.4.1",
+    "pkgroll": "^2.5.1",
+    "typescript": "^5.7.2",
+    "vitest": "^3.1.1"
+  },
+  "scripts": {
+    "build": "pkgroll",
+    "test": "vitest",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "keywords": ["task", "queue", "job", "worker", "redis", "typescript", "celery"],
+  "license": "MIT",
+  "files": ["dist"]
 }
