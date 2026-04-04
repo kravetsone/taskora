@@ -77,7 +77,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Currently on **Phase 1: Core Engine (MVP)** — completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 2: Schema Validation + Type Inference**.
+Phases 1–3 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 4: Retries**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -90,3 +90,15 @@ Phase 1 delivered:
 - Property name: `adapter` (not `backend`) — consistent with `Taskora.Adapter` / `redisAdapter()`
 - Key prefix optional, omitted by default: `taskora:{task}:key`
 - 13 integration tests (lifecycle, delayed, concurrency, shutdown, bulk, connection modes)
+
+Phase 3 delivered:
+- `ResultHandle<TOutput>` — thenable class returned synchronously from `dispatch()`
+- `dispatch()` is sync: returns handle immediately with UUID v4 id
+- `await handle` = ensure enqueued (resolves to id string, backward compatible)
+- `handle.result` / `handle.waitFor(ms)` = poll for job completion with exponential backoff (50ms→500ms)
+- `handle.getState()` = query adapter for current `JobState | null`
+- Adapter additions: `getState()`, `getResult()`, `getError()` — plain reads, no Lua
+- Job IDs: switched from INCR integers to client-side UUID v4 (`crypto.randomUUID()`)
+- `JobFailedError`, `TimeoutError` error classes in `errors.ts`
+- `enqueue` signature changed: adapter receives `jobId` from client
+- 10 new integration tests (36 total)
