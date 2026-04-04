@@ -1,3 +1,4 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { json } from "./serializer.js";
 import { Task } from "./task.js";
 import type { Taskora } from "./types.js";
@@ -13,10 +14,27 @@ export interface TaskoraOptions {
   };
 }
 
-interface TaskOptionsObj<TInput, TOutput> {
-  handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+interface TaskOptionsBase {
   concurrency?: number;
   timeout?: number;
+}
+
+interface TaskOptionsWithSchema<TInput, TOutput> extends TaskOptionsBase {
+  input: StandardSchemaV1<unknown, TInput>;
+  output?: StandardSchemaV1<unknown, TOutput>;
+  handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+}
+
+interface TaskOptionsWithOutputSchema<TInput, TOutput> extends TaskOptionsBase {
+  input?: undefined;
+  output: StandardSchemaV1<unknown, TOutput>;
+  handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+}
+
+interface TaskOptionsNoSchema<TInput, TOutput> extends TaskOptionsBase {
+  input?: undefined;
+  output?: undefined;
+  handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
 }
 
 export class App {
@@ -41,13 +59,25 @@ export class App {
   ): Task<TInput, TOutput>;
   task<TInput, TOutput>(
     name: string,
-    options: TaskOptionsObj<TInput, TOutput>,
+    options: TaskOptionsWithSchema<TInput, TOutput>,
+  ): Task<TInput, TOutput>;
+  task<TInput, TOutput>(
+    name: string,
+    options: TaskOptionsWithOutputSchema<TInput, TOutput>,
+  ): Task<TInput, TOutput>;
+  task<TInput, TOutput>(
+    name: string,
+    options: TaskOptionsNoSchema<TInput, TOutput>,
   ): Task<TInput, TOutput>;
   task<TInput, TOutput>(
     name: string,
     handlerOrOptions:
       | ((data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput)
-      | TaskOptionsObj<TInput, TOutput>,
+      | (TaskOptionsBase & {
+          input?: StandardSchemaV1<unknown, TInput>;
+          output?: StandardSchemaV1<unknown, TOutput>;
+          handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+        }),
   ): Task<TInput, TOutput> {
     if (this.tasks.has(name)) {
       throw new Error(`Task "${name}" is already registered`);
@@ -69,6 +99,7 @@ export class App {
       name,
       handler,
       { concurrency, timeout },
+      !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
     );
 
     this.tasks.set(name, task as Task<unknown, unknown>);

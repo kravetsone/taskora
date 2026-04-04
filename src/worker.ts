@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createContext } from "./context.js";
+import { validateSchema } from "./schema.js";
 import type { Task } from "./task.js";
 import type { Taskora } from "./types.js";
 
@@ -126,6 +127,9 @@ export class Worker {
         });
 
         handlerResult = await this.task.handler(data, ctx);
+        if (this.task.outputSchema) {
+          handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
+        }
       } catch (err) {
         // Handler failed — mark job as failed
         const errorMsg = err instanceof Error ? err.message : String(err);
