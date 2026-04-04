@@ -4,9 +4,10 @@
 
 - **Runtime**: Node.js 20+ (also targeting Bun/Deno)
 - **Language**: TypeScript 5.x (strict mode)
-- **Redis client**: ioredis
+- **Redis client**: ioredis (peer dep of `taskora/redis`)
 - **Redis version**: 7.0+ (for LMPOP, advanced Lua, etc.)
 - **Test framework**: Vitest
+- **Test infra**: `@testcontainers/redis` (Docker-based Redis for e2e)
 - **Build**: pkgroll (already used in jobify)
 - **Lint/Format**: Biome
 - **Schema**: `@standard-schema/spec` (peer dep, types only)
@@ -35,25 +36,26 @@ taskora:<prefix>:schedules:next         — Sorted Set: next run times
 
 ```
 src/
-├── index.ts                  — public API re-exports
-├── app.ts                    — createApp(), App class
+├── index.ts                  — public API: taskora(), Task, types (zero DB deps)
+├── app.ts                    — taskora() factory, App class
 ├── task.ts                   — Task class, task definition
 ├── worker.ts                 — Worker loop, job processing
-├── context.ts                — TaskContext (ctx in handlers)
+├── context.ts                — Taskora.Context (ctx in handlers)
 ├── result.ts                 — ResultHandle (thenable)
 ├── schema.ts                 — Standard Schema integration + migrations
-├── types.ts                  — shared TypeScript types
+├── types.ts                  — Taskora namespace (Adapter, JobState, JobOptions, ...)
 ├── errors.ts                 — error classes
 │
-├── backend/
-│   ├── interface.ts          — Backend abstract interface
-│   ├── redis.ts              — Redis backend implementation
-│   └── lua/                  — Lua scripts (loaded at startup)
+├── redis/                    — "taskora/redis" entrypoint
+│   ├── index.ts              — redis() adapter factory
+│   ├── backend.ts            — Taskora.Adapter implementation using ioredis
+│   └── lua/                  — Lua scripts (loaded at connect)
 │       ├── enqueue.lua
 │       ├── enqueueDelayed.lua
 │       ├── dequeue.lua       — promote delayed + RPOPLPUSH + set lock
-│       ├── ack.lua           — complete job: verify lock, move to completed, emit event
-│       ├── fail.lua          — fail job: verify lock, retry or move to failed
+│       ├── ack.lua           — verify lock, move to completed, emit event
+│       ├── fail.lua          — verify lock, retry or move to failed
+│       ├── nack.lua          — return job to wait queue (future version)
 │       ├── extendLock.lua
 │       ├── stalledCheck.lua  — two-phase stall detection
 │       └── promoteDelayed.lua
@@ -75,25 +77,26 @@ src/
     └── chord.ts
 
 tests/
+├── setup.ts                  — global: start RedisContainer, export connection
 ├── helpers/
-│   ├── redis.ts              — test Redis connection, cleanup between tests
-│   └── wait.ts               — waitFor helpers
+│   ├── containers.ts         — testcontainers setup/teardown
+│   └── wait.ts               — waitFor / waitUntil helpers
 ├── unit/
 │   ├── schema.test.ts        — validation, migration chain, version resolution
 │   ├── cron.test.ts          — cron expression parsing
 │   ├── retry.test.ts         — backoff calculation, jitter
 │   ├── middleware.test.ts    — compose, ordering, error propagation
-│   └── result.test.ts       — thenable behavior
+│   └── result.test.ts        — thenable behavior
 └── integration/
-    ├── lifecycle.test.ts     — enqueue → process → complete full cycle
-    ├── delayed.test.ts       — delayed jobs promote correctly
-    ├── retry.test.ts         — retry behavior end-to-end
-    ├── stalled.test.ts       — stall detection + recovery
-    ├── events.test.ts        — event delivery
-    ├── scheduler.test.ts     — cron + interval execution
-    ├── inspector.test.ts     — state queries
-    ├── migration.test.ts     — versioned jobs processed correctly
-    └── concurrency.test.ts   — multiple workers, no double-processing
+    ├── lifecycle.test.ts      — enqueue → process → complete full cycle
+    ├── delayed.test.ts        — delayed jobs promote correctly
+    ├── retry.test.ts          — retry behavior end-to-end
+    ├── stalled.test.ts        — stall detection + recovery
+    ├── events.test.ts         — event delivery
+    ├── scheduler.test.ts      — cron + interval execution
+    ├── inspector.test.ts      — state queries
+    ├── migration.test.ts      — versioned jobs processed correctly
+    └── concurrency.test.ts    — multiple workers, no double-processing
 ```
 
 ---
@@ -102,22 +105,56 @@ tests/
 
 ### Phase 0: Project Skeleton
 
-**Goal**: Buildable, testable, empty project with Redis connectivity.
+**Goal**: Buildable, testable, empty project with Redis in Docker.
 
 **Tasks**:
 - [ ] Init new package (or reset jobify repo)
-- [ ] `package.json` with deps: `ioredis`, dev deps: `vitest`, `typescript`, `pkgroll`, `@biomejs/biome`
+- [ ] `package.json`:
+  - deps: (none — core has zero deps)
+  - peer deps: `ioredis` (for `taskora/redis`)
+  - dev deps: `vitest`, `typescript`, `pkgroll`, `@biomejs/biome`, `@testcontainers/redis`, `ioredis`
 - [ ] `tsconfig.json` (strict, ESM, NodeNext)
 - [ ] `biome.json`
-- [ ] `src/index.ts` — empty export
-- [ ] `src/types.ts` — core type definitions (JobState, JobOptions, TaskOptions, BackendInterface)
+- [ ] Multi-entrypoint build setup (see below)
+- [ ] `src/index.ts` — `taskora()` factory export, types
+- [ ] `src/redis/index.ts` — `redisAdapter()` export
+- [ ] `src/types.ts` — `Taskora` namespace (Adapter, JobState, JobOptions, Context, ...)
 - [ ] `src/errors.ts` — error classes (TaskoraError, ValidationError, RetryError, StalledError)
-- [ ] Test helper: connect to Redis, `flushdb` between tests
-- [ ] CI: GitHub Actions running tests against Redis 7
+- [ ] Test infra: testcontainers setup (see Testing section)
+- [ ] CI: GitHub Actions with Docker (testcontainers handles Redis)
 
-**Testable**: `vitest` runs, connects to Redis, passes a smoke test.
+**Testable**: `vitest` runs, spins up Redis in Docker, passes a smoke test.
 
 **Ship**: Nothing. Internal only.
+
+#### Multi-entrypoint package.json
+
+```jsonc
+{
+  "name": "taskora",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./redis": {
+      "import": "./dist/redis/index.mjs",
+      "require": "./dist/redis/index.cjs",
+      "types": "./dist/redis/index.d.ts"
+    }
+  },
+  "peerDependencies": {
+    "ioredis": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": { "optional": true }
+  }
+}
+```
+
+`ioredis` is optional at the package level — only required if you use `taskora/redis`. TypeScript will error at import time if missing.
 
 ---
 
@@ -127,12 +164,14 @@ tests/
 
 **Tasks**:
 
-1. **Backend interface** (`src/backend/interface.ts`)
-   - [ ] Define `Backend` interface with core methods
+1. **Adapter interface** (`src/types.ts`)
+   - [ ] Define `Taskora.Adapter` interface with core methods
    - [ ] `enqueue(task, data, options) → jobId`
    - [ ] `dequeue(task) → RawJob | null`
    - [ ] `ack(jobId, result) → void`
    - [ ] `fail(jobId, error) → void`
+   - [ ] `nack(jobId) → void` (return to queue — future version jobs)
+   - [ ] `reject(jobId, reason) → void` (expired migration)
    - [ ] `connect() / disconnect()`
 
 2. **Lua scripts** (the hard part)
@@ -140,14 +179,16 @@ tests/
    - [ ] `dequeue.lua` — RPOPLPUSH wait→active + SET lock with PX + HSET processedOn
    - [ ] `ack.lua` — verify lock token + LREM from active + ZADD to completed + HSET result + XADD event
    - [ ] `fail.lua` — verify lock token + LREM from active + ZADD to failed + HSET error + XADD event
+   - [ ] `nack.lua` — verify lock + LREM from active + RPUSH back to wait
 
-3. **Redis backend** (`src/backend/redis.ts`)
+3. **Redis adapter** (`src/redis/`)
+   - [ ] `index.ts` — `redisAdapter()` factory
+   - [ ] `backend.ts` — `Taskora.Adapter` implementation
    - [ ] Load Lua scripts on connect (SCRIPT LOAD or inline EVAL)
-   - [ ] Connection management (accept string URL, options object, or IORedis instance)
-   - [ ] Implement Backend interface using Lua scripts
+   - [ ] Connection: accept string URL, options object, or IORedis instance
 
 4. **App** (`src/app.ts`)
-   - [ ] `createApp(options)` factory
+   - [ ] `taskora(options)` factory
    - [ ] Task registry (Map of name → TaskDefinition)
    - [ ] `app.task(name, handler)` — minimal form (name + function)
    - [ ] `app.task(name, options)` — options form (with handler in options)
@@ -219,7 +260,7 @@ tests/
 - [ ] `handle.getState()` — query Redis for current state
 - [ ] `handle.waitFor(timeout)` — poll or subscribe until done
 - [ ] `handle.onProgress(callback)` — subscribe to progress events
-- [ ] Backend: `getState(jobId)`, `getResult(jobId)`, `subscribe(jobId, event)`
+- [ ] Adapter: `getState(jobId)`, `getResult(jobId)`, `subscribe(jobId, event)`
 - [ ] Redis: subscribe to Stream events filtered by jobId
 
 **Tests**:
@@ -260,7 +301,7 @@ tests/
 **Goal**: Full `ctx` object in handlers with progress, logging, heartbeat, abort signal.
 
 **Tasks**:
-- [ ] `src/context.ts` — `TaskContext` class
+- [ ] `src/context.ts` — `Taskora.Context` class
 - [ ] `ctx.id`, `ctx.attempt`, `ctx.timestamp` — from job hash
 - [ ] `ctx.signal` — `AbortSignal` from `AbortController`, abort on shutdown
 - [ ] `ctx.progress(value)` — HSET progress on job + XADD progress event
@@ -431,6 +472,117 @@ tests/
 
 ---
 
+## Testing Infrastructure
+
+### Approach: `@testcontainers/redis`
+
+No local Redis install required. Docker spins up a fresh Redis for each test run, tears it down after. Works identically on dev machines and CI.
+
+```bash
+# dev deps
+npm install -D @testcontainers/redis vitest
+```
+
+### Global setup (`tests/setup.ts`)
+
+Start one Redis container for the entire test suite. Vitest `globalSetup` hook — container starts before any test file, stops after all tests.
+
+```typescript
+// tests/setup.ts
+import { RedisContainer } from "@testcontainers/redis"
+
+let container: Awaited<ReturnType<RedisContainer["start"]>>
+
+export async function setup() {
+  container = await new RedisContainer("redis:7-alpine").start()
+  // Expose connection URL to all test files via env var
+  process.env.REDIS_URL = container.getConnectionUrl()
+}
+
+export async function teardown() {
+  await container.stop()
+}
+```
+
+### Per-test isolation (`tests/helpers/containers.ts`)
+
+Each test file gets a clean DB via `SELECT` + `FLUSHDB`. No cross-test pollution.
+
+```typescript
+// tests/helpers/containers.ts
+import { redisAdapter } from "../../src/redis"
+import type { Taskora } from "../../src/types"
+
+export async function createTestAdapter(): Promise<Taskora.Adapter> {
+  const adapter = redisAdapter(process.env.REDIS_URL!)
+  await adapter.connect()
+  return adapter
+}
+
+export async function cleanRedis(adapter: Taskora.Adapter) {
+  // FLUSHDB between tests — testcontainers Redis is ephemeral anyway
+  await adapter._raw().flushdb() // _raw() exposes ioredis for testing
+}
+```
+
+### Vitest config
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config"
+
+export default defineConfig({
+  test: {
+    globalSetup: ["tests/setup.ts"],
+    testTimeout: 30_000,   // integration tests need time
+    hookTimeout: 60_000,   // container startup can be slow first time
+    pool: "forks",         // separate processes for isolation
+    poolOptions: {
+      forks: { singleFork: true }, // share container across test files
+    },
+  },
+})
+```
+
+### CI: GitHub Actions
+
+Testcontainers needs Docker. GitHub Actions has it out of the box.
+
+```yaml
+# .github/workflows/test.yml
+name: Tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2  # or setup-node
+      - run: bun install
+      - run: bun test
+      # Docker is pre-installed on ubuntu-latest
+      # testcontainers pulls redis:7-alpine automatically
+```
+
+No `services:` block needed. No manual Redis setup. Testcontainers handles everything.
+
+### Test categories
+
+| Category | Runs against | Speed | Example |
+|---|---|---|---|
+| **Unit** | No Redis | <1s per file | Backoff math, cron parsing, middleware compose |
+| **Integration** | Testcontainers Redis | 1-5s per file | Full job lifecycle, retries, events |
+| **Type** | TypeScript compiler | <5s total | `expect-type` checks for inference |
+
+```bash
+bun test              # all tests
+bun test unit         # fast, no Docker needed
+bun test integration  # needs Docker
+```
+
+---
+
 ## Milestones
 
 ### Alpha (Phases 0–4)
@@ -438,7 +590,12 @@ tests/
 Core engine + schema + results + retries. Enough to replace BullMQ for simple use cases.
 
 ```typescript
-const app = createApp({ connection: "redis://localhost:6379" })
+import { taskora } from "taskora"
+import { redisAdapter } from "taskora/redis"
+
+const app = taskora({
+  backend: redisAdapter("redis://localhost:6379"),
+})
 
 const sendEmail = app.task("send-email", {
   input: z.object({ to: z.string(), subject: z.string() }),

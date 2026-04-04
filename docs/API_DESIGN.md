@@ -13,14 +13,17 @@
 
 ## 1. App
 
-One entry point. One connection config. Done.
+One entry point. Backend is an explicit adapter — no magic `connection` strings.
 
 ```typescript
-import { createApp } from "taskora"
+import { taskora } from "taskora"
+import { redisAdapter } from "taskora/redis"
+// future: import { postgres } from "taskora/postgres"
 
-const app = createApp({
-  // String URL, options object, or IORedis instance
-  connection: "redis://localhost:6379",
+const app = taskora({
+  backend: redisAdapter("redis://localhost:6379"),
+  // or: redisAdapter({ host: "localhost", port: 6379 })
+  // or: redisAdapter(existingIORedisInstance)
 
   // Defaults inherited by every task (overridable per-task)
   defaults: {
@@ -28,6 +31,48 @@ const app = createApp({
     timeout: 30_000,
   },
 })
+```
+
+### Backend as abstract adapter
+
+Each backend is a separate entrypoint — the core `taskora` package never imports `ioredis` or `pg` directly:
+
+```
+taskora          — core engine, types, task API (no DB deps)
+taskora/redis    — Redis adapter (depends on ioredis)
+taskora/postgres — PostgreSQL adapter (future, depends on pg)
+```
+
+```typescript
+// taskora/redis exports:
+import type { Taskora } from "taskora"
+
+export function redisAdapter(
+  connection: string | RedisOptions | IORedis,
+): Taskora.Adapter
+```
+
+This means:
+- `ioredis` is a **peer dependency** of `taskora`, not a direct dep
+- Users only install what they use
+- CJS and ESM both work via `exports` map in `package.json`
+
+```jsonc
+// package.json exports
+{
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./redis": {
+      "import": "./dist/redis.mjs",
+      "require": "./dist/redis.cjs",
+      "types": "./dist/redis.d.ts"
+    }
+  }
+}
 ```
 
 ---
@@ -90,11 +135,15 @@ const createUser = app.task("create-user", {
 
 ```typescript
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import type { Taskora } from "taskora"
 
-interface TaskOptions<TInput, TOutput> {
-  input?: StandardSchemaV1<TInput>
-  output?: StandardSchemaV1<TOutput>
-  handler: (data: TInput, ctx: TaskContext) => Promise<TOutput> | TOutput
+// All public types live under the Taskora namespace
+namespace Taskora {
+  interface TaskOptions<TInput, TOutput> {
+    input?: StandardSchemaV1<TInput>
+    output?: StandardSchemaV1<TOutput>
+    handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput
+  }
 }
 ```
 
@@ -394,27 +443,29 @@ const status = await app.inspect().migrations("send-email")
 ```typescript
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 
-type InferInput<S> = S extends StandardSchemaV1<infer I> ? I : never
+export namespace Taskora {
+  export type InferInput<S> = S extends StandardSchemaV1<infer I> ? I : never
 
-interface TaskOptions<
-  TInput,
-  TOutput,
-  TSchema extends StandardSchemaV1<TInput> = StandardSchemaV1<TInput>,
-> {
-  input?: TSchema
-  output?: StandardSchemaV1<TOutput>
+  export interface TaskOptions<
+    TInput,
+    TOutput,
+    TSchema extends StandardSchemaV1<TInput> = StandardSchemaV1<TInput>,
+  > {
+    input?: TSchema
+    output?: StandardSchemaV1<TOutput>
 
-  since?: number  // default: 1
-  version?: number // required for record migrate or no-migrate mode
+    since?: number  // default: 1
+    version?: number // required for record migrate or no-migrate mode
 
-  // Two forms:
-  // Tuple — strict, last element typed, version derived
-  // Record — sparse, only breaking changes, version explicit
-  migrate?:
-    | readonly [...((data: unknown) => unknown)[], (data: unknown) => TInput]
-    | Record<number, (data: unknown) => unknown>
+    // Two forms:
+    // Tuple — strict, last element typed, version derived
+    // Record — sparse, only breaking changes, version explicit
+    migrate?:
+      | readonly [...((data: unknown) => unknown)[], (data: unknown) => TInput]
+      | Record<number, (data: unknown) => unknown>
 
-  handler: (data: TInput, ctx: TaskContext) => Promise<TOutput> | TOutput
+    handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput
+  }
 }
 ```
 
@@ -821,8 +872,8 @@ await sendEmail.dispatch(
 ### Dead letter queue
 
 ```typescript
-const app = createApp({
-  connection: "redis://localhost:6379",
+const app = taskora({
+  backend: redisAdapter("redis://localhost:6379"),
   deadLetterQueue: {
     enabled: true,
     maxAge: "7d",
@@ -854,69 +905,137 @@ await app.close({ timeout: 30_000 })
 ## 12. Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    User Code                         │
-│   app.task() / .dispatch() / .schedule() / ...       │
-├─────────────────────────────────────────────────────┤
-│                  Core Engine                         │
-│   ┌───────────┐  ┌──────────┐  ┌────────────────┐   │
-│   │ Scheduler │  │ Executor │  │   Workflow      │   │
-│   │ (cron)    │  │ (worker) │  │ (chain/group)   │   │
-│   └─────┬─────┘  └────┬─────┘  └───────┬────────┘   │
-│         │             │                │             │
-│   ┌─────┴─────────────┴────────────────┴──────────┐  │
-│   │             Backend Interface                  │  │
-│   │   enqueue() dequeue() ack() schedule()         │  │
-│   │   getState() getResult() subscribe()           │  │
-│   └──────────────────┬─────────────────────────────┘  │
-├──────────────────────┼───────────────────────────────┤
-│   ┌──────────────────┴─────────────────────────────┐  │
-│   │         Redis Backend (default)                 │  │
-│   │   ioredis + Lua scripts for atomicity           │  │
-│   └─────────────────────────────────────────────────┘  │
-│   ┌─────────────────────────────────────────────────┐  │
-│   │         PostgreSQL Backend (future)              │  │
-│   │   SKIP LOCKED for reliable dequeue               │  │
-│   └─────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                     User Code                         │
+│  import { taskora } from "taskora"                    │
+│  import { redisAdapter } from "taskora/redis"                │
+│  const app = taskora({ backend: redisAdapter("...") }) │
+├──────────────────────────────────────────────────────┤
+│                   Core Engine                         │
+│  taskora                                              │
+│  ┌───────────┐  ┌──────────┐  ┌────────────────┐     │
+│  │ Scheduler │  │ Executor │  │   Workflow      │     │
+│  │ (cron)    │  │ (worker) │  │ (chain/group)   │     │
+│  └─────┬─────┘  └────┬─────┘  └───────┬────────┘     │
+│        │             │                │               │
+│  ┌─────┴─────────────┴────────────────┴────────────┐  │
+│  │           Taskora.Adapter interface              │  │
+│  │  enqueue() dequeue() ack() schedule()            │  │
+│  │  getState() getResult() subscribe()              │  │
+│  └──────────────────┬──────────────────────────────┘  │
+├─────────────────────┼────────────────────────────────┤
+│  ┌──────────────────┴──────────────────────────────┐  │
+│  │  taskora/redis          taskora/postgres         │  │
+│  │  ioredis + Lua          pg + SKIP LOCKED         │  │
+│  │  scripts                (future)                 │  │
+│  └─────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
 ```
 
-### Backend interface (abstract adapter)
+### Package structure
+
+```
+taskora              — core engine, types, task API (zero DB dependencies)
+taskora/redis        — Redis adapter (peer dep: ioredis)
+taskora/postgres     — PostgreSQL adapter (future, peer dep: pg)
+```
+
+Each adapter is a separate entrypoint. The core never imports `ioredis` or `pg` directly. Users install only what they need.
+
+### Adapter interface
 
 ```typescript
-interface Backend {
-  // Job lifecycle
-  enqueue(task: string, data: unknown, options: JobOptions): Promise<string>
-  enqueueBulk(jobs: EnqueueJob[]): Promise<string[]>
-  dequeue(task: string, count: number): Promise<RawJob[]>
-  ack(jobId: string, result: unknown): Promise<void>
-  fail(jobId: string, error: Error, retry?: RetryInfo): Promise<void>
-  heartbeat(jobId: string, ttl: number): Promise<void>
+// Exported from "taskora" under the Taskora namespace
+export namespace Taskora {
+  export interface Adapter {
+    // Job lifecycle
+    enqueue(task: string, data: unknown, options: Taskora.JobOptions): Promise<string>
+    enqueueBulk(jobs: Taskora.EnqueueJob[]): Promise<string[]>
+    dequeue(task: string, count: number): Promise<Taskora.RawJob[]>
+    ack(jobId: string, result: unknown): Promise<void>
+    fail(jobId: string, error: Error, retry?: Taskora.RetryInfo): Promise<void>
+    nack(jobId: string): Promise<void>
+    reject(jobId: string, reason: Taskora.RejectReason): Promise<void>
+    heartbeat(jobId: string, ttl: number): Promise<void>
 
-  // State
-  getJob(jobId: string): Promise<RawJob | null>
-  getState(jobId: string): Promise<JobState>
-  getResult(jobId: string): Promise<unknown>
-  listJobs(filter: JobFilter): Promise<RawJob[]>
-  getStats(task?: string): Promise<Stats>
+    // State
+    getJob(jobId: string): Promise<Taskora.RawJob | null>
+    getState(jobId: string): Promise<Taskora.JobState>
+    getResult(jobId: string): Promise<unknown>
+    listJobs(filter: Taskora.JobFilter): Promise<Taskora.RawJob[]>
+    getStats(task?: string): Promise<Taskora.Stats>
 
-  // Scheduling
-  addSchedule(name: string, config: ScheduleConfig): Promise<void>
-  removeSchedule(name: string): Promise<void>
-  listSchedules(): Promise<ScheduleInfo[]>
-  getDueSchedules(now: number): Promise<ScheduleInfo[]>
+    // Scheduling
+    addSchedule(name: string, config: Taskora.ScheduleConfig): Promise<void>
+    removeSchedule(name: string): Promise<void>
+    listSchedules(): Promise<Taskora.ScheduleInfo[]>
+    getDueSchedules(now: number): Promise<Taskora.ScheduleInfo[]>
 
-  // Events
-  subscribe(pattern: string, handler: EventHandler): Promise<Unsubscribe>
-  publish(event: string, payload: unknown): Promise<void>
+    // Events
+    subscribe(pattern: string, handler: Taskora.EventHandler): Promise<Taskora.Unsubscribe>
+    publish(event: string, payload: unknown): Promise<void>
 
-  // Lifecycle
-  connect(): Promise<void>
-  disconnect(): Promise<void>
+    // Lifecycle
+    connect(): Promise<void>
+    disconnect(): Promise<void>
+  }
 }
 ```
 
-Any backend that implements this interface works. Redis is first. PostgreSQL is next. Custom backends are possible.
+```typescript
+// taskora/redis — adapter factory
+import type { Taskora } from "taskora"
+import type { Redis, RedisOptions } from "ioredis"
+
+export function redisAdapter(
+  connection: string | RedisOptions | Redis,
+  options?: { prefix?: string },
+): Taskora.Adapter
+```
+
+### `Taskora` namespace overview
+
+All public types live under one namespace — no collisions with user code:
+
+```typescript
+import { taskora, type Taskora } from "taskora"
+
+namespace Taskora {
+  // Core
+  interface Adapter { ... }             // what adapters implement
+  interface Context { ... }             // ctx in handlers
+  interface TaskOptions<I, O> { ... }   // app.task() options
+
+  // Jobs
+  interface JobOptions { ... }          // dispatch options (delay, priority, deduplicate)
+  interface RawJob { ... }              // internal job representation
+  type JobState = "waiting" | "delayed" | "active" | "completed" | "failed" | "retrying"
+
+  // Schema
+  type InferInput<S> = ...              // extract input type from schema
+  type InferOutput<S> = ...             // extract output type from schema
+
+  // Scheduling
+  interface ScheduleConfig { ... }
+  interface ScheduleInfo { ... }
+
+  // Events
+  interface EventHandler { ... }
+  type Unsubscribe = () => void
+
+  // Inspection
+  interface Stats { ... }
+  interface JobFilter { ... }
+  interface MigrationStatus { ... }
+
+  // Errors
+  interface RejectReason { ... }
+  interface RetryInfo { ... }
+}
+```
+
+Adapter authors: `import type { Taskora } from "taskora"` — one import, full access.
+App developers: types are inferred, namespace rarely needed directly.
 
 ---
 
@@ -936,8 +1055,8 @@ Any backend that implements this interface works. Redis is first. PostgreSQL is 
 | Middleware | None | Signals (limited) | Koa-style composable |
 | Monitoring | QueueEvents (jobId only) | Flower + events | Inspector API + typed events + job logs |
 | Task context | Raw `Job` object | `self.request` | Typed `ctx` with progress/retry/signal |
-| Connection setup | Per-instance, different rules | App-level | App-level, one config |
-| Backend | Redis only | Multiple brokers | Abstract adapter (Redis, Postgres, ...) |
+| Connection setup | Per-instance, different rules | App-level | `taskora/redis` adapter — explicit, typed |
+| Backend | Redis only | Multiple brokers | Abstract adapter: `taskora/redis`, `taskora/postgres`, ... |
 | Dead letter queue | Manual | Built-in | Built-in with retry API |
 | Schema versioning | None | None | Built-in migrations with type-safe chain |
 | Migration pruning | N/A | N/A | `since` + inspector to check safety |
