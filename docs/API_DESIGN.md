@@ -902,7 +902,79 @@ await app.close({ timeout: 30_000 })
 
 ---
 
-## 12. Architecture
+## 12. Serialization
+
+### Pluggable serializer
+
+Default is JSON (zero deps, debuggable in Redis CLI). Swap to MessagePack/CBOR for smaller payloads and faster parsing.
+
+```typescript
+import { taskora } from "taskora"
+import { redisAdapter } from "taskora/redis"
+import { msgpack } from "taskora/serializers/msgpack"
+
+const app = taskora({
+  backend: redisAdapter("redis://localhost:6379"),
+  serializer: msgpack(), // default: json()
+})
+
+// Or per-task for heavy payloads:
+const processImages = app.task("process-images", {
+  serializer: msgpack(),
+  handler: async (data) => { /* ... */ },
+})
+```
+
+### Serializer interface
+
+```typescript
+export namespace Taskora {
+  export interface Serializer {
+    serialize(value: unknown): string | Buffer
+    deserialize(raw: string | Buffer): unknown
+  }
+}
+```
+
+### Built-in serializers
+
+```
+taskora                         — json() included, zero deps
+taskora/serializers/msgpack     — peer dep: @msgpack/msgpack
+taskora/serializers/cbor        — peer dep: cbor-x
+```
+
+| Serializer | Size vs JSON | Parse speed | Debuggable | Deps |
+|---|---|---|---|---|
+| `json()` | 1x (baseline) | 1x | yes (Redis CLI) | 0 |
+| `msgpack()` | **0.5-0.7x** | **1.5-2x faster** | no (binary) | @msgpack/msgpack |
+| `cbor()` | 0.5-0.7x | 1.3x faster | no (binary) | cbor-x |
+
+### Split storage for memory efficiency
+
+Job data is split across Redis keys to keep the metadata hash in **ziplist encoding** (3-4x less overhead than hashtable):
+
+```
+{taskora:app:send-email:42}           — Hash (ziplist, ~150B overhead)
+  "ts"       "1712345678901"             metadata stays small
+  "delay"    "5000"                      all values < 64 bytes
+  "priority" "1"                         → Redis uses ziplist encoding
+  "attempt"  "1"
+  "_v"       "3"
+
+{taskora:app:send-email:42}:data      — String: serialized input payload
+{taskora:app:send-email:42}:result    — String: serialized output (after complete)
+```
+
+The `{...}` hash tag ensures all keys for one job land in the same Redis Cluster slot.
+
+This costs +56 bytes per extra key but saves ~40% total memory vs storing everything in one hash (which forces hashtable encoding when any value exceeds 64 bytes).
+
+All reads/writes happen inside Lua scripts — accessing 3 keys costs the same as 1 (server-side, in-memory, zero extra RTT).
+
+---
+
+## 13. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────┐

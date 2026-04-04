@@ -14,23 +14,38 @@
 
 ## Redis Key Layout
 
+All keys for one job share a `{hash tag}` so they land in the same Redis Cluster slot.
+
 ```
-taskora:<prefix>:<task>:id              — String: auto-increment job counter
-taskora:<prefix>:<task>:meta            — Hash: task metadata (version, options)
-taskora:<prefix>:<task>:wait            — List: jobs waiting (FIFO)
-taskora:<prefix>:<task>:active          — List: jobs being processed
-taskora:<prefix>:<task>:delayed         — Sorted Set: delayed jobs (score = ts * 0x1000 + ord)
-taskora:<prefix>:<task>:prioritized     — Sorted Set: priority jobs (score = priority * 2^32 + counter)
-taskora:<prefix>:<task>:completed       — Sorted Set: done jobs (score = finishedOn)
-taskora:<prefix>:<task>:failed          — Sorted Set: failed jobs (score = finishedOn)
-taskora:<prefix>:<task>:stalled         — Set: candidate stalled job IDs
-taskora:<prefix>:<task>:stalled-check   — String (PX): stall detection throttle
-taskora:<prefix>:<task>:events          — Stream: event log (~10k cap)
-taskora:<prefix>:<task>:<jobId>         — Hash: job data, opts, state, result
-taskora:<prefix>:<task>:<jobId>:lock    — String (PX): per-job distributed lock
-taskora:<prefix>:schedules              — Hash: schedule definitions
-taskora:<prefix>:schedules:next         — Sorted Set: next run times
+Queue-level keys:
+  taskora:<pfx>:<task>:id               — String: auto-increment job counter
+  taskora:<pfx>:<task>:meta             — Hash: task metadata (version, options)
+  taskora:<pfx>:<task>:wait             — List: jobs waiting (FIFO)
+  taskora:<pfx>:<task>:active           — List: jobs being processed
+  taskora:<pfx>:<task>:delayed          — Sorted Set: delayed jobs (score = ts * 0x1000 + ord)
+  taskora:<pfx>:<task>:prioritized      — Sorted Set: priority jobs (score = priority * 2^32 + ctr)
+  taskora:<pfx>:<task>:completed        — Sorted Set: done jobs (score = finishedOn)
+  taskora:<pfx>:<task>:failed           — Sorted Set: failed jobs (score = finishedOn)
+  taskora:<pfx>:<task>:stalled          — Set: candidate stalled job IDs
+  taskora:<pfx>:<task>:stalled-check    — String (PX): stall detection throttle
+  taskora:<pfx>:<task>:events           — Stream: event log (~10k cap)
+
+Per-job keys (split storage for ziplist optimization):
+  {taskora:<pfx>:<task>:<jobId>}        — Hash (ziplist): metadata only
+                                            ts, delay, priority, attempt, _v, state
+                                            all values < 64 bytes → ziplist encoding
+  {taskora:<pfx>:<task>:<jobId>}:data   — String: serialized input (via Taskora.Serializer)
+  {taskora:<pfx>:<task>:<jobId>}:result — String: serialized output (after complete)
+  {taskora:<pfx>:<task>:<jobId>}:lock   — String (PX): per-job distributed lock
+  {taskora:<pfx>:<task>:<jobId>}:logs   — List: structured log entries from ctx.log
+
+Schedule keys:
+  taskora:<pfx>:schedules               — Hash: schedule definitions
+  taskora:<pfx>:schedules:next          — Sorted Set: next run times
+  taskora:<pfx>:schedules:lock          — String (PX): leader election lock
 ```
+
+**Why split storage:** Keeping serialized `data` and `result` out of the metadata hash ensures all hash values stay under 64 bytes. Redis uses ziplist encoding for such hashes — **3-4x less memory overhead** than hashtable encoding. In Lua scripts, accessing 3 keys costs the same as 1 (server-side, zero RTT).
 
 ## Source Layout
 
@@ -43,8 +58,13 @@ src/
 ├── context.ts                — Taskora.Context (ctx in handlers)
 ├── result.ts                 — ResultHandle (thenable)
 ├── schema.ts                 — Standard Schema integration + migrations
+├── serializer.ts             — Taskora.Serializer interface + json() default
 ├── types.ts                  — Taskora namespace (Adapter, JobState, JobOptions, ...)
 ├── errors.ts                 — error classes
+│
+├── serializers/              — optional serializer entrypoints
+│   ├── msgpack.ts            — "taskora/serializers/msgpack" (peer dep: @msgpack/msgpack)
+│   └── cbor.ts               — "taskora/serializers/cbor" (peer dep: cbor-x)
 │
 ├── redis/                    — "taskora/redis" entrypoint
 │   ├── index.ts              — redis() adapter factory
@@ -174,12 +194,12 @@ tests/
    - [ ] `reject(jobId, reason) → void` (expired migration)
    - [ ] `connect() / disconnect()`
 
-2. **Lua scripts** (the hard part)
-   - [ ] `enqueue.lua` — INCR id + HMSET job hash + LPUSH to wait + XADD event
-   - [ ] `dequeue.lua` — RPOPLPUSH wait→active + SET lock with PX + HSET processedOn
-   - [ ] `ack.lua` — verify lock token + LREM from active + ZADD to completed + HSET result + XADD event
-   - [ ] `fail.lua` — verify lock token + LREM from active + ZADD to failed + HSET error + XADD event
-   - [ ] `nack.lua` — verify lock + LREM from active + RPUSH back to wait
+2. **Lua scripts** (the hard part — all use split storage)
+   - [ ] `enqueue.lua` — INCR id + HMSET meta hash + SET :data key + LPUSH to wait + XADD event
+   - [ ] `dequeue.lua` — RPOPLPUSH wait→active + SET lock with PX + HSET processedOn + GET :data
+   - [ ] `ack.lua` — verify lock + LREM active + SET :result + ZADD completed + XADD event
+   - [ ] `fail.lua` — verify lock + LREM active + ZADD failed + HSET error + XADD event
+   - [ ] `nack.lua` — verify lock + LREM active + RPUSH back to wait
 
 3. **Redis adapter** (`src/redis/`)
    - [ ] `index.ts` — `redisAdapter()` factory
@@ -651,16 +671,19 @@ Workflows. The Celery Canvas killer feature, with TypeScript type safety.
 
 Every multi-step state transition MUST be a Lua script. No exceptions. If enqueue does `INCR` + `HMSET` + `LPUSH` as separate commands, a crash between them leaves orphan data.
 
-**Required Lua scripts** (minimum for Phase 1):
+**Required Lua scripts** (minimum for Phase 1, all use split storage):
 
-| Script | Operations | Why atomic |
-|--------|-----------|------------|
-| `enqueue` | INCR id + HMSET job + LPUSH wait + XADD event | No orphan job data |
-| `enqueueDelayed` | INCR id + HMSET job + ZADD delayed + XADD event | No orphan delayed entries |
-| `dequeue` | Promote delayed + RPOPLPUSH wait→active + SET lock + HSET processedOn | No double-processing |
-| `ack` | Verify lock + LREM active + ZADD completed + HSET result + XADD event | No lost completions |
-| `fail` | Verify lock + LREM active + (re-enqueue OR ZADD failed) + XADD event | No lost failures |
-| `extendLock` | GET lock (verify token) + SET PX + SREM stalled | Lock stays consistent |
+| Script | Keys touched | Operations | Why atomic |
+|--------|-------------|-----------|------------|
+| `enqueue` | meta hash, :data, wait list, events stream | INCR id + HMSET meta + SET :data + LPUSH wait + XADD | No orphan data |
+| `enqueueDelayed` | meta hash, :data, delayed zset, events stream | INCR id + HMSET meta + SET :data + ZADD delayed + XADD | No orphan delayed |
+| `dequeue` | wait list, active list, meta hash, :data, :lock | Promote delayed + RPOPLPUSH wait→active + SET lock PX + GET :data | No double-processing |
+| `ack` | :lock, active list, :result, completed zset, meta hash, events | Verify lock + LREM active + SET :result + ZADD completed + XADD | No lost completions |
+| `fail` | :lock, active list, failed zset, meta hash, events | Verify lock + LREM active + (re-enqueue OR ZADD failed) + XADD | No lost failures |
+| `nack` | :lock, active list, wait list | Verify lock + LREM active + RPUSH wait | Future jobs back to queue |
+| `extendLock` | :lock, stalled set | GET lock (verify token) + SET PX + SREM stalled | Lock stays consistent |
+
+All keys for one job share a `{hash tag}` — safe in Redis Cluster. Accessing multiple keys in one Lua script = zero extra RTT (server-side, in-memory).
 
 ### Delayed Job Promotion
 
