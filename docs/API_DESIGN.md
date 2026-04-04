@@ -102,6 +102,324 @@ When `input` is provided, `dispatch()` validates data through the schema's `~sta
 
 ---
 
+## 2.1. Schema Versioning & Migrations
+
+Schemas evolve. Jobs already in the queue don't. We need to handle the gap.
+
+### The problem
+
+1. Queue has 10k jobs with `{ to: string, subject: string }`
+2. You deploy new code: schema is now `{ to: string, subject: string, html: boolean }`
+3. Worker picks up old job → validation fails
+
+### Three levels of laziness
+
+| Situation | What you write |
+|---|---|
+| Added a field with `.default()` | `version: N` — schema handles it |
+| Breaking change among non-breaking ones | `version: N` + `migrate: { K: fn }` (sparse record) |
+| Want full type-safe migration chain | `migrate: [fn, fn, fn]` (tuple, version derived) |
+
+### Level 1: Just bump `version` (schema defaults do the work)
+
+When you add a field with `.default()`, the schema validation fills it in automatically. No migration function needed — just tell us the version changed:
+
+```typescript
+// v1 — started simple
+const sendEmail = app.task("send-email", {
+  input: z.object({
+    to: z.string(),
+    subject: z.string(),
+  }),
+  handler: async (data) => { /* ... */ },
+})
+
+// v2 — added a field with default. Just bump version.
+const sendEmail = app.task("send-email", {
+  version: 2,
+  input: z.object({
+    to: z.string(),
+    subject: z.string(),
+    html: z.boolean().default(false), // old jobs get false via schema
+  }),
+  handler: async (data) => { /* ... */ },
+})
+
+// v3 — another field with default. Bump again.
+const sendEmail = app.task("send-email", {
+  version: 3,
+  input: z.object({
+    to: z.string(),
+    subject: z.string(),
+    html: z.boolean().default(false),
+    priority: z.enum(["low", "normal", "high"]).default("normal"),
+  }),
+  // still no migrate! schema defaults handle v1→v3 automatically
+  handler: async (data) => { /* ... */ },
+})
+```
+
+### Level 2: Sparse `migrate` record (only for breaking changes)
+
+When most version bumps are additive (schema defaults) but one is breaking, use a record — only define the functions you need:
+
+```typescript
+// v4 — body changed from string to object. Can't use .default() for this.
+const sendEmail = app.task("send-email", {
+  version: 4,
+  input: z.object({
+    to: z.string(),
+    subject: z.string(),
+    html: z.boolean().default(false),
+    priority: z.enum(["low", "normal", "high"]).default("normal"),
+    body: z.object({ text: z.string(), html: z.string().optional() }),
+  }),
+  migrate: {
+    // Only v3→v4 needs a function. v1→v2 and v2→v3 handled by schema defaults.
+    3: (data) => ({ ...(data as any), body: { text: "" } }),
+  },
+  handler: async (data) => { /* ... */ },
+})
+```
+
+### Level 3: Tuple `migrate` (strict mode, typed last element)
+
+When you want TypeScript to enforce the entire migration chain. Version is derived automatically: `version = since + migrate.length`.
+
+```typescript
+const sendEmail = app.task("send-email", {
+  input: z.object({
+    to: z.string(),
+    subject: z.string(),
+    body: z.object({ text: z.string(), html: z.string().optional() }),
+  }),
+
+  migrate: [
+    // v1 → v2: added body as string
+    (data) => ({ ...(data as any), body: "" }),
+    // v2 → v3: body became an object (last — return type enforced by TS)
+    (data) => ({
+      to: (data as any).to,
+      subject: (data as any).subject,
+      body: { text: String((data as any).body) },
+    }),
+  ],
+  // version = 1 + 2 = 3
+
+  handler: async (data) => {
+    // data is ALWAYS v3 — guaranteed by types and runtime
+  },
+})
+```
+
+**Type enforcement on last migration:**
+
+```typescript
+type TupleMigrations<TInput> = readonly [
+  ...((data: unknown) => unknown)[],   // any number of intermediate
+  (data: unknown) => TInput,           // last one — return type enforced
+]
+```
+
+TypeScript infers `TInput` from the `input` schema, then checks the last tuple element returns that type.
+
+**Problem: `as any` casts defeat inference.** Solution — `into()` helper:
+
+```typescript
+import { into } from "taskora"
+
+migrate: [
+  (data) => ({ ...(data as any), body: "" }),
+  // into() locks the return type to the schema
+  into(emailSchema, (data) => ({
+    to: (data as any).to,
+    subject: (data as any).subject,
+    body: { text: String((data as any).body) },
+  })),
+],
+```
+
+```typescript
+// Implementation — trivial, the value is in the types
+function into<S extends StandardSchemaV1>(
+  schema: S,
+  fn: (data: unknown) => InferInput<S>,
+): (data: unknown) => InferInput<S> {
+  return fn
+}
+```
+
+### Version resolution
+
+```
+If migrate is a tuple:   version = since + migrate.length
+If migrate is a record:  version = explicit (required)
+If migrate is omitted:   version = explicit (required) or 1
+```
+
+### Processing flow
+
+```
+DISPATCH (producer):                DEQUEUE (worker):
+    │                                    │
+    ▼                                    ▼
+validate(schema)                  read { data, _v: 1 }
+    │                                    │
+    ▼                                    ▼
+store { data, _v }                _v > version?
+    │                               → nack, leave in queue (future worker)
+    ▼                              _v < since?
+  Redis ──────────────────►         → reject (expired migration)
+                                   _v < version?
+                                    → for each step v → v+1:
+                                        migrate[v] exists? run it
+                                        no migrate[v]? skip (schema handles it)
+                                        │
+                                        ▼
+                                   validate(schema)  ← .default() applied here
+                                        │
+                                        ▼
+                                    handler(data)
+```
+
+Worker internals:
+
+```typescript
+function processJob(task: TaskDefinition, raw: RawJob) {
+  let data = raw.data
+  let v = raw._v ?? 1
+
+  // Future job — leave for newer worker
+  if (v > task.version) {
+    return backend.nack(raw.id)
+  }
+
+  // Too old — no migrations available
+  if (v < task.since) {
+    return backend.reject(raw.id, {
+      reason: "schema-too-old",
+      jobVersion: v,
+      minimumVersion: task.since,
+    })
+  }
+
+  // Run migration chain (sparse — skip versions without a function)
+  const migrations = normalizeMigrations(task) // tuple or record → unified lookup
+  while (v < task.version) {
+    const fn = migrations[v]
+    if (fn) data = fn(data)
+    // no fn? that's fine — schema validation will apply .default() values
+    v++
+  }
+
+  // Validate — this is where .default() fills in missing fields
+  if (task.input) {
+    const result = task.input["~standard"].validate(data)
+    if (result.issues) throw new ValidationError(result.issues)
+    data = result.value
+  }
+
+  return task.handler(data, createContext(raw))
+}
+```
+
+### Job version handling
+
+| Condition | Action |
+|---|---|
+| `job._v === version` | Validate → handler (fast path) |
+| `job._v < version && job._v >= since` | Run migrations (skip gaps) → validate → handler |
+| `job._v < since` | Reject — migration no longer available |
+| `job._v > version` | Nack — leave in queue for newer worker |
+
+### Pruning old migrations with `since`
+
+Migrations accumulate. Remove old ones by bumping `since`:
+
+**Tuple form — before** (4 migrations, since: 1):
+```typescript
+// since: 1 (default)
+migrate: [
+  (data) => ({ ...(data as any), body: "" }),              // v1→v2
+  (data) => ({ ...(data as any), subject: data.title }),   // v2→v3
+  (data) => ({ ...(data as any), priority: "normal" }),    // v3→v4
+  (data): Email => ({ ... }),                              // v4→v5
+],
+// version = 1 + 4 = 5
+```
+
+**Tuple form — after** (removed first 2, since: 3):
+```typescript
+since: 3,
+migrate: [
+  (data) => ({ ...(data as any), priority: "normal" }),    // v3→v4
+  (data): Email => ({ ... }),                              // v4→v5
+],
+// version = 3 + 2 = 5 (same!)
+```
+
+**Record form** — just delete keys:
+```typescript
+since: 3,
+version: 5,
+migrate: {
+  // deleted keys 1 and 2
+  3: (data) => ({ ...(data as any), priority: "normal" }),
+},
+```
+
+### Migration inspection API
+
+Check when it's safe to prune:
+
+```typescript
+const status = await app.inspect().migrations("send-email")
+// {
+//   version: 5,
+//   since: 1,
+//   migrations: 4,
+//   queue: {
+//     oldest: 3,
+//     byVersion: { 3: 12, 4: 45, 5: 1230 },
+//   },
+//   scheduled: {
+//     oldest: 5,
+//   },
+//   canBumpSince: 3,   // safe to remove migrations before v3
+// }
+```
+
+### Internal typing
+
+```typescript
+import type { StandardSchemaV1 } from "@standard-schema/spec"
+
+type InferInput<S> = S extends StandardSchemaV1<infer I> ? I : never
+
+interface TaskOptions<
+  TInput,
+  TOutput,
+  TSchema extends StandardSchemaV1<TInput> = StandardSchemaV1<TInput>,
+> {
+  input?: TSchema
+  output?: StandardSchemaV1<TOutput>
+
+  since?: number  // default: 1
+  version?: number // required for record migrate or no-migrate mode
+
+  // Two forms:
+  // Tuple — strict, last element typed, version derived
+  // Record — sparse, only breaking changes, version explicit
+  migrate?:
+    | readonly [...((data: unknown) => unknown)[], (data: unknown) => TInput]
+    | Record<number, (data: unknown) => unknown>
+
+  handler: (data: TInput, ctx: TaskContext) => Promise<TOutput> | TOutput
+}
+```
+
+---
+
 ## 3. Calling Tasks
 
 ### Simple dispatch
@@ -621,3 +939,5 @@ Any backend that implements this interface works. Redis is first. PostgreSQL is 
 | Connection setup | Per-instance, different rules | App-level | App-level, one config |
 | Backend | Redis only | Multiple brokers | Abstract adapter (Redis, Postgres, ...) |
 | Dead letter queue | Manual | Built-in | Built-in with retry API |
+| Schema versioning | None | None | Built-in migrations with type-safe chain |
+| Migration pruning | N/A | N/A | `since` + inspector to check safety |
