@@ -1058,6 +1058,99 @@ app.schedule("heavy-report", {
 | **singleton** | per-task | queued (wait) | task definition |
 | **concurrencyKey** | per-key | queued (wait) | dispatch options |
 | **overlap: false** | per-schedule | skipped | schedule definition |
+| **collect** | per-key | accumulated → handler gets `T[]` | task definition |
+
+### Collect — debounce with accumulation
+
+Like debounce, but instead of keeping only the last dispatch, **collects all data** into a buffer and passes the entire array to the handler.
+
+```typescript
+const processVotes = app.task("process-votes", {
+  collect: {
+    key: (data) => data.pollId,   // group by poll
+    delay: "30s",                  // 30s after LAST dispatch
+    maxSize: 1000,                 // or flush when 1000 items collected
+    maxWait: "5m",                 // or flush 5m after first item (anti-infinite-debounce)
+  },
+
+  // handler receives ARRAY of all accumulated data
+  handler: async (items, ctx) => {
+    // items: { pollId: string, choice: string, userId: string }[]
+    ctx.log.info(`Processing ${items.length} votes`)
+    await db.polls.bulkUpdateVotes(items)
+  },
+})
+
+// Users vote — each dispatch adds to the buffer:
+await processVotes.dispatch({ pollId: "poll-1", choice: "A", userId: "u1" })
+await processVotes.dispatch({ pollId: "poll-1", choice: "B", userId: "u2" })
+await processVotes.dispatch({ pollId: "poll-1", choice: "A", userId: "u3" })
+// ... 30s silence ...
+// → handler([ {choice:"A"}, {choice:"B"}, {choice:"A"} ]) — one call, three votes
+```
+
+Three flush triggers (whichever fires first):
+
+| Trigger | Option | When |
+|---|---|---|
+| Debounce | `delay: "30s"` | 30s since last dispatch |
+| Max size | `maxSize: 1000` | Collected 1000 items |
+| Max wait | `maxWait: "5m"` | 5m since first item |
+
+```
+dispatch(choice=A)  →  buffer: [A]           timer: [===30s===]
+dispatch(choice=B)  →  buffer: [A, B]        timer: [===30s===] ← reset
+dispatch(choice=A)  →  buffer: [A, B, A]     timer: [===30s===] ← reset
+                       ... 30s silence ...
+                       → handler([A, B, A])  — single invocation
+```
+
+**Typing:** when `collect` is set, handler receives `TInput[]` instead of `TInput`. `dispatch()` still takes a single `TInput`.
+
+```typescript
+// Overloads on app.task():
+interface App {
+  // Without collect — handler(data: TInput, ctx)
+  task<I, O>(name: string, opts: TaskOptions<I, O>): Task<I, O>
+  // With collect — handler(items: TInput[], ctx)
+  task<I, O>(name: string, opts: CollectTaskOptions<I, O>): CollectTask<I, O>
+}
+```
+
+**If handler fails** — the entire batch retries as one job (items already in a regular job's `:data` key). No data loss.
+
+**Real-world examples:**
+
+```typescript
+// Batch webhook delivery — one HTTP call instead of 100
+const deliverWebhooks = app.task("webhooks", {
+  collect: { key: (d) => d.endpoint, delay: "5s", maxSize: 100 },
+  handler: async (events) => {
+    await fetch(events[0].endpoint, {
+      method: "POST",
+      body: JSON.stringify({ events }),
+    })
+  },
+})
+
+// Search reindex — collect all changed doc IDs
+const reindex = app.task("reindex", {
+  collect: { key: (d) => d.index, delay: "10s", maxSize: 500, maxWait: "1m" },
+  handler: async (items) => {
+    const ids = [...new Set(items.map(i => i.docId))]
+    await searchEngine.reindexBatch(items[0].index, ids)
+  },
+})
+
+// Analytics — bulk insert
+const trackEvents = app.task("analytics", {
+  collect: { key: "default", delay: "5s", maxSize: 10_000, maxWait: "30s" },
+  serializer: msgpack(),
+  handler: async (events) => {
+    await clickhouse.insert("events", events)
+  },
+})
+```
 
 ---
 

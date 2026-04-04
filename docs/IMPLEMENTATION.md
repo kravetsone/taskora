@@ -520,6 +520,20 @@ tests/
    - [ ] Scheduler: check if previous run is still active before dispatching
    - [ ] Redis key: `taskora:<pfx>:schedules:<name>:active` → jobId
 
+8. **Collect** (debounce + accumulator)
+   - [ ] `collect_push.lua` — RPUSH item to `:items` list + HSET `:meta` (firstAt, lastAt, count) + reset debounce timer
+   - [ ] `collect_flush.lua` — atomically LRANGE + DEL `:items` `:meta` `:flush` + create regular job with items as data
+   - [ ] Dispatch: serialize item → push to accumulator list → check flush triggers
+   - [ ] Flush triggers: delay (debounce), maxSize, maxWait — any first
+   - [ ] On flush: items become a regular job's `:data` (array) → normal worker picks it up
+   - [ ] Task typing: `collect` present → handler receives `TInput[]`
+   - [ ] Redis keys per accumulator:
+     ```
+     {taskora:<pfx>:<task>:collect:<key>}:items   — List: accumulated items
+     {taskora:<pfx>:<task>:collect:<key>}:meta    — Hash: firstAt, lastAt, count
+     {taskora:<pfx>:<task>:collect:<key>}:flush   — delayed job (debounce timer)
+     ```
+
 **Tests**:
 - Integration: debounce — 5 dispatches, only last runs
 - Integration: throttle — exceeding limit drops jobs
@@ -528,6 +542,10 @@ tests/
 - Integration: singleton — second job waits for first to complete
 - Integration: concurrency per key — respects per-key limit
 - Integration: cron overlap — skips when previous still active
+- Integration: collect — 10 dispatches within delay window → handler receives array of 10
+- Integration: collect maxSize — flush triggers at maxSize even if delay hasn't passed
+- Integration: collect maxWait — flush triggers at maxWait even if dispatches keep coming
+- Integration: collect failure — batch retries as one job, no data loss
 
 ---
 
