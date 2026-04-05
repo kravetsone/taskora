@@ -86,7 +86,27 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–11 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 12: Flow Control**.
+Phases 1–11 completed. Phase 12a and 12b complete. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 12c: Flow Control — Collect (Batch Accumulator)**.
+
+Phase 12b delivered:
+- TTL/Expiration: `ttl: { max: Duration, onExpire: "fail" | "discard" }` task option, `ttl: Duration` dispatch option
+- `expireAt` stored in job hash, checked in `moveToActive.lua` during promote + dequeue
+- New `"expired"` JobState, `expired` sorted set, `ExpiredError` class
+- Singleton: `singleton: true` task option, `LLEN active` guard in `moveToActive.lua`, marker-based 1s retry
+- Concurrency per key: `concurrencyKey` dispatch option, `concurrencyLimit` task/dispatch option
+- Counter key `taskora:{task}:conc:<key>`, INCR on claim, DECR on ack/fail/nack/stall
+- All 6 enqueue Lua scripts updated, ACK/FAIL/NACK/STALLED_CHECK handle concurrency cleanup
+- Inspector: `expired()` method, `QueueStats.expired`
+- 12 integration tests (192 total)
+
+Phase 12a delivered:
+- Debounce: `dispatch(data, { debounce: { key, delay } })` — replaces previous delayed job
+- Throttle: `dispatch(data, { throttle: { key, max, window } })` — rate-limited enqueue
+- Deduplication: `dispatch(data, { deduplicate: { key, while? } })` — skip if existing job in matching state
+- 3 atomic Lua scripts (DEBOUNCE, THROTTLE_ENQUEUE, DEDUPLICATE_ENQUEUE)
+- `ResultHandle.enqueued` flag, `ThrottledError`, `DuplicateJobError`
+- ACK/FAIL clean dedup keys on job completion
+- 13 integration tests (180 total before 12b)
 
 Phase 11 delivered:
 - `src/middleware.ts`: `compose()` function — Koa-style onion model with next()-called-twice guard
