@@ -823,31 +823,53 @@ return #ids
 `;
 
 // ── trimDLQ ─────────────────────────────────────────────────────────
-// Remove expired failed jobs (older than cutoff) and clean up all their keys.
+// Two-phase trim: (1) remove jobs older than cutoff, (2) cap total at maxItems.
 // KEYS[1] = <task>:failed
 // ARGV[1] = jobPrefix
-// ARGV[2] = cutoff timestamp (ms) — jobs with finishedOn <= cutoff are removed
-// Returns: number of jobs trimmed
+// ARGV[2] = cutoff timestamp (ms) — jobs with score <= cutoff are removed
+// ARGV[3] = maxItems — max number of failed jobs to keep (0 = no cap)
+// Returns: total number of jobs trimmed
 export const TRIM_DLQ = `
 local prefix = ARGV[1]
-local cutoff = ARGV[2]
+local cutoff = tonumber(ARGV[2])
+local maxItems = tonumber(ARGV[3])
+local trimmed = 0
 
-local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, 100)
-if #ids == 0 then
-  return 0
+-- Phase 1: age-based trim (oldest first, batch of 100)
+if cutoff > 0 then
+  local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, 100)
+  for _, jobId in ipairs(ids) do
+    redis.call('ZREM', KEYS[1], jobId)
+    local jobKey = prefix .. jobId
+    redis.call('DEL', jobKey,
+      jobKey .. ':data',
+      jobKey .. ':result',
+      jobKey .. ':lock',
+      jobKey .. ':logs')
+    trimmed = trimmed + 1
+  end
 end
 
-for _, jobId in ipairs(ids) do
-  redis.call('ZREM', KEYS[1], jobId)
-  local jobKey = prefix .. jobId
-  redis.call('DEL', jobKey,
-    jobKey .. ':data',
-    jobKey .. ':result',
-    jobKey .. ':lock',
-    jobKey .. ':logs')
+-- Phase 2: count-based trim (evict oldest when over cap, batch of 100)
+if maxItems > 0 then
+  local total = redis.call('ZCARD', KEYS[1])
+  if total > maxItems then
+    local excess = math.min(total - maxItems, 100)
+    local ids = redis.call('ZRANGE', KEYS[1], 0, excess - 1)
+    for _, jobId in ipairs(ids) do
+      redis.call('ZREM', KEYS[1], jobId)
+      local jobKey = prefix .. jobId
+      redis.call('DEL', jobKey,
+        jobKey .. ':data',
+        jobKey .. ':result',
+        jobKey .. ':lock',
+        jobKey .. ':logs')
+      trimmed = trimmed + 1
+    end
+  end
 end
 
-return #ids
+return trimmed
 `;
 
 // ── debounce ────────────────────────────────────────────────────────

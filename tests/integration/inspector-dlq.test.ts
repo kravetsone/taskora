@@ -433,7 +433,7 @@ describe("DLQ maxAge retention", () => {
     await redis.zadd("taskora:{dlq-trim}:failed", String(Date.now() - 100_000), failedJobs[0]);
 
     // Trim with a cutoff of 50s ago — should remove the old job
-    const trimmed = await adapter.trimDLQ("dlq-trim", Date.now() - 50_000);
+    const trimmed = await adapter.trimDLQ("dlq-trim", Date.now() - 50_000, 0);
     expect(trimmed).toBe(1);
 
     // Verify it's gone

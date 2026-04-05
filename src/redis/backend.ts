@@ -777,9 +777,15 @@ export class RedisBackend implements Taskora.Adapter {
     return result as number;
   }
 
-  async trimDLQ(task: string, before: number): Promise<number> {
+  async trimDLQ(task: string, before: number, maxItems: number): Promise<number> {
     const keys = buildKeys(task, this.prefix);
-    const result = await this.eval("trimDLQ", 1, keys.failed, keys.jobPrefix, String(before));
+    const result = await this.eval("trimDLQ", 1, keys.failed, keys.jobPrefix, String(before), String(maxItems));
+    return result as number;
+  }
+
+  async trimCompleted(task: string, before: number, maxItems: number): Promise<number> {
+    const keys = buildKeys(task, this.prefix);
+    const result = await this.eval("trimDLQ", 1, keys.completed, keys.jobPrefix, String(before), String(maxItems));
     return result as number;
   }
 

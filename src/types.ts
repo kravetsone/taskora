@@ -347,7 +347,10 @@ export namespace Taskora {
     // Dead letter queue
     retryFromDLQ(task: string, jobId: string): Promise<boolean>;
     retryAllFromDLQ(task: string, limit: number): Promise<number>;
-    trimDLQ(task: string, before: number): Promise<number>;
+
+    // Retention trim
+    trimDLQ(task: string, before: number, maxItems: number): Promise<number>;
+    trimCompleted(task: string, before: number, maxItems: number): Promise<number>;
 
     getVersionDistribution(task: string): Promise<{
       waiting: Record<number, number>;
@@ -418,10 +421,16 @@ export namespace Taskora {
     offset?: number;
   }
 
-  // ── Dead letter queue ──────────────────────────────────────────────
+  // ── Retention ────────────────────────────────────────────────────
 
-  export interface DeadLetterConfig {
+  export interface RetentionConfig {
     maxAge?: DurationType;
+    maxItems?: number;
+  }
+
+  export interface RetentionOptions {
+    completed?: RetentionConfig;
+    failed?: RetentionConfig;
   }
 
   export interface MigrationStatus {

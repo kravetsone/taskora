@@ -443,7 +443,7 @@ tests/
 - [x] `inspector.find(task, jobId)` — typed variant
 - [x] `src/dlq.ts` — DeadLetterManager (view over `:failed` sorted set — no separate `:dead` key)
 - [x] `app.deadLetters.list/retry/retryAll`
-- [x] Configurable DLQ retention (`maxAge`) — trim piggybacks on stall check interval
+- [x] Configurable retention (`retention: { completed, failed }`) — `maxAge` + `maxItems`, trim piggybacks on stall check interval
 - [x] 3 new Lua scripts: `retryDLQ`, `retryAllDLQ`, `trimDLQ`
 - [x] Adapter additions: `listJobs`, `getJobDetails`, `getQueueStats`, `retryFromDLQ`, `retryAllFromDLQ`, `trimDLQ`
 - [x] Timeline reconstructed from `ts` → `processedOn` → `finishedOn` (no new hash field needed)
@@ -695,6 +695,39 @@ trace: HTTP POST /api/orders
 - [ ] Durable steps — memoized step results within workflow graph (rethink as graph nodes)
 - [ ] Wait-for-event — pause node in graph until external signal arrives
 - [ ] Fan-out / fan-in — dynamic parallelism within graph
+
+ Read CLAUDE.md, docs/IMPLEMENTATION.md (Phase 17: Workflows),                                                                                  
+    and docs/API_DESIGN.md (section 6: Workflows — signatures, chain, group, chord).                                                             
+    Also read src/types.ts, src/task.ts, src/result.ts, src/app.ts, src/worker.ts,                                                               
+    and src/test/index.ts (TestRunner — runner.steps will be used here).                                                                         
+                                                                                                                                                 
+    We're starting Phase 17: Workflows (Canvas).                                                                                                 
+    This is the Celery-inspired composition layer — type-safe task pipelines.                                                                    
+                                                                                                                                                 
+    Key primitives from the API design:                                                                                                          
+    1. **Signature** — `.s()` on Task, serializable snapshot of a task invocation                                                                
+    2. **Chain** — sequential pipeline, output flows as input to next task                                                                       
+    3. **Group** — parallel execution, collect all results                                                                                       
+    4. **Chord** — group + callback (parallel then merge)                                                                                        
+    5. **`.pipe()` syntax** on Signature for fluent chaining                                                                                     
+    6. **`.map()` / `.chunk()`** on Task for batch operations                                                                                    
+    7. **Composability** — chains/groups/chords are themselves signatures                                                                        
+    8. **Workflow state tracking** — DAG stored in Redis                                                                                         
+    9. **Cascade cancellation** — cancel workflow cancels all pending steps                                                                      
+                                                                                                                                                 
+    Existing infrastructure to leverage:                                                                                                         
+    - ResultHandle with push-based awaitJob                                                                                                      
+    - Cancel system (Phase 13) with pub/sub                                                                                                      
+    - MemoryBackend + TestRunner for unit testing workflows                                                                                      
+    - runner.steps placeholder already exists                                                                                                    
+                                                                                                                                                 
+    Discuss approach before coding. Key design questions:                                                                                        
+    - How to store workflow DAG state in Redis (hash? dedicated keys?)                                                                           
+    - How chain passes output → next input (inline in Lua? worker-side?)                                                                         
+    - How group tracks parallel completion (counter? sorted set?)                                                                                
+    - Type-safe chain: how to enforce TOutput of step N = TInput of step N+1                                                                     
+    - Adapter interface additions needed                                                                                                         
+    - Should workflows be a separate entrypoint (taskora/workflow) or part of core?     
 
 ---
 

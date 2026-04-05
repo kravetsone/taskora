@@ -292,12 +292,13 @@ Phase 10 delivered:
 - `inspector.find(task, jobId)` — typed variant (pass Task object for typed data/result)
 - Timeline reconstructed from `ts` → `processedOn` → `finishedOn` (no new hash fields needed — `processedOn` already set by `moveToActive.lua`)
 - `Taskora.JobInfo<TData, TResult>`: id, task, state, data, result, error, progress, logs, attempt, version, timestamp, processedOn, finishedOn, timeline
-- `Taskora.QueueStats`, `RawJobDetails`, `InspectorListOptions`, `DeadLetterConfig` types
-- DLQ: `app.deadLetters` — `DeadLetterManager` operating as a view over the existing `:failed` sorted set (no separate `:dead` key — avoids duplication)
+- `Taskora.QueueStats`, `RawJobDetails`, `InspectorListOptions`, `RetentionConfig`, `RetentionOptions` types
+- DLQ: `app.deadLetters` — `DeadLetterManager` (view over `:failed` sorted set — no separate `:dead` key)
 - `app.deadLetters.list({ task?, limit?, offset? })` — delegates to `inspector.failed()`
 - `app.deadLetters.retry(jobId)` / `retry(task, jobId)` — atomic `retryDLQ.lua` (ZREM failed + reset state + LPUSH wait)
 - `app.deadLetters.retryAll({ task? })` — batch via `retryAllDLQ.lua` (ZRANGE + loop, 100 per batch)
-- `trimDLQ.lua` — ZRANGEBYSCORE + batch DEL (hash, :data, :result, :lock, :logs), 100 per call
-- Configurable `deadLetterQueue: { maxAge: "7d" }` — trim piggybacks on stall check interval (zero new timers)
-- Adapter additions: `listJobs`, `getJobDetails`, `getQueueStats`, `retryFromDLQ`, `retryAllFromDLQ`, `trimDLQ`
+- `trimDLQ.lua` — generic sorted-set trim: two-phase (age-based + count-based), batch 100, cleans job keys
+- `retention: { completed, failed }` — prod-safe defaults, trim piggybacks on stall check interval (zero new timers)
+- Defaults: `completed { maxAge: "1h", maxItems: 100 }`, `failed { maxAge: "7d", maxItems: 300 }`
+- Adapter additions: `listJobs`, `getJobDetails`, `getQueueStats`, `retryFromDLQ`, `retryAllFromDLQ`, `trimDLQ`, `trimCompleted`
 - 16 integration tests (148 total)

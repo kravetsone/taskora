@@ -1095,15 +1095,41 @@ export class MemoryBackend implements Taskora.Adapter {
     return count;
   }
 
-  async trimDLQ(task: string, before: number): Promise<number> {
-    const tq = this.q(task);
-    const toRemove = tq.failed.filter((e) => e.score < before);
-    for (const entry of toRemove) {
-      zRem(tq.failed, entry.member);
-      this.jobStore.delete(entry.member);
-      this.jobTask.delete(entry.member);
+  async trimDLQ(task: string, before: number, maxItems: number): Promise<number> {
+    return this.trimSortedSet(this.q(task).failed, before, maxItems);
+  }
+
+  async trimCompleted(task: string, before: number, maxItems: number): Promise<number> {
+    return this.trimSortedSet(this.q(task).completed, before, maxItems);
+  }
+
+  private trimSortedSet(set: ZEntry[], before: number, maxItems: number): number {
+    let trimmed = 0;
+
+    // Phase 1: age-based trim
+    if (before > 0) {
+      const toRemove = set.filter((e) => e.score < before);
+      for (const entry of toRemove) {
+        zRem(set, entry.member);
+        this.jobStore.delete(entry.member);
+        this.jobTask.delete(entry.member);
+      }
+      trimmed += toRemove.length;
     }
-    return toRemove.length;
+
+    // Phase 2: count-based trim (evict oldest)
+    if (maxItems > 0 && set.length > maxItems) {
+      const excess = set.length - maxItems;
+      const oldest = set.slice(0, excess);
+      for (const entry of oldest) {
+        zRem(set, entry.member);
+        this.jobStore.delete(entry.member);
+        this.jobTask.delete(entry.member);
+      }
+      trimmed += oldest.length;
+    }
+
+    return trimmed;
   }
 
   // ── Version distribution ──
