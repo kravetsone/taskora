@@ -437,7 +437,10 @@ export class RedisBackend implements Taskora.Adapter {
     "progress",
   ] as const;
 
-  private static readonly STATE_MODE: Record<string, { key: "wait" | "active" | "delayed" | "completed" | "failed"; mode: string }> = {
+  private static readonly STATE_MODE: Record<
+    string,
+    { key: "wait" | "active" | "delayed" | "completed" | "failed"; mode: string }
+  > = {
     waiting: { key: "wait", mode: "lrange" },
     active: { key: "active", mode: "lrange" },
     delayed: { key: "delayed", mode: "zrange" },

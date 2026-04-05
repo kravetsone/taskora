@@ -149,6 +149,17 @@ export namespace Taskora {
     log: ContextLog;
   }
 
+  export interface MiddlewareContext extends Context {
+    task: { name: string };
+    data: unknown;
+    result: unknown;
+  }
+
+  export type Middleware = (
+    ctx: MiddlewareContext,
+    next: () => Promise<void>,
+  ) => Promise<void> | void;
+
   export interface Adapter {
     connect(): Promise<void>;
     disconnect(): Promise<void>;

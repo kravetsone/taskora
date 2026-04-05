@@ -37,6 +37,7 @@ export class Task<TInput, TOutput> {
   readonly version: number;
   readonly since: number;
   readonly migrations: Map<number, MigrationFn>;
+  readonly middleware: Taskora.Middleware[];
   private readonly deps: TaskDeps;
   private readonly emitter = new TypedEmitter<Taskora.TaskEventMap<TOutput>>();
 
@@ -50,6 +51,7 @@ export class Task<TInput, TOutput> {
       output?: StandardSchemaV1<unknown, TOutput>;
     },
     migrationConfig?: TaskMigrationConfig,
+    middleware?: Taskora.Middleware[],
   ) {
     this.deps = deps;
     this.name = name;
@@ -64,6 +66,7 @@ export class Task<TInput, TOutput> {
     this.version = resolved.version;
     this.since = resolved.since;
     this.migrations = normalizeMigrations(migrationConfig?.migrate, resolved.since);
+    this.middleware = middleware ?? [];
   }
 
   on<K extends keyof Taskora.TaskEventMap<TOutput> & string>(

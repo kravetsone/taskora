@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { computeDelay, shouldRetry } from "./backoff.js";
 import { createContext } from "./context.js";
 import { RetryError, TimeoutError } from "./errors.js";
+import { compose } from "./middleware.js";
 import { runMigrations } from "./migration.js";
 import { validateSchema } from "./schema.js";
 import type { Task } from "./task.js";
@@ -27,6 +28,7 @@ export class Worker {
   private readonly stallInterval: number;
   private readonly maxStalledCount: number;
   private readonly dlqMaxAgeMs: number | null;
+  private readonly composed: (ctx: Taskora.MiddlewareContext) => Promise<void>;
 
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
@@ -39,6 +41,7 @@ export class Worker {
     adapter: Taskora.Adapter,
     serializer: Taskora.Serializer,
     dlqMaxAgeMs?: number | null,
+    appMiddleware?: Taskora.Middleware[],
   ) {
     this.task = task;
     this.adapter = adapter;
@@ -47,6 +50,13 @@ export class Worker {
     this.stallInterval = task.config.stall?.interval ?? DEFAULT_STALL_INTERVAL;
     this.maxStalledCount = task.config.stall?.maxCount ?? DEFAULT_MAX_STALLED_COUNT;
     this.dlqMaxAgeMs = dlqMaxAgeMs ?? null;
+
+    // Compose once: app middleware → task middleware → handler
+    const handlerMw: Taskora.Middleware = async (ctx) => {
+      ctx.result = await this.task.handler(ctx.data, ctx);
+    };
+    const chain = [...(appMiddleware ?? []), ...task.middleware, handlerMw];
+    this.composed = compose(chain);
   }
 
   start(): void {
@@ -180,17 +190,24 @@ export class Worker {
           },
         });
 
+        // Build middleware context (superset of Context)
+        const mwCtx: Taskora.MiddlewareContext = Object.assign(ctx, {
+          task: { name: this.task.name },
+          data,
+          result: undefined as unknown,
+        });
+
         const timeoutMs = this.task.config.timeout;
         if (timeoutMs > 0 && timeoutMs < Number.POSITIVE_INFINITY) {
-          handlerResult = await new Promise<unknown>((resolve, reject) => {
+          await new Promise<void>((resolve, reject) => {
             const timer = setTimeout(() => {
               controller.abort("timeout");
               reject(new TimeoutError(raw.id, timeoutMs));
             }, timeoutMs);
-            Promise.resolve(this.task.handler(data, ctx)).then(
-              (result) => {
+            this.composed(mwCtx).then(
+              () => {
                 clearTimeout(timer);
-                resolve(result);
+                resolve();
               },
               (err) => {
                 clearTimeout(timer);
@@ -199,8 +216,9 @@ export class Worker {
             );
           });
         } else {
-          handlerResult = await this.task.handler(data, ctx);
+          await this.composed(mwCtx);
         }
+        handlerResult = mwCtx.result;
         if (this.task.outputSchema) {
           handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
         }

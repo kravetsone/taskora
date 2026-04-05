@@ -30,6 +30,7 @@ interface TaskOptionsBase {
   timeout?: number;
   retry?: Taskora.RetryConfig;
   stall?: Taskora.StallConfig;
+  middleware?: Taskora.Middleware[];
   version?: number;
   since?: number;
   migrate?: readonly MigrationFn[] | Record<number, MigrationFn>;
@@ -77,6 +78,7 @@ export class App {
   private pendingSchedules: Array<{ name: string; config: Taskora.ScheduleConfig }> = [];
   private connected = false;
   private started = false;
+  private middlewares: Taskora.Middleware[] = [];
 
   private readonly appEmitter = new TypedEmitter<Taskora.AppEventMap>();
   private tasksNeedingEvents = new Set<string>();
@@ -113,6 +115,14 @@ export class App {
     }
 
     return unsub;
+  }
+
+  use(middleware: Taskora.Middleware): this {
+    if (this.started) {
+      throw new Error("Cannot add middleware after app.start()");
+    }
+    this.middlewares.push(middleware);
+    return this;
   }
 
   task<TInput, TOutput>(
@@ -153,6 +163,7 @@ export class App {
       (!isFunction ? handlerOrOptions.timeout : undefined) ?? this.defaults.timeout ?? 30_000;
     const retry = (!isFunction ? handlerOrOptions.retry : undefined) ?? this.defaults.retry;
     const stall = (!isFunction ? handlerOrOptions.stall : undefined) ?? this.defaults.stall;
+    const taskMiddleware = !isFunction ? handlerOrOptions.middleware : undefined;
 
     const migrationConfig =
       !isFunction &&
@@ -186,6 +197,7 @@ export class App {
       { concurrency, timeout, retry, stall },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
       migrationConfig,
+      taskMiddleware,
     );
 
     this.tasks.set(name, task as Task<unknown, unknown>);
@@ -246,7 +258,13 @@ export class App {
     await this.ensureSubscription();
 
     for (const task of this.tasks.values()) {
-      const worker = new Worker(task, this.adapter, this.serializer, this.dlqMaxAgeMs);
+      const worker = new Worker(
+        task,
+        this.adapter,
+        this.serializer,
+        this.dlqMaxAgeMs,
+        this.middlewares,
+      );
       this.workers.push(worker);
       worker.start();
     }

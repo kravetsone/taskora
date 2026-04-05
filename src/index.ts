@@ -14,6 +14,7 @@ export { ResultHandle } from "./result.js";
 export { Inspector } from "./inspector.js";
 export { DeadLetterManager } from "./dlq.js";
 export { into } from "./migration.js";
+export { compose } from "./middleware.js";
 export { parseDuration, type Duration } from "./scheduler/duration.js";
 
 import { App, type TaskoraOptions } from "./app.js";
