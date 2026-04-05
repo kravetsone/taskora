@@ -46,6 +46,7 @@ src/
 ├── worker.ts             — Worker loop
 ├── context.ts            — Taskora.Context (ctx in handlers)
 ├── result.ts             — ResultHandle (thenable)
+├── backoff.ts            — Backoff computation + retry eligibility
 ├── schema.ts             — Standard Schema integration
 ├── serializer.ts         — Serializer interface + json() default
 ├── types.ts              — Taskora namespace (all public types)
@@ -77,7 +78,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–3 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 4: Retries**.
+Phases 1–4 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 5: Task Context**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -102,3 +103,17 @@ Phase 3 delivered:
 - `JobFailedError`, `TimeoutError` error classes in `errors.ts`
 - `enqueue` signature changed: adapter receives `jobId` from client
 - 10 new integration tests (36 total)
+
+Phase 4 delivered:
+- `Taskora.RetryConfig`: `{ attempts, backoff?, delay?, maxDelay?, jitter?, retryOn?, noRetryOn? }`
+- `Taskora.BackoffStrategy`: `"fixed" | "exponential" | "linear" | ((attempt) => number)`
+- `retry.attempts` = total attempts (BullMQ model): `attempts: 3` → 3 total, 2 retries
+- `src/backoff.ts`: `computeDelay()` (strategies + maxDelay cap + ±25% jitter default on), `shouldRetry()` (noRetryOn/retryOn filtering)
+- `fail.lua` rewritten: branches on `retryDelay` — retry path: HINCRBY attempt, state="retrying", ZADD delayed, XADD "retrying" event; else permanent fail
+- `enqueue.lua` / `enqueueDelayed.lua`: store `maxAttempts` in job hash (observability)
+- `Adapter.fail()` signature: `fail(task, jobId, token, error, retry?: { delay })` — worker decides, Lua executes
+- `Adapter.enqueue()` signature: accepts `maxAttempts` option
+- Worker retry logic: `RetryError` → always retry (bypass filters), `noRetryOn` → skip, `retryOn` → whitelist, else check attempts
+- `ctx.retry({ delay?, reason? })` → returns `RetryError` (user throws); also `throw new RetryError()` works directly
+- `RetryError` delay overrides computed backoff
+- 15 unit tests (backoff strategies, jitter bounds, retryOn/noRetryOn), 9 integration tests (60 total)
