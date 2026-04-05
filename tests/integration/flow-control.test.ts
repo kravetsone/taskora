@@ -28,9 +28,12 @@ describe("debounce", () => {
 
     // Dispatch 5 times with same debounce key
     for (let i = 1; i <= 5; i++) {
-      const h = task.dispatch({ n: i }, {
-        debounce: { key: "same-key", delay: "1s" },
-      });
+      const h = task.dispatch(
+        { n: i },
+        {
+          debounce: { key: "same-key", delay: "1s" },
+        },
+      );
       await h; // ensure enqueued
     }
 
@@ -53,14 +56,20 @@ describe("debounce", () => {
       return data.value;
     });
 
-    const h1 = task.dispatch({ value: "old" }, {
-      debounce: { key: "replace-key", delay: "1s" },
-    });
+    const h1 = task.dispatch(
+      { value: "old" },
+      {
+        debounce: { key: "replace-key", delay: "1s" },
+      },
+    );
     await h1;
 
-    const h2 = task.dispatch({ value: "new" }, {
-      debounce: { key: "replace-key", delay: "1s" },
-    });
+    const h2 = task.dispatch(
+      { value: "new" },
+      {
+        debounce: { key: "replace-key", delay: "1s" },
+      },
+    );
     await h2;
 
     await app.start();
@@ -105,9 +114,12 @@ describe("throttle", () => {
 
     const handles = [];
     for (let i = 1; i <= 5; i++) {
-      const h = task.dispatch({ n: i }, {
-        throttle: { key: "limit-key", max: 3, window: "10s" },
-      });
+      const h = task.dispatch(
+        { n: i },
+        {
+          throttle: { key: "limit-key", max: 3, window: "10s" },
+        },
+      );
       await h;
       handles.push(h);
     }
@@ -137,15 +149,21 @@ describe("throttle", () => {
 
     // Fill the window
     for (let i = 0; i < 2; i++) {
-      await task.dispatch({ n: i }, {
-        throttle: { key: "reset-key", max: 2, window: 200 },
-      });
+      await task.dispatch(
+        { n: i },
+        {
+          throttle: { key: "reset-key", max: 2, window: 200 },
+        },
+      );
     }
 
     // 3rd should be dropped
-    const dropped = task.dispatch({ n: 99 }, {
-      throttle: { key: "reset-key", max: 2, window: 200 },
-    });
+    const dropped = task.dispatch(
+      { n: 99 },
+      {
+        throttle: { key: "reset-key", max: 2, window: 200 },
+      },
+    );
     await dropped;
     expect(dropped.enqueued).toBe(false);
 
@@ -153,9 +171,12 @@ describe("throttle", () => {
     await new Promise((r) => setTimeout(r, 300));
 
     // Now should be accepted again
-    const fresh = task.dispatch({ n: 100 }, {
-      throttle: { key: "reset-key", max: 2, window: 200 },
-    });
+    const fresh = task.dispatch(
+      { n: 100 },
+      {
+        throttle: { key: "reset-key", max: 2, window: 200 },
+      },
+    );
     await fresh;
     expect(fresh.enqueued).toBe(true);
 
@@ -166,14 +187,20 @@ describe("throttle", () => {
     const app = taskora({ adapter: redisAdapter(url()) });
     const task = app.task("throttle-throw", async () => {});
 
-    await task.dispatch({}, {
-      throttle: { key: "throw-key", max: 1, window: "10s" },
-    });
+    await task.dispatch(
+      {},
+      {
+        throttle: { key: "throw-key", max: 1, window: "10s" },
+      },
+    );
 
-    const handle = task.dispatch({}, {
-      throttle: { key: "throw-key", max: 1, window: "10s" },
-      throwOnReject: true,
-    });
+    const handle = task.dispatch(
+      {},
+      {
+        throttle: { key: "throw-key", max: 1, window: "10s" },
+        throwOnReject: true,
+      },
+    );
 
     await expect(handle.ensureEnqueued()).rejects.toThrow(ThrottledError);
 
@@ -184,15 +211,21 @@ describe("throttle", () => {
     const app = taskora({ adapter: redisAdapter(url()) });
     const task = app.task("throttle-multi", async () => {});
 
-    const h1 = task.dispatch({}, {
-      throttle: { key: "user-1", max: 1, window: "10s" },
-    });
+    const h1 = task.dispatch(
+      {},
+      {
+        throttle: { key: "user-1", max: 1, window: "10s" },
+      },
+    );
     await h1;
     expect(h1.enqueued).toBe(true);
 
-    const h2 = task.dispatch({}, {
-      throttle: { key: "user-2", max: 1, window: "10s" },
-    });
+    const h2 = task.dispatch(
+      {},
+      {
+        throttle: { key: "user-2", max: 1, window: "10s" },
+      },
+    );
     await h2;
     expect(h2.enqueued).toBe(true);
 
@@ -212,15 +245,21 @@ describe("deduplication", () => {
       return data.n;
     });
 
-    const h1 = task.dispatch({ n: 1 }, {
-      deduplicate: { key: "sync-123" },
-    });
+    const h1 = task.dispatch(
+      { n: 1 },
+      {
+        deduplicate: { key: "sync-123" },
+      },
+    );
     await h1;
     expect(h1.enqueued).toBe(true);
 
-    const h2 = task.dispatch({ n: 2 }, {
-      deduplicate: { key: "sync-123" },
-    });
+    const h2 = task.dispatch(
+      { n: 2 },
+      {
+        deduplicate: { key: "sync-123" },
+      },
+    );
     await h2;
     expect(h2.enqueued).toBe(false);
     expect(h2.existingId).toBe(h1.id);
@@ -242,14 +281,20 @@ describe("deduplication", () => {
       return data.n * 10;
     });
 
-    const h1 = task.dispatch({ n: 5 }, {
-      deduplicate: { key: "redirect-key" },
-    });
+    const h1 = task.dispatch(
+      { n: 5 },
+      {
+        deduplicate: { key: "redirect-key" },
+      },
+    );
     await h1;
 
-    const h2 = task.dispatch({ n: 99 }, {
-      deduplicate: { key: "redirect-key" },
-    });
+    const h2 = task.dispatch(
+      { n: 99 },
+      {
+        deduplicate: { key: "redirect-key" },
+      },
+    );
     await h2;
     expect(h2.enqueued).toBe(false);
 
@@ -271,9 +316,12 @@ describe("deduplication", () => {
       return data.n;
     });
 
-    const h1 = task.dispatch({ n: 1 }, {
-      deduplicate: { key: "clear-key" },
-    });
+    const h1 = task.dispatch(
+      { n: 1 },
+      {
+        deduplicate: { key: "clear-key" },
+      },
+    );
     await h1;
 
     await app.start();
@@ -283,9 +331,12 @@ describe("deduplication", () => {
     // Wait a tick for the ack to clean up
     await new Promise((r) => setTimeout(r, 100));
 
-    const h3 = task.dispatch({ n: 3 }, {
-      deduplicate: { key: "clear-key" },
-    });
+    const h3 = task.dispatch(
+      { n: 3 },
+      {
+        deduplicate: { key: "clear-key" },
+      },
+    );
     await h3;
     expect(h3.enqueued).toBe(true);
 
@@ -303,9 +354,12 @@ describe("deduplication", () => {
       return data.n;
     });
 
-    const h1 = task.dispatch({ n: 1 }, {
-      deduplicate: { key: "while-key", while: ["waiting", "delayed"] },
-    });
+    const h1 = task.dispatch(
+      { n: 1 },
+      {
+        deduplicate: { key: "while-key", while: ["waiting", "delayed"] },
+      },
+    );
     await h1;
 
     await app.start();
@@ -318,9 +372,12 @@ describe("deduplication", () => {
 
     // Now dispatch with while: ["waiting", "delayed"] — should NOT deduplicate
     // because h1 is "active" and that's not in the while list
-    const h2 = task.dispatch({ n: 2 }, {
-      deduplicate: { key: "while-key", while: ["waiting", "delayed"] },
-    });
+    const h2 = task.dispatch(
+      { n: 2 },
+      {
+        deduplicate: { key: "while-key", while: ["waiting", "delayed"] },
+      },
+    );
     await h2;
     expect(h2.enqueued).toBe(true);
 
@@ -331,14 +388,20 @@ describe("deduplication", () => {
     const app = taskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-throw", async () => {});
 
-    await task.dispatch({}, {
-      deduplicate: { key: "throw-key" },
-    });
+    await task.dispatch(
+      {},
+      {
+        deduplicate: { key: "throw-key" },
+      },
+    );
 
-    const handle = task.dispatch({}, {
-      deduplicate: { key: "throw-key" },
-      throwOnReject: true,
-    });
+    const handle = task.dispatch(
+      {},
+      {
+        deduplicate: { key: "throw-key" },
+        throwOnReject: true,
+      },
+    );
 
     await expect(handle.ensureEnqueued()).rejects.toThrow(DuplicateJobError);
 
@@ -355,9 +418,12 @@ describe("deduplication", () => {
       return "ok";
     });
 
-    const h1 = task.dispatch({}, {
-      deduplicate: { key: "fail-key" },
-    });
+    const h1 = task.dispatch(
+      {},
+      {
+        deduplicate: { key: "fail-key" },
+      },
+    );
     await h1;
 
     await app.start();
@@ -372,9 +438,12 @@ describe("deduplication", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     // Should be able to re-dispatch
-    const h2 = task.dispatch({}, {
-      deduplicate: { key: "fail-key" },
-    });
+    const h2 = task.dispatch(
+      {},
+      {
+        deduplicate: { key: "fail-key" },
+      },
+    );
     await h2;
     expect(h2.enqueued).toBe(true);
 
