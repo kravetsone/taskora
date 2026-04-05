@@ -1,6 +1,7 @@
 import { Redis } from "ioredis";
 import type { RedisOptions } from "ioredis";
 import type { Taskora } from "../types.js";
+import { EventReader } from "./event-reader.js";
 import { buildKeys } from "./keys.js";
 import * as scripts from "./scripts.js";
 
@@ -220,6 +221,26 @@ export class RedisBackend implements Taskora.Adapter {
   async getLogs(task: string, jobId: string): Promise<string[]> {
     const keys = buildKeys(task, this.prefix);
     return this.client.lrange(`${keys.jobPrefix}${jobId}:logs`, 0, -1);
+  }
+
+  async subscribe(
+    tasks: string[],
+    handler: (event: Taskora.StreamEvent) => void,
+  ): Promise<() => Promise<void>> {
+    const subClient = this.client.duplicate();
+    await subClient.connect();
+
+    const reader = new EventReader(subClient, this.prefix);
+    await reader.start(tasks, handler);
+
+    return async () => {
+      reader.stop();
+      try {
+        await subClient.quit();
+      } catch {
+        // Already disconnected by reader.stop()
+      }
+    };
   }
 
   async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {

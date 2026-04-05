@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { TypedEmitter } from "./emitter.js";
 import { ResultHandle } from "./result.js";
 import { validateSchema } from "./schema.js";
 import type { Taskora } from "./types.js";
@@ -14,6 +15,7 @@ export interface TaskDeps {
   adapter: Taskora.Adapter;
   serializer: Taskora.Serializer;
   ensureConnected: () => Promise<void>;
+  onEventSubscribe?: (taskName: string) => void;
 }
 
 export class Task<TInput, TOutput> {
@@ -23,6 +25,7 @@ export class Task<TInput, TOutput> {
   readonly inputSchema?: StandardSchemaV1<unknown, TInput>;
   readonly outputSchema?: StandardSchemaV1<unknown, TOutput>;
   private readonly deps: TaskDeps;
+  private readonly emitter = new TypedEmitter<Taskora.TaskEventMap<TOutput>>();
 
   constructor(
     deps: TaskDeps,
@@ -40,6 +43,24 @@ export class Task<TInput, TOutput> {
     this.config = config;
     this.inputSchema = schemas?.input;
     this.outputSchema = schemas?.output;
+  }
+
+  on<K extends keyof Taskora.TaskEventMap<TOutput> & string>(
+    event: K,
+    handler: (data: Taskora.TaskEventMap<TOutput>[K]) => void,
+  ): () => void {
+    const unsub = this.emitter.on(event, handler);
+    this.deps.onEventSubscribe?.(this.name);
+    return unsub;
+  }
+
+  /** @internal — used by App to dispatch stream events */
+  dispatchEvent(event: string, data: unknown): void {
+    this.emitter.emit(event, data);
+  }
+
+  hasEventListeners(): boolean {
+    return this.emitter.hasListeners();
   }
 
   dispatch(data: TInput, options?: Taskora.JobOptions): ResultHandle<TOutput> {

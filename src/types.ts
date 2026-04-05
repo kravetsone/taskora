@@ -1,6 +1,65 @@
 import type { RetryError } from "./errors.js";
 
 export namespace Taskora {
+  // ── Event payloads ──────────────────────────────────────────────────
+
+  export interface CompletedEvent<TOutput> {
+    id: string;
+    result: TOutput;
+    duration: number;
+    attempt: number;
+  }
+
+  export interface FailedEvent {
+    id: string;
+    error: string;
+    attempt: number;
+    willRetry: boolean;
+  }
+
+  export interface RetryingEvent {
+    id: string;
+    attempt: number;
+    nextAttempt: number;
+    error: string;
+  }
+
+  export interface ProgressEvent {
+    id: string;
+    progress: number | Record<string, unknown>;
+  }
+
+  export interface ActiveEvent {
+    id: string;
+    attempt: number;
+  }
+
+  export interface TaskEventMap<TOutput> {
+    completed: CompletedEvent<TOutput>;
+    failed: FailedEvent;
+    retrying: RetryingEvent;
+    progress: ProgressEvent;
+    active: ActiveEvent;
+  }
+
+  export interface AppEventMap {
+    "task:completed": CompletedEvent<unknown> & { task: string };
+    "task:failed": FailedEvent & { task: string };
+    "task:active": ActiveEvent & { task: string };
+    "worker:ready": undefined;
+    "worker:error": Error;
+    "worker:closing": undefined;
+  }
+
+  export interface StreamEvent {
+    task: string;
+    event: string;
+    jobId: string;
+    fields: Record<string, string>;
+  }
+
+  // ── Core types ──────────────────────────────────────────────────────
+
   export type JobState =
     | "waiting"
     | "delayed"
@@ -103,5 +162,6 @@ export namespace Taskora {
     getError(task: string, jobId: string): Promise<string | null>;
     getProgress(task: string, jobId: string): Promise<string | null>;
     getLogs(task: string, jobId: string): Promise<string[]>;
+    subscribe(tasks: string[], handler: (event: StreamEvent) => void): Promise<() => Promise<void>>;
   }
 }
