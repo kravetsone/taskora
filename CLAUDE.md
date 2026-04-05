@@ -79,6 +79,7 @@ src/
 - Every multi-step Redis state transition MUST be a Lua script (atomicity)
 - Split storage: job metadata hash (ziplist) + separate `:data` and `:result` string keys
 - All keys for one job share a `{hash tag}` for Redis Cluster compatibility
+- **Documentation sync**: when changing public API, behavior, or adding features — update `documentation/` (VitePress site) alongside `docs/` design docs. The VitePress site is the user-facing reference; `docs/` is internal design notes.
 
 ## Commands
 
