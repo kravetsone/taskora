@@ -81,11 +81,20 @@ export class RedisBackend implements Taskora.Adapter {
     task: string,
     jobId: string,
     data: string,
-    options: { _v: number; maxAttempts?: number } & Taskora.JobOptions,
+    options: {
+      _v: number;
+      maxAttempts?: number;
+      expireAt?: number;
+      concurrencyKey?: string;
+      concurrencyLimit?: number;
+    } & Taskora.JobOptions,
   ): Promise<void> {
     const keys = buildKeys(task, this.prefix);
     const now = String(Date.now());
     const maxAttempts = String(options.maxAttempts ?? 1);
+    const expireAt = String(options.expireAt ?? 0);
+    const concurrencyKey = options.concurrencyKey ?? "";
+    const concurrencyLimit = String(options.concurrencyLimit ?? 0);
 
     if (options.delay && options.delay > 0) {
       await this.eval(
@@ -102,6 +111,9 @@ export class RedisBackend implements Taskora.Adapter {
         String(options.delay),
         String(options.priority ?? 0),
         maxAttempts,
+        expireAt,
+        concurrencyKey,
+        concurrencyLimit,
       );
       return;
     }
@@ -119,6 +131,9 @@ export class RedisBackend implements Taskora.Adapter {
       String(options._v),
       String(options.priority ?? 0),
       maxAttempts,
+      expireAt,
+      concurrencyKey,
+      concurrencyLimit,
     );
   }
 
@@ -126,7 +141,14 @@ export class RedisBackend implements Taskora.Adapter {
     task: string,
     jobId: string,
     data: string,
-    options: { _v: number; maxAttempts?: number; priority?: number },
+    options: {
+      _v: number;
+      maxAttempts?: number;
+      priority?: number;
+      expireAt?: number;
+      concurrencyKey?: string;
+      concurrencyLimit?: number;
+    },
     debounceKey: string,
     delayMs: number,
   ): Promise<void> {
@@ -149,6 +171,9 @@ export class RedisBackend implements Taskora.Adapter {
       String(options.priority ?? 0),
       String(options.maxAttempts ?? 1),
       fullDebounceKey,
+      String(options.expireAt ?? 0),
+      options.concurrencyKey ?? "",
+      String(options.concurrencyLimit ?? 0),
     );
   }
 
@@ -156,7 +181,15 @@ export class RedisBackend implements Taskora.Adapter {
     task: string,
     jobId: string,
     data: string,
-    options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+    options: {
+      _v: number;
+      maxAttempts?: number;
+      delay?: number;
+      priority?: number;
+      expireAt?: number;
+      concurrencyKey?: string;
+      concurrencyLimit?: number;
+    },
     throttleKey: string,
     max: number,
     windowMs: number,
@@ -183,6 +216,9 @@ export class RedisBackend implements Taskora.Adapter {
       String(max),
       String(windowMs),
       String(options.delay ?? 0),
+      String(options.expireAt ?? 0),
+      options.concurrencyKey ?? "",
+      String(options.concurrencyLimit ?? 0),
     );
     return result === 1;
   }
@@ -191,7 +227,15 @@ export class RedisBackend implements Taskora.Adapter {
     task: string,
     jobId: string,
     data: string,
-    options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+    options: {
+      _v: number;
+      maxAttempts?: number;
+      delay?: number;
+      priority?: number;
+      expireAt?: number;
+      concurrencyKey?: string;
+      concurrencyLimit?: number;
+    },
     dedupKey: string,
     states: string[],
   ): Promise<{ created: true } | { created: false; existingId: string }> {
@@ -215,6 +259,9 @@ export class RedisBackend implements Taskora.Adapter {
       String(options.maxAttempts ?? 1),
       fullDedupKey,
       String(options.delay ?? 0),
+      String(options.expireAt ?? 0),
+      options.concurrencyKey ?? "",
+      String(options.concurrencyLimit ?? 0),
       ...states,
     )) as [number, string?];
 
@@ -228,21 +275,25 @@ export class RedisBackend implements Taskora.Adapter {
     task: string,
     lockTtl: number,
     token: string,
+    options?: Taskora.DequeueOptions,
   ): Promise<Taskora.DequeueResult | null> {
     const keys = buildKeys(task, this.prefix);
 
     const result = await this.eval(
       "moveToActive",
-      5,
+      6,
       keys.wait,
       keys.active,
       keys.delayed,
       keys.events,
       keys.marker,
+      keys.expired,
       keys.jobPrefix,
       String(lockTtl),
       token,
       String(Date.now()),
+      options?.onExpire ?? "fail",
+      options?.singleton ? "1" : "0",
     );
 
     if (!result) return null;
@@ -262,11 +313,12 @@ export class RedisBackend implements Taskora.Adapter {
     lockTtl: number,
     token: string,
     timeoutMs: number,
+    options?: Taskora.DequeueOptions,
   ): Promise<Taskora.DequeueResult | null> {
     const keys = buildKeys(task, this.prefix);
 
     // Fast path: try non-blocking moveToActive first
-    const quick = await this.dequeue(task, lockTtl, token);
+    const quick = await this.dequeue(task, lockTtl, token, options);
     if (quick) return quick;
 
     const blockClient = await this.getBlockingClient(task);
@@ -305,7 +357,7 @@ export class RedisBackend implements Taskora.Adapter {
       }
 
       // Try moveToActive (promotes delayed + dequeues)
-      const result = await this.dequeue(task, lockTtl, token);
+      const result = await this.dequeue(task, lockTtl, token, options);
       if (result) return result;
     }
 
@@ -326,10 +378,11 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     await this.eval(
       "ack",
-      3,
+      4,
       keys.active,
       keys.completed,
       keys.events,
+      keys.marker,
       keys.jobPrefix,
       jobId,
       token,
@@ -544,18 +597,19 @@ export class RedisBackend implements Taskora.Adapter {
 
   private static readonly STATE_MODE: Record<
     string,
-    { key: "wait" | "active" | "delayed" | "completed" | "failed"; mode: string }
+    { key: "wait" | "active" | "delayed" | "completed" | "failed" | "expired"; mode: string }
   > = {
     waiting: { key: "wait", mode: "lrange" },
     active: { key: "active", mode: "lrange" },
     delayed: { key: "delayed", mode: "zrange" },
     completed: { key: "completed", mode: "zrevrange" },
     failed: { key: "failed", mode: "zrevrange" },
+    expired: { key: "expired", mode: "zrevrange" },
   };
 
   async listJobDetails(
     task: string,
-    state: "waiting" | "active" | "delayed" | "completed" | "failed",
+    state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired",
     offset: number,
     limit: number,
   ): Promise<Array<{ id: string; details: Taskora.RawJobDetails }>> {
@@ -631,6 +685,7 @@ export class RedisBackend implements Taskora.Adapter {
     pipe.zcard(keys.delayed);
     pipe.zcard(keys.completed);
     pipe.zcard(keys.failed);
+    pipe.zcard(keys.expired);
 
     const results = (await pipe.exec()) as [Error | null, number][];
     return {
@@ -639,6 +694,7 @@ export class RedisBackend implements Taskora.Adapter {
       delayed: results[2][1],
       completed: results[3][1],
       failed: results[4][1],
+      expired: results[5][1],
     };
   }
 

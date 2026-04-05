@@ -21,6 +21,9 @@
 // ARGV[5] = _v (version)
 // ARGV[6] = priority
 // ARGV[7] = maxAttempts
+// ARGV[8] = expireAt (0 = no TTL)
+// ARGV[9] = concurrencyKey ("" = none)
+// ARGV[10] = concurrencyLimit ("0" = none)
 // Returns: 1
 export const ENQUEUE = `
 local jobKey = ARGV[1] .. ARGV[2]
@@ -33,6 +36,13 @@ redis.call('HSET', jobKey,
   'maxAttempts', ARGV[7],
   'state', 'waiting',
   'priority', ARGV[6])
+
+if tonumber(ARGV[8]) > 0 then
+  redis.call('HSET', jobKey, 'expireAt', ARGV[8])
+end
+if ARGV[9] ~= '' then
+  redis.call('HSET', jobKey, 'concurrencyKey', ARGV[9], 'concurrencyLimit', ARGV[10])
+end
 
 redis.call('SET', dataKey, ARGV[3])
 redis.call('LPUSH', KEYS[1], ARGV[2])
@@ -56,6 +66,9 @@ return 1
 // ARGV[6] = delay (ms)
 // ARGV[7] = priority
 // ARGV[8] = maxAttempts
+// ARGV[9] = expireAt (0 = no TTL)
+// ARGV[10] = concurrencyKey ("" = none)
+// ARGV[11] = concurrencyLimit ("0" = none)
 // Returns: 1
 export const ENQUEUE_DELAYED = `
 local jobKey = ARGV[1] .. ARGV[2]
@@ -74,6 +87,13 @@ redis.call('HSET', jobKey,
   'state', 'delayed',
   'priority', ARGV[7])
 
+if tonumber(ARGV[9]) > 0 then
+  redis.call('HSET', jobKey, 'expireAt', ARGV[9])
+end
+if ARGV[10] ~= '' then
+  redis.call('HSET', jobKey, 'concurrencyKey', ARGV[10], 'concurrencyLimit', ARGV[11])
+end
+
 redis.call('SET', dataKey, ARGV[3])
 redis.call('ZADD', KEYS[1], score, ARGV[2])
 redis.call('ZADD', KEYS[3], 'LT', score, '0')
@@ -90,16 +110,21 @@ return 1
 // KEYS[3] = <task>:delayed
 // KEYS[4] = <task>:events
 // KEYS[5] = <task>:marker
+// KEYS[6] = <task>:expired    (sorted set, score = finishedOn)
 // ARGV[1] = jobPrefix
 // ARGV[2] = lock TTL (ms)
 // ARGV[3] = lock token (UUID)
 // ARGV[4] = current timestamp (ms)
+// ARGV[5] = onExpire ("fail" | "discard")
+// ARGV[6] = singleton ("0" | "1")
 // Returns: {id, data, _v, attempt, ts} or nil
 export const MOVE_TO_ACTIVE = `
 local prefix = ARGV[1]
 local lockTtl = ARGV[2]
 local token = ARGV[3]
 local now = tonumber(ARGV[4])
+local onExpire = ARGV[5]
+local singleton = tonumber(ARGV[6])
 
 -- Promote delayed jobs whose due time <= now (up to 100)
 local delayed = redis.call('ZRANGEBYSCORE', KEYS[3], 0, now, 'LIMIT', 0, 100)
@@ -107,55 +132,122 @@ if #delayed > 0 then
   redis.call('ZREM', KEYS[3], unpack(delayed))
   for i = #delayed, 1, -1 do
     local jid = delayed[i]
-    redis.call('RPUSH', KEYS[1], jid)
-    redis.call('HSET', prefix .. jid, 'state', 'waiting')
+    local jKey = prefix .. jid
+    -- TTL check during promotion
+    local ea = tonumber(redis.call('HGET', jKey, 'expireAt') or '0')
+    if ea > 0 and now >= ea then
+      if onExpire == 'discard' then
+        redis.call('DEL', jKey, jKey .. ':data')
+      else
+        redis.call('HSET', jKey, 'state', 'expired', 'finishedOn', tostring(now))
+        redis.call('ZADD', KEYS[6], now, jid)
+      end
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'expired', 'jobId', jid)
+    else
+      redis.call('RPUSH', KEYS[1], jid)
+      redis.call('HSET', jKey, 'state', 'waiting')
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'promoted', 'jobId', jid)
+    end
+  end
+end
+
+-- Singleton check: only one active job at a time
+if singleton == 1 then
+  local activeLen = redis.call('LLEN', KEYS[2])
+  if activeLen > 0 then
+    redis.call('ZADD', KEYS[5], now + 1000, '0')
+    return nil
+  end
+end
+
+-- Try to claim a job (loop for TTL/concurrency filtering, up to 100)
+for _attempt = 1, 100 do
+  local id = redis.call('RPOP', KEYS[1])
+  if not id then break end
+
+  local jobKey = prefix .. id
+  local claimed = false
+
+  -- TTL check
+  local ea = tonumber(redis.call('HGET', jobKey, 'expireAt') or '0')
+  if ea > 0 and now >= ea then
+    if onExpire == 'discard' then
+      redis.call('DEL', jobKey, jobKey .. ':data')
+    else
+      redis.call('HSET', jobKey, 'state', 'expired', 'finishedOn', tostring(now))
+      redis.call('ZADD', KEYS[6], now, id)
+    end
     redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
-      'event', 'promoted', 'jobId', jid)
+      'event', 'expired', 'jobId', id)
+  else
+    -- Concurrency per key check
+    local blocked = false
+    local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+    if concKey and concKey ~= '' then
+      local concLimit = tonumber(redis.call('HGET', jobKey, 'concurrencyLimit') or '0')
+      if concLimit > 0 then
+        local counterKey = prefix .. 'conc:' .. concKey
+        local current = tonumber(redis.call('GET', counterKey) or '0')
+        if current >= concLimit then
+          blocked = true
+          redis.call('LPUSH', KEYS[1], id)
+        else
+          redis.call('INCR', counterKey)
+        end
+      end
+    end
+
+    if not blocked then
+      -- Claim the job
+      redis.call('LPUSH', KEYS[2], id)
+      local lockKey = jobKey .. ':lock'
+      local dataKey = jobKey .. ':data'
+
+      redis.call('SET', lockKey, token, 'PX', lockTtl)
+      redis.call('HSET', jobKey, 'state', 'active', 'processedOn', tostring(now))
+
+      local data = redis.call('GET', dataKey)
+      local meta = redis.call('HMGET', jobKey, '_v', 'attempt', 'ts')
+
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'active', 'jobId', id)
+
+      -- Re-add marker if more work exists
+      local waitLen = redis.call('LLEN', KEYS[1])
+      if waitLen > 0 then
+        redis.call('ZADD', KEYS[5], 0, '0')
+      else
+        local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+        if #nx > 0 then
+          redis.call('ZADD', KEYS[5], nx[2], '0')
+        end
+      end
+
+      return {id, data, meta[1], meta[2], meta[3]}
+    end
   end
 end
 
--- Pop oldest from wait -> active
-local id = redis.call('LMOVE', KEYS[1], KEYS[2], 'RIGHT', 'LEFT')
-if not id then
-  -- No immediate work. Set marker for next delayed if any.
-  local next = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
-  if #next > 0 then
-    redis.call('ZADD', KEYS[5], next[2], '0')
-  end
-  return nil
-end
-
-local jobKey = prefix .. id
-local lockKey = jobKey .. ':lock'
-local dataKey = jobKey .. ':data'
-
-redis.call('SET', lockKey, token, 'PX', lockTtl)
-redis.call('HSET', jobKey, 'state', 'active', 'processedOn', tostring(now))
-
-local data = redis.call('GET', dataKey)
-local meta = redis.call('HMGET', jobKey, '_v', 'attempt', 'ts')
-
-redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
-  'event', 'active', 'jobId', id)
-
--- Re-add marker if more work exists
+-- No claimable job found
 local waitLen = redis.call('LLEN', KEYS[1])
 if waitLen > 0 then
-  redis.call('ZADD', KEYS[5], 0, '0')
+  redis.call('ZADD', KEYS[5], now + 1000, '0')
 else
-  local next = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
-  if #next > 0 then
-    redis.call('ZADD', KEYS[5], next[2], '0')
+  local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+  if #nx > 0 then
+    redis.call('ZADD', KEYS[5], nx[2], '0')
   end
 end
-
-return {id, data, meta[1], meta[2], meta[3]}
+return nil
 `;
 
 // ── ack ──────────────────────────────────────────────────────────────
 // KEYS[1] = <task>:active
 // KEYS[2] = <task>:completed  (sorted set, score = finishedOn)
 // KEYS[3] = <task>:events
+// KEYS[4] = <task>:marker     (sorted set — wake workers for singleton/concurrency)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobId
 // ARGV[3] = lock token
@@ -189,6 +281,17 @@ redis.call('ZADD', KEYS[2], tonumber(now), jobId)
 local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
 if dedupKey then
   redis.call('DEL', dedupKey)
+end
+
+-- Concurrency per key: decrement counter, wake workers
+local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+if concKey and concKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. concKey
+  local val = redis.call('DECR', counterKey)
+  if val <= 0 then
+    redis.call('DEL', counterKey)
+  end
+  redis.call('ZADD', KEYS[4], 0, '0')
 end
 
 redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
@@ -228,6 +331,17 @@ end
 
 redis.call('LREM', KEYS[1], 1, jobId)
 redis.call('DEL', lockKey)
+
+-- Concurrency per key: decrement counter, wake workers
+local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+if concKey and concKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. concKey
+  local val = redis.call('DECR', counterKey)
+  if val <= 0 then
+    redis.call('DEL', counterKey)
+  end
+  redis.call('ZADD', KEYS[5], 0, '0')
+end
 
 if retryDelay >= 0 then
   local newAttempt = redis.call('HINCRBY', jobKey, 'attempt', 1)
@@ -280,6 +394,17 @@ end
 
 redis.call('LREM', KEYS[1], 1, jobId)
 redis.call('DEL', lockKey)
+
+-- Concurrency per key: decrement counter
+local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+if concKey and concKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. concKey
+  local val = redis.call('DECR', counterKey)
+  if val <= 0 then
+    redis.call('DEL', counterKey)
+  end
+end
+
 redis.call('HSET', jobKey, 'state', 'waiting')
 redis.call('RPUSH', KEYS[2], jobId)
 redis.call('ZADD', KEYS[4], 0, '0')
@@ -319,6 +444,16 @@ for _, jobId in ipairs(candidates) do
   if exists == 0 then
     local jobKey = prefix .. jobId
     local count = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+
+    -- Concurrency per key: decrement counter (job leaving active)
+    local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+    if concKey and concKey ~= '' then
+      local counterKey = prefix .. 'conc:' .. concKey
+      local val = redis.call('DECR', counterKey)
+      if val <= 0 then
+        redis.call('DEL', counterKey)
+      end
+    end
 
     if count > maxStalled then
       -- Permanently fail
@@ -666,6 +801,9 @@ return #ids
 // ARGV[7] = priority
 // ARGV[8] = maxAttempts
 // ARGV[9] = debounce key     (full Redis key)
+// ARGV[10] = expireAt (0 = no TTL)
+// ARGV[11] = concurrencyKey ("" = none)
+// ARGV[12] = concurrencyLimit ("0" = none)
 // Returns: 1
 export const DEBOUNCE = `
 local prefix = ARGV[1]
@@ -705,6 +843,13 @@ redis.call('HSET', jobKey,
   'state', 'delayed',
   'priority', priority)
 
+if tonumber(ARGV[10]) > 0 then
+  redis.call('HSET', jobKey, 'expireAt', ARGV[10])
+end
+if ARGV[11] ~= '' then
+  redis.call('HSET', jobKey, 'concurrencyKey', ARGV[11], 'concurrencyLimit', ARGV[12])
+end
+
 redis.call('SET', dataKey, data)
 redis.call('ZADD', KEYS[1], score, jobId)
 redis.call('ZADD', KEYS[3], 'LT', score, '0')
@@ -735,6 +880,9 @@ return 1
 // ARGV[9]  = max             (max dispatches per window)
 // ARGV[10] = window (ms)
 // ARGV[11] = delay (ms, 0 = immediate)
+// ARGV[12] = expireAt (0 = no TTL)
+// ARGV[13] = concurrencyKey ("" = none)
+// ARGV[14] = concurrencyLimit ("0" = none)
 // Returns: 1 (enqueued) or 0 (throttled)
 export const THROTTLE_ENQUEUE = `
 local prefix = ARGV[1]
@@ -796,6 +944,13 @@ else
     'event', 'waiting', 'jobId', jobId)
 end
 
+if tonumber(ARGV[12]) > 0 then
+  redis.call('HSET', jobKey, 'expireAt', ARGV[12])
+end
+if ARGV[13] ~= '' then
+  redis.call('HSET', jobKey, 'concurrencyKey', ARGV[13], 'concurrencyLimit', ARGV[14])
+end
+
 return 1
 `;
 
@@ -814,7 +969,10 @@ return 1
 // ARGV[7]  = maxAttempts
 // ARGV[8]  = dedup key       (full Redis key)
 // ARGV[9]  = delay (ms, 0 = immediate)
-// ARGV[10+] = allowed states (e.g. "waiting", "delayed", "active")
+// ARGV[10] = expireAt (0 = no TTL)
+// ARGV[11] = concurrencyKey ("" = none)
+// ARGV[12] = concurrencyLimit ("0" = none)
+// ARGV[13+] = allowed states (e.g. "waiting", "delayed", "active")
 // Returns: [1] (created) or [0, existingJobId] (duplicate found)
 export const DEDUPLICATE_ENQUEUE = `
 local prefix = ARGV[1]
@@ -827,9 +985,9 @@ local maxAttempts = ARGV[7]
 local dedupKey = ARGV[8]
 local delay = tonumber(ARGV[9])
 
--- Collect allowed states
+-- Collect allowed states (after flow control args)
 local allowedStates = {}
-for i = 10, #ARGV do
+for i = 13, #ARGV do
   allowedStates[ARGV[i]] = true
 end
 
@@ -878,6 +1036,13 @@ else
   redis.call('ZADD', KEYS[4], 0, '0')
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
     'event', 'waiting', 'jobId', jobId)
+end
+
+if tonumber(ARGV[10]) > 0 then
+  redis.call('HSET', jobKey, 'expireAt', ARGV[10])
+end
+if ARGV[11] ~= '' then
+  redis.call('HSET', jobKey, 'concurrencyKey', ARGV[11], 'concurrencyLimit', ARGV[12])
 end
 
 -- Set dedup key -> jobId (no TTL — cleaned on ack/fail)
