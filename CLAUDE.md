@@ -52,6 +52,7 @@ src/
 ├── types.ts              — Taskora namespace (all public types)
 ├── errors.ts             — Error classes
 ├── emitter.ts            — Lightweight typed EventEmitter
+├── dlq.ts                — DeadLetterManager (list/retry/retryAll)
 ├── scheduler/
 │   ├── index.ts          — re-exports
 │   ├── scheduler.ts      — Scheduler class (leader election, poll, dispatch)
@@ -85,7 +86,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–9 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 10: Inspector + Dead Letter Queue**.
+Phases 1–10 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 11: Middleware**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -198,3 +199,20 @@ Phase 9 delivered:
 - Task constructor accepts `TaskMigrationConfig`: `{ version?, since?, migrate? }`
 - Exports: `into()`, `Inspector` from `taskora`
 - 15 unit tests (version resolution, normalization, chain), 9 integration tests (132 total)
+
+Phase 10 delivered:
+- Inspector expanded: `active()`, `waiting()`, `delayed()`, `failed()`, `completed()` — per-task or cross-task queries with `limit`/`offset`
+- `inspector.stats({ task? })` — LLEN/ZCARD pipeline, aggregated across tasks
+- `inspector.find(jobId)` — cross-task search, returns full `JobInfo` with data, result, logs, timeline
+- `inspector.find(task, jobId)` — typed variant (pass Task object for typed data/result)
+- Timeline reconstructed from `ts` → `processedOn` → `finishedOn` (no new hash fields needed — `processedOn` already set by `moveToActive.lua`)
+- `Taskora.JobInfo<TData, TResult>`: id, task, state, data, result, error, progress, logs, attempt, version, timestamp, processedOn, finishedOn, timeline
+- `Taskora.QueueStats`, `RawJobDetails`, `InspectorListOptions`, `DeadLetterConfig` types
+- DLQ: `app.deadLetters` — `DeadLetterManager` operating as a view over the existing `:failed` sorted set (no separate `:dead` key — avoids duplication)
+- `app.deadLetters.list({ task?, limit?, offset? })` — delegates to `inspector.failed()`
+- `app.deadLetters.retry(jobId)` / `retry(task, jobId)` — atomic `retryDLQ.lua` (ZREM failed + reset state + LPUSH wait)
+- `app.deadLetters.retryAll({ task? })` — batch via `retryAllDLQ.lua` (ZRANGE + loop, 100 per batch)
+- `trimDLQ.lua` — ZRANGEBYSCORE + batch DEL (hash, :data, :result, :lock, :logs), 100 per call
+- Configurable `deadLetterQueue: { maxAge: "7d" }` — trim piggybacks on stall check interval (zero new timers)
+- Adapter additions: `listJobs`, `getJobDetails`, `getQueueStats`, `retryFromDLQ`, `retryAllFromDLQ`, `trimDLQ`
+- 16 integration tests (148 total)

@@ -437,21 +437,26 @@ tests/
 **Goal**: Full debugging API. DLQ for permanently failed jobs.
 
 **Tasks**:
-- [ ] `src/inspector.ts` — Inspector class
-- [ ] `inspector.active/waiting/delayed()` — query Redis lists/sets
-- [ ] `inspector.stats()` — LLEN/ZCARD across all structures
-- [ ] `inspector.find(jobId)` — full job details including logs and timeline
-- [ ] `inspector.find(task, jobId)` — typed variant
-- [ ] `src/dlq.ts` — Dead Letter Queue
-- [ ] DLQ: separate Sorted Set for permanently failed jobs
-- [ ] `app.deadLetters.list/retry/retryAll`
-- [ ] Configurable DLQ retention (`maxAge`)
+- [x] `src/inspector.ts` — Expanded Inspector class (active/waiting/delayed/failed/completed queries)
+- [x] `inspector.stats()` — LLEN/ZCARD pipeline across all structures
+- [x] `inspector.find(jobId)` — full job details including logs and timeline
+- [x] `inspector.find(task, jobId)` — typed variant
+- [x] `src/dlq.ts` — DeadLetterManager (view over `:failed` sorted set — no separate `:dead` key)
+- [x] `app.deadLetters.list/retry/retryAll`
+- [x] Configurable DLQ retention (`maxAge`) — trim piggybacks on stall check interval
+- [x] 3 new Lua scripts: `retryDLQ`, `retryAllDLQ`, `trimDLQ`
+- [x] Adapter additions: `listJobs`, `getJobDetails`, `getQueueStats`, `retryFromDLQ`, `retryAllFromDLQ`, `trimDLQ`
+- [x] Timeline reconstructed from `ts` → `processedOn` → `finishedOn` (no new hash field needed)
 
 **Tests**:
-- Integration: inspector returns correct counts
-- Integration: `find()` returns logs and timeline
-- Integration: permanently failed job appears in DLQ
-- Integration: `deadLetters.retry()` re-enqueues job
+- [x] Integration: inspector returns correct counts (stats per-task and cross-task)
+- [x] Integration: list queries (waiting, completed, failed, delayed, pagination)
+- [x] Integration: `find()` returns logs and timeline
+- [x] Integration: `find(task, jobId)` typed variant
+- [x] Integration: permanently failed job appears in DLQ
+- [x] Integration: `deadLetters.retry()` re-enqueues job (with and without task name)
+- [x] Integration: `deadLetters.retryAll()` bulk re-enqueue
+- [x] Integration: `trimDLQ` removes old jobs and cleans up keys
 
 ---
 
