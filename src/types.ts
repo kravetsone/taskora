@@ -52,6 +52,19 @@ export namespace Taskora {
     timestamp: number;
   }
 
+  export interface LogEntry {
+    level: "info" | "warn" | "error";
+    message: string;
+    meta?: Record<string, unknown>;
+    timestamp: number;
+  }
+
+  export interface ContextLog {
+    info(message: string, meta?: Record<string, unknown>): void;
+    warn(message: string, meta?: Record<string, unknown>): void;
+    error(message: string, meta?: Record<string, unknown>): void;
+  }
+
   export interface Context {
     id: string;
     attempt: number;
@@ -59,6 +72,8 @@ export namespace Taskora {
     signal: AbortSignal;
     heartbeat(): void;
     retry(options?: { delay?: number; reason?: string }): RetryError;
+    progress(value: number | Record<string, unknown>): void;
+    log: ContextLog;
   }
 
   export interface Adapter {
@@ -81,8 +96,12 @@ export namespace Taskora {
     ): Promise<void>;
     nack(task: string, jobId: string, token: string): Promise<void>;
     extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean>;
+    setProgress(task: string, jobId: string, value: string): Promise<void>;
+    addLog(task: string, jobId: string, entry: string): Promise<void>;
     getState(task: string, jobId: string): Promise<JobState | null>;
     getResult(task: string, jobId: string): Promise<string | null>;
     getError(task: string, jobId: string): Promise<string | null>;
+    getProgress(task: string, jobId: string): Promise<string | null>;
+    getLogs(task: string, jobId: string): Promise<string[]>;
   }
 }

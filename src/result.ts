@@ -97,6 +97,19 @@ export class ResultHandle<TOutput> {
   async getState(): Promise<Taskora.JobState | null> {
     return this.adapter.getState(this.taskName, this.id);
   }
+
+  async getProgress(): Promise<number | Record<string, unknown> | null> {
+    const raw = await this.adapter.getProgress(this.taskName, this.id);
+    if (raw == null) return null;
+    const num = Number(raw);
+    if (!Number.isNaN(num) && String(num) === raw) return num;
+    return JSON.parse(raw);
+  }
+
+  async getLogs(): Promise<Taskora.LogEntry[]> {
+    const raw = await this.adapter.getLogs(this.taskName, this.id);
+    return raw.map((entry) => JSON.parse(entry));
+  }
 }
 
 function sleep(ms: number): Promise<void> {

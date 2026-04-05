@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { computeDelay, shouldRetry } from "./backoff.js";
 import { createContext } from "./context.js";
-import { RetryError } from "./errors.js";
+import { RetryError, TimeoutError } from "./errors.js";
 import { validateSchema } from "./schema.js";
 import type { Task } from "./task.js";
 import type { Taskora } from "./types.js";
@@ -126,9 +126,35 @@ export class Worker {
           onHeartbeat: () => {
             this.adapter.extendLock(this.task.name, raw.id, token, LOCK_TTL).catch(() => {});
           },
+          onProgress: (value) => {
+            this.adapter.setProgress(this.task.name, raw.id, value).catch(() => {});
+          },
+          onLog: (entry) => {
+            this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {});
+          },
         });
 
-        handlerResult = await this.task.handler(data, ctx);
+        const timeoutMs = this.task.config.timeout;
+        if (timeoutMs > 0 && timeoutMs < Number.POSITIVE_INFINITY) {
+          handlerResult = await new Promise<unknown>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              controller.abort("timeout");
+              reject(new TimeoutError(raw.id, timeoutMs));
+            }, timeoutMs);
+            Promise.resolve(this.task.handler(data, ctx)).then(
+              (result) => {
+                clearTimeout(timer);
+                resolve(result);
+              },
+              (err) => {
+                clearTimeout(timer);
+                reject(err);
+              },
+            );
+          });
+        } else {
+          handlerResult = await this.task.handler(data, ctx);
+        }
         if (this.task.outputSchema) {
           handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
         }
@@ -137,7 +163,13 @@ export class Worker {
         const retryConfig = this.task.config.retry;
         let retryInfo: { delay: number } | undefined;
 
-        if (err instanceof RetryError) {
+        if (err instanceof TimeoutError) {
+          // Timeout errors are not retried by default —
+          // user must add TimeoutError to retryOn explicitly
+          if (retryConfig?.retryOn && shouldRetry(err, raw.attempt, retryConfig)) {
+            retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
+          }
+        } else if (err instanceof RetryError) {
           // Manual retry via ctx.retry() or throw new RetryError()
           // Always retry unless attempts exhausted
           if (!retryConfig || raw.attempt >= retryConfig.attempts) {

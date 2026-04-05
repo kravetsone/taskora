@@ -173,6 +173,29 @@ export class RedisBackend implements Taskora.Adapter {
     await this.eval("nack", 3, keys.active, keys.wait, keys.events, keys.jobPrefix, jobId, token);
   }
 
+  async setProgress(task: string, jobId: string, value: string): Promise<void> {
+    const keys = buildKeys(task, this.prefix);
+    await this.client.hset(`${keys.jobPrefix}${jobId}`, "progress", value);
+    await this.client.xadd(
+      keys.events,
+      "MAXLEN",
+      "~",
+      "10000",
+      "*",
+      "event",
+      "progress",
+      "jobId",
+      jobId,
+      "value",
+      value,
+    );
+  }
+
+  async addLog(task: string, jobId: string, entry: string): Promise<void> {
+    const keys = buildKeys(task, this.prefix);
+    await this.client.rpush(`${keys.jobPrefix}${jobId}:logs`, entry);
+  }
+
   async getState(task: string, jobId: string): Promise<Taskora.JobState | null> {
     const keys = buildKeys(task, this.prefix);
     const state = await this.client.hget(`${keys.jobPrefix}${jobId}`, "state");
@@ -187,6 +210,16 @@ export class RedisBackend implements Taskora.Adapter {
   async getError(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
     return this.client.hget(`${keys.jobPrefix}${jobId}`, "error");
+  }
+
+  async getProgress(task: string, jobId: string): Promise<string | null> {
+    const keys = buildKeys(task, this.prefix);
+    return this.client.hget(`${keys.jobPrefix}${jobId}`, "progress");
+  }
+
+  async getLogs(task: string, jobId: string): Promise<string[]> {
+    const keys = buildKeys(task, this.prefix);
+    return this.client.lrange(`${keys.jobPrefix}${jobId}:logs`, 0, -1);
   }
 
   async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {
