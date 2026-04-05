@@ -83,6 +83,20 @@ export class Task<TInput, TOutput> {
     this.middleware = middleware ?? [];
   }
 
+  /** @internal — used by TestRunner to swap adapter for testing */
+  _patchDeps(patch: Partial<TaskDeps>): () => void {
+    const saved: Partial<Record<keyof TaskDeps, unknown>> = {};
+    for (const key of Object.keys(patch) as Array<keyof TaskDeps>) {
+      saved[key] = this.deps[key];
+      (this.deps as Record<string, unknown>)[key] = patch[key];
+    }
+    return () => {
+      for (const key of Object.keys(saved) as Array<keyof TaskDeps>) {
+        (this.deps as Record<string, unknown>)[key] = saved[key];
+      }
+    };
+  }
+
   on<K extends keyof Taskora.TaskEventMap<TOutput> & string>(
     event: K,
     handler: (data: Taskora.TaskEventMap<TOutput>[K]) => void,

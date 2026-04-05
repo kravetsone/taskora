@@ -279,6 +279,19 @@ export class App {
     return this.tasks.get(name);
   }
 
+  /** @internal — used by TestRunner.importTask() */
+  registerExternalTask(task: Task<unknown, unknown>): void {
+    if (this.tasks.has(task.name)) {
+      throw new Error(`Task "${task.name}" is already registered`);
+    }
+    this.tasks.set(task.name, task);
+  }
+
+  /** @internal — used by TestRunner({ from }) */
+  getRegisteredTasks(): IterableIterator<Task<unknown, unknown>> {
+    return this.tasks.values();
+  }
+
   /** @internal — used by ScheduleManager */
   getScheduler(): Scheduler | null {
     return this.scheduler;
