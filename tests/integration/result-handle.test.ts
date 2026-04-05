@@ -3,14 +3,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { JobFailedError, TimeoutError, taskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { ResultHandle } from "../../src/result.js";
+import { url, waitFor as poll } from "../helpers.js";
 
 let redis: Redis;
-
-function url() {
-  const u = process.env.REDIS_URL;
-  if (!u) throw new Error("REDIS_URL not set");
-  return u;
-}
 
 beforeEach(() => {
   redis = new Redis(url());
@@ -20,16 +15,6 @@ afterEach(async () => {
   await redis.flushdb();
   await redis.quit();
 });
-
-/** Wait until a predicate resolves to true (polling). */
-async function poll(fn: () => Promise<boolean> | boolean, timeoutMs = 10_000, interval = 50) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (await fn()) return;
-    await new Promise((r) => setTimeout(r, interval));
-  }
-  throw new Error(`poll timed out after ${timeoutMs}ms`);
-}
 
 // ── dispatch returns ResultHandle ────────────────────────────────────
 

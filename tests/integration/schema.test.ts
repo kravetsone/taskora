@@ -4,14 +4,9 @@ import { z } from "zod";
 import { ValidationError } from "../../src/errors.js";
 import { taskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
+import { url, waitFor } from "../helpers.js";
 
 let redis: Redis;
-
-function url() {
-  const u = process.env.REDIS_URL;
-  if (!u) throw new Error("REDIS_URL not set");
-  return u;
-}
 
 beforeEach(() => {
   redis = new Redis(url());
@@ -21,15 +16,6 @@ afterEach(async () => {
   await redis.flushdb();
   await redis.quit();
 });
-
-async function waitFor(fn: () => Promise<boolean> | boolean, timeoutMs = 10_000, interval = 50) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (await fn()) return;
-    await new Promise((r) => setTimeout(r, interval));
-  }
-  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-}
 
 describe("schema validation — dispatch", () => {
   it("rejects invalid input before enqueue", async () => {
