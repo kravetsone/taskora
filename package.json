@@ -16,6 +16,16 @@
       "types": "./dist/redis/index.d.mts",
       "import": "./dist/redis/index.mjs",
       "require": "./dist/redis/index.cjs"
+    },
+    "./memory": {
+      "types": "./dist/memory/index.d.mts",
+      "import": "./dist/memory/index.mjs",
+      "require": "./dist/memory/index.cjs"
+    },
+    "./test": {
+      "types": "./dist/test/index.d.mts",
+      "import": "./dist/test/index.mjs",
+      "require": "./dist/test/index.cjs"
     }
   },
   "peerDependencies": {

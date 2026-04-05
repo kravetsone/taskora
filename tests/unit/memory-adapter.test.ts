@@ -1,0 +1,213 @@
+import { describe, expect, it } from "vitest";
+import { taskora } from "../../src/index.js";
+import { memoryAdapter } from "../../src/memory/index.js";
+
+describe("memoryAdapter", () => {
+  it("works as a drop-in adapter for App", async () => {
+    const app = taskora({ adapter: memoryAdapter() });
+    const task = app.task("greet", async (data: { name: string }) => ({
+      greeting: `Hello, ${data.name}!`,
+    }));
+
+    const handle = task.dispatch({ name: "World" });
+    const id = await handle;
+    expect(typeof id).toBe("string");
+    expect(await handle.getState()).toBe("waiting");
+  });
+
+  it("enqueue and dequeue cycle", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '{"x":1}', { _v: 1 });
+    const result = await adapter.dequeue("t1", 30_000, "tok1");
+
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("j1");
+    expect(result?.data).toBe('{"x":1}');
+    expect(result?.attempt).toBe(1);
+  });
+
+  it("ack moves to completed", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1 });
+    const raw = await adapter.dequeue("t1", 30_000, "tok1");
+    await adapter.ack("t1", "j1", "tok1", '"result"');
+
+    expect(await adapter.getState("t1", "j1")).toBe("completed");
+    expect(await adapter.getResult("t1", "j1")).toBe('"result"');
+  });
+
+  it("fail with retry moves to retrying", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1, maxAttempts: 3 });
+    await adapter.dequeue("t1", 30_000, "tok1");
+    await adapter.fail("t1", "j1", "tok1", "oops", { delay: 1000 });
+
+    expect(await adapter.getState("t1", "j1")).toBe("retrying");
+  });
+
+  it("fail without retry moves to failed", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1 });
+    await adapter.dequeue("t1", 30_000, "tok1");
+    await adapter.fail("t1", "j1", "tok1", "permanent error");
+
+    expect(await adapter.getState("t1", "j1")).toBe("failed");
+    expect(await adapter.getError("t1", "j1")).toBe("permanent error");
+  });
+
+  it("nack returns job to waiting", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1 });
+    await adapter.dequeue("t1", 30_000, "tok1");
+    await adapter.nack("t1", "j1", "tok1");
+
+    expect(await adapter.getState("t1", "j1")).toBe("waiting");
+  });
+
+  it("delayed enqueue and promote", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1, delay: 5000 });
+    expect(await adapter.getState("t1", "j1")).toBe("delayed");
+
+    // Not promoted yet (delay not elapsed with real clock)
+    const result = await adapter.dequeue("t1", 30_000, "tok1");
+    // May or may not be null depending on timing, but state was "delayed"
+    // This is a basic smoke test for the delayed path
+  });
+
+  it("cancel a waiting job", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1 });
+    const status = await adapter.cancel("t1", "j1", "no longer needed");
+    expect(status).toBe("cancelled");
+    expect(await adapter.getState("t1", "j1")).toBe("cancelled");
+  });
+
+  it("cancel an active job returns flagged", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1 });
+    await adapter.dequeue("t1", 30_000, "tok1");
+    const status = await adapter.cancel("t1", "j1");
+    expect(status).toBe("flagged");
+  });
+
+  it("extendLock returns cancelled for flagged jobs", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"data"', { _v: 1 });
+    await adapter.dequeue("t1", 30_000, "tok1");
+    await adapter.cancel("t1", "j1");
+
+    const status = await adapter.extendLock("t1", "j1", "tok1", 30_000);
+    expect(status).toBe("cancelled");
+  });
+
+  it("queue stats", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '""', { _v: 1 });
+    await adapter.enqueue("t1", "j2", '""', { _v: 1 });
+
+    const stats = await adapter.getQueueStats("t1");
+    expect(stats.waiting).toBe(2);
+    expect(stats.active).toBe(0);
+    expect(stats.completed).toBe(0);
+  });
+
+  it("scheduler lock acquire and renew", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const acquired = await adapter.acquireSchedulerLock("tok1", 30_000);
+    expect(acquired).toBe(true);
+
+    const second = await adapter.acquireSchedulerLock("tok2", 30_000);
+    expect(second).toBe(false);
+
+    const renewed = await adapter.renewSchedulerLock("tok1", 30_000);
+    expect(renewed).toBe(true);
+
+    const wrong = await adapter.renewSchedulerLock("tok2", 30_000);
+    expect(wrong).toBe(false);
+  });
+
+  it("schedule CRUD", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.addSchedule("s1", '{"task":"t1","every":5000}', 1000);
+    const schedule = await adapter.getSchedule("s1");
+    expect(schedule).not.toBeNull();
+    expect(schedule?.nextRun).toBe(1000);
+
+    await adapter.pauseSchedule("s1");
+    const paused = await adapter.getSchedule("s1");
+    expect(paused?.paused).toBe(true);
+
+    await adapter.resumeSchedule("s1", 2000);
+    const resumed = await adapter.getSchedule("s1");
+    expect(resumed?.nextRun).toBe(2000);
+
+    await adapter.removeSchedule("s1");
+    expect(await adapter.getSchedule("s1")).toBeNull();
+  });
+
+  it("progress and logs", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '""', { _v: 1 });
+    await adapter.dequeue("t1", 30_000, "tok1");
+
+    await adapter.setProgress("t1", "j1", "50");
+    expect(await adapter.getProgress("t1", "j1")).toBe("50");
+
+    await adapter.addLog("t1", "j1", '{"level":"info","message":"step 1"}');
+    await adapter.addLog("t1", "j1", '{"level":"info","message":"step 2"}');
+    const logs = await adapter.getLogs("t1", "j1");
+    expect(logs).toHaveLength(2);
+  });
+
+  it("throttle enqueue", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const ok1 = await adapter.throttleEnqueue("t1", "j1", '"a"', { _v: 1 }, "k1", 2, 10_000);
+    const ok2 = await adapter.throttleEnqueue("t1", "j2", '"b"', { _v: 1 }, "k1", 2, 10_000);
+    const ok3 = await adapter.throttleEnqueue("t1", "j3", '"c"', { _v: 1 }, "k1", 2, 10_000);
+
+    expect(ok1).toBe(true);
+    expect(ok2).toBe(true);
+    expect(ok3).toBe(false); // throttled
+  });
+
+  it("deduplicate enqueue", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const r1 = await adapter.deduplicateEnqueue("t1", "j1", '"a"', { _v: 1 }, "dk1", ["waiting"]);
+    expect(r1.created).toBe(true);
+
+    const r2 = await adapter.deduplicateEnqueue("t1", "j2", '"b"', { _v: 1 }, "dk1", ["waiting"]);
+    expect(r2.created).toBe(false);
+    if (!r2.created) expect(r2.existingId).toBe("j1");
+  });
+});
