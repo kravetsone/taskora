@@ -78,7 +78,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–4 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 5: Task Context**.
+Phases 1–5 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 6: Events**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -117,3 +117,15 @@ Phase 4 delivered:
 - `ctx.retry({ delay?, reason? })` → returns `RetryError` (user throws); also `throw new RetryError()` works directly
 - `RetryError` delay overrides computed backoff
 - 15 unit tests (backoff strategies, jitter bounds, retryOn/noRetryOn), 9 integration tests (60 total)
+
+Phase 5 delivered:
+- `ctx.progress(value)` — fire-and-forget HSET + XADD progress event; value is number or object
+- `ctx.log.info/warn/error(msg, meta?)` — fire-and-forget RPUSH to `{jobId}:logs` as structured `LogEntry`
+- `Taskora.LogEntry`: `{ level, message, meta?, timestamp }`
+- `Taskora.ContextLog` interface: `info()`, `warn()`, `error()`
+- Timeout: worker races handler against `setTimeout` → `TimeoutError` + `controller.abort("timeout")`
+- `TimeoutError` not retried by default — user must add to `retryOn` explicitly
+- `handle.getProgress()` — returns number, object, or null
+- `handle.getLogs()` — returns `LogEntry[]`
+- Adapter additions: `setProgress()`, `addLog()`, `getProgress()`, `getLogs()` — plain Redis commands
+- 9 new integration tests (69 total)
