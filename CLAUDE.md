@@ -81,7 +81,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–6 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 7: Stall Detection**.
+Phases 1–7 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 8: Scheduling / Cron**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -146,3 +146,16 @@ Phase 6 delivered:
 - `Adapter.blockingDequeue()` — BZPOPMIN + moveToActive loop, fast-path non-blocking attempt first
 - Worker rewritten: no backoff, BZPOPMIN-driven poll loop with 2s block timeout
 - 12 new integration tests (81 total)
+
+Phase 7 delivered:
+- `stalledCheck.lua` — two-phase detection: resolve stalled candidates (no lock = truly stalled), then SADD all active IDs for next check
+- `extendLock.lua` already SREMs healthy jobs from stalled set (Phase 1)
+- `Adapter.stalledCheck(task, maxStalledCount)` — returns `{ recovered: string[]; failed: string[] }`
+- Worker runs stall check on `setInterval` (default 30s, configurable)
+- `Taskora.StallConfig`: `{ interval?: number; maxCount?: number }` — per-task + app defaults
+- `maxStalledCount` default 1: re-queue on first stall, fail on second
+- `stalledCount` field in job hash (HINCRBY)
+- `stalled` event: `{ id, count, action: "recovered" | "failed" }` on task + app (`task:stalled`)
+- Failed stalled jobs also emit `failed` stream event
+- No throttle key — Lua script is idempotent across concurrent workers
+- 7 new integration tests (88 total)
