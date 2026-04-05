@@ -12,6 +12,7 @@ export { type TaskoraOptions, App } from "./app.js";
 export { Task } from "./task.js";
 export { ResultHandle } from "./result.js";
 export { Inspector } from "./inspector.js";
+export { DeadLetterManager } from "./dlq.js";
 export { into } from "./migration.js";
 export { parseDuration, type Duration } from "./scheduler/duration.js";
 

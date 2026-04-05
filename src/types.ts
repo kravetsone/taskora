@@ -188,6 +188,21 @@ export namespace Taskora {
     getLogs(task: string, jobId: string): Promise<string[]>;
     subscribe(tasks: string[], handler: (event: StreamEvent) => void): Promise<() => Promise<void>>;
     awaitJob(task: string, jobId: string, timeoutMs?: number): Promise<AwaitJobResult | null>;
+    // Inspector
+    listJobDetails(
+      task: string,
+      state: "waiting" | "active" | "delayed" | "completed" | "failed",
+      offset: number,
+      limit: number,
+    ): Promise<Array<{ id: string; details: RawJobDetails }>>;
+    getJobDetails(task: string, jobId: string): Promise<RawJobDetails | null>;
+    getQueueStats(task: string): Promise<QueueStats>;
+
+    // Dead letter queue
+    retryFromDLQ(task: string, jobId: string): Promise<boolean>;
+    retryAllFromDLQ(task: string, limit: number): Promise<number>;
+    trimDLQ(task: string, before: number): Promise<number>;
+
     getVersionDistribution(task: string): Promise<{
       waiting: Record<number, number>;
       active: Record<number, number>;
@@ -213,6 +228,52 @@ export namespace Taskora {
     state: "completed" | "failed" | "cancelled";
     result?: string;
     error?: string;
+  }
+
+  // ── Inspector types ─────────────────────────────────────────────────
+
+  export interface JobInfo<TData = unknown, TResult = unknown> {
+    id: string;
+    task: string;
+    state: JobState;
+    data: TData;
+    result?: TResult;
+    error?: string;
+    progress?: number | Record<string, unknown>;
+    logs: LogEntry[];
+    attempt: number;
+    version: number;
+    timestamp: number;
+    processedOn?: number;
+    finishedOn?: number;
+    timeline: Array<{ state: string; at: number }>;
+  }
+
+  export interface QueueStats {
+    waiting: number;
+    active: number;
+    delayed: number;
+    completed: number;
+    failed: number;
+  }
+
+  export interface RawJobDetails {
+    fields: Record<string, string>;
+    data: string | null;
+    result: string | null;
+    logs: string[];
+  }
+
+  export interface InspectorListOptions {
+    task?: string;
+    limit?: number;
+    offset?: number;
+  }
+
+  // ── Dead letter queue ──────────────────────────────────────────────
+
+  export interface DeadLetterConfig {
+    maxAge?: DurationType;
   }
 
   export interface MigrationStatus {

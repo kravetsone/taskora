@@ -26,6 +26,7 @@ export class Worker {
   private readonly concurrency: number;
   private readonly stallInterval: number;
   private readonly maxStalledCount: number;
+  private readonly dlqMaxAgeMs: number | null;
 
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
@@ -37,6 +38,7 @@ export class Worker {
     task: Task<unknown, unknown>,
     adapter: Taskora.Adapter,
     serializer: Taskora.Serializer,
+    dlqMaxAgeMs?: number | null,
   ) {
     this.task = task;
     this.adapter = adapter;
@@ -44,6 +46,7 @@ export class Worker {
     this.concurrency = task.config.concurrency;
     this.stallInterval = task.config.stall?.interval ?? DEFAULT_STALL_INTERVAL;
     this.maxStalledCount = task.config.stall?.maxCount ?? DEFAULT_MAX_STALLED_COUNT;
+    this.dlqMaxAgeMs = dlqMaxAgeMs ?? null;
   }
 
   start(): void {
@@ -259,6 +262,15 @@ export class Worker {
       await this.adapter.stalledCheck(this.task.name, this.maxStalledCount);
     } catch {
       // Stall check failed — will retry on next interval
+    }
+
+    // DLQ retention trim — piggyback on stall check interval
+    if (this.dlqMaxAgeMs !== null) {
+      try {
+        await this.adapter.trimDLQ(this.task.name, Date.now() - this.dlqMaxAgeMs);
+      } catch {
+        // Trim failed — will retry on next interval
+      }
     }
   }
 

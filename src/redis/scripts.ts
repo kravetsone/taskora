@@ -493,3 +493,149 @@ table.insert(result, 'END')
 
 return result
 `;
+
+// ── listJobDetails ──────────────────────────────────────────────────
+// Fetch job IDs from a queue + all details in one script (1 RTT).
+// KEYS[1] = queue key (wait/active/delayed/completed/failed)
+// ARGV[1] = jobPrefix
+// ARGV[2] = offset
+// ARGV[3] = limit
+// ARGV[4] = mode: "lrange" | "zrange" | "zrevrange"
+// Returns: nested array — each entry is [id, ts, _v, attempt, state,
+//   processedOn, finishedOn, error, progress, data, result, numLogs, ...logs]
+export const LIST_JOB_DETAILS = `
+local prefix = ARGV[1]
+local offset = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local mode = ARGV[4]
+
+local ids
+if mode == 'lrange' then
+  ids = redis.call('LRANGE', KEYS[1], offset, offset + limit - 1)
+elseif mode == 'zrange' then
+  ids = redis.call('ZRANGE', KEYS[1], offset, offset + limit - 1)
+else
+  ids = redis.call('ZREVRANGE', KEYS[1], offset, offset + limit - 1)
+end
+
+if #ids == 0 then
+  return {}
+end
+
+local result = {}
+for _, jobId in ipairs(ids) do
+  local jobKey = prefix .. jobId
+  local meta = redis.call('HMGET', jobKey,
+    'ts', '_v', 'attempt', 'state', 'processedOn', 'finishedOn', 'error', 'progress')
+
+  if meta[4] then
+    local entry = { jobId }
+    for i = 1, 8 do
+      entry[i + 1] = meta[i] or false
+    end
+    entry[10] = redis.call('GET', jobKey .. ':data') or false
+    entry[11] = redis.call('GET', jobKey .. ':result') or false
+    local logs = redis.call('LRANGE', jobKey .. ':logs', 0, -1)
+    entry[12] = #logs
+    for i = 1, #logs do
+      entry[12 + i] = logs[i]
+    end
+    result[#result + 1] = entry
+  end
+end
+
+return result
+`;
+
+// ── retryDLQ ────────────────────────────────────────────────────────
+// Atomically move a single job from failed back to waiting.
+// KEYS[1] = <task>:failed    (sorted set)
+// KEYS[2] = <task>:wait      (list)
+// KEYS[3] = <task>:events    (stream)
+// KEYS[4] = <task>:marker    (sorted set)
+// ARGV[1] = jobPrefix
+// ARGV[2] = jobId
+// Returns: 1 (retried) or 0 (not found in failed)
+export const RETRY_DLQ = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local jobKey = prefix .. jobId
+
+local removed = redis.call('ZREM', KEYS[1], jobId)
+if removed == 0 then
+  return 0
+end
+
+redis.call('HSET', jobKey, 'state', 'waiting', 'attempt', 1)
+redis.call('HDEL', jobKey, 'error', 'finishedOn')
+redis.call('DEL', prefix .. jobId .. ':result')
+redis.call('LPUSH', KEYS[2], jobId)
+redis.call('ZADD', KEYS[4], 0, '0')
+
+redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+  'event', 'waiting', 'jobId', jobId)
+
+return 1
+`;
+
+// ── retryAllDLQ ─────────────────────────────────────────────────────
+// Atomically move a batch of failed jobs back to waiting.
+// KEYS[1] = <task>:failed
+// KEYS[2] = <task>:wait
+// KEYS[3] = <task>:events
+// KEYS[4] = <task>:marker
+// ARGV[1] = jobPrefix
+// ARGV[2] = limit (max jobs to retry per call)
+// Returns: number of jobs retried
+export const RETRY_ALL_DLQ = `
+local prefix = ARGV[1]
+local limit = tonumber(ARGV[2])
+
+local ids = redis.call('ZRANGE', KEYS[1], 0, limit - 1)
+if #ids == 0 then
+  return 0
+end
+
+for _, jobId in ipairs(ids) do
+  local jobKey = prefix .. jobId
+  redis.call('ZREM', KEYS[1], jobId)
+  redis.call('HSET', jobKey, 'state', 'waiting', 'attempt', 1)
+  redis.call('HDEL', jobKey, 'error', 'finishedOn')
+  redis.call('DEL', prefix .. jobId .. ':result')
+  redis.call('LPUSH', KEYS[2], jobId)
+
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'waiting', 'jobId', jobId)
+end
+
+redis.call('ZADD', KEYS[4], 0, '0')
+return #ids
+`;
+
+// ── trimDLQ ─────────────────────────────────────────────────────────
+// Remove expired failed jobs (older than cutoff) and clean up all their keys.
+// KEYS[1] = <task>:failed
+// ARGV[1] = jobPrefix
+// ARGV[2] = cutoff timestamp (ms) — jobs with finishedOn <= cutoff are removed
+// Returns: number of jobs trimmed
+export const TRIM_DLQ = `
+local prefix = ARGV[1]
+local cutoff = ARGV[2]
+
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, 100)
+if #ids == 0 then
+  return 0
+end
+
+for _, jobId in ipairs(ids) do
+  redis.call('ZREM', KEYS[1], jobId)
+  local jobKey = prefix .. jobId
+  redis.call('DEL', jobKey,
+    jobKey .. ':data',
+    jobKey .. ':result',
+    jobKey .. ':lock',
+    jobKey .. ':logs')
+end
+
+return #ids
+`;

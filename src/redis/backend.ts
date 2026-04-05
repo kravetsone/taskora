@@ -19,6 +19,10 @@ const SCRIPT_MAP: Record<string, string> = {
   acquireSchedulerLock: scripts.ACQUIRE_SCHEDULER_LOCK,
   renewSchedulerLock: scripts.RENEW_SCHEDULER_LOCK,
   versionDistribution: scripts.VERSION_DISTRIBUTION,
+  listJobDetails: scripts.LIST_JOB_DETAILS,
+  retryDLQ: scripts.RETRY_DLQ,
+  retryAllDLQ: scripts.RETRY_ALL_DLQ,
+  trimDLQ: scripts.TRIM_DLQ,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -418,6 +422,154 @@ export class RedisBackend implements Taskora.Adapter {
     }
 
     return distribution;
+  }
+
+  // ── Inspector ──────────────────────────────────────────────────────
+
+  private static readonly DETAIL_FIELDS = [
+    "ts",
+    "_v",
+    "attempt",
+    "state",
+    "processedOn",
+    "finishedOn",
+    "error",
+    "progress",
+  ] as const;
+
+  private static readonly STATE_MODE: Record<string, { key: "wait" | "active" | "delayed" | "completed" | "failed"; mode: string }> = {
+    waiting: { key: "wait", mode: "lrange" },
+    active: { key: "active", mode: "lrange" },
+    delayed: { key: "delayed", mode: "zrange" },
+    completed: { key: "completed", mode: "zrevrange" },
+    failed: { key: "failed", mode: "zrevrange" },
+  };
+
+  async listJobDetails(
+    task: string,
+    state: "waiting" | "active" | "delayed" | "completed" | "failed",
+    offset: number,
+    limit: number,
+  ): Promise<Array<{ id: string; details: Taskora.RawJobDetails }>> {
+    const keys = buildKeys(task, this.prefix);
+    const { key, mode } = RedisBackend.STATE_MODE[state];
+
+    const raw = (await this.eval(
+      "listJobDetails",
+      1,
+      keys[key],
+      keys.jobPrefix,
+      String(offset),
+      String(limit),
+      mode,
+    )) as Array<Array<string | null>>;
+
+    if (!raw || raw.length === 0) return [];
+
+    // Parse Lua response: each entry = [id, ts, _v, attempt, state,
+    //   processedOn, finishedOn, error, progress, data, result, numLogs, ...logs]
+    const FIELDS = RedisBackend.DETAIL_FIELDS;
+    return raw.map((entry) => {
+      const id = entry[0] as string;
+      const fields: Record<string, string> = {};
+      for (let i = 0; i < FIELDS.length; i++) {
+        const val = entry[1 + i];
+        if (val) fields[FIELDS[i]] = val;
+      }
+      const numLogs = Number(entry[11] ?? 0);
+      const logs = entry.slice(12, 12 + numLogs) as string[];
+
+      return {
+        id,
+        details: {
+          fields,
+          data: entry[9] || null,
+          result: entry[10] || null,
+          logs,
+        },
+      };
+    });
+  }
+
+  async getJobDetails(task: string, jobId: string): Promise<Taskora.RawJobDetails | null> {
+    const keys = buildKeys(task, this.prefix);
+    const jobKey = `${keys.jobPrefix}${jobId}`;
+
+    const pipe = this.client.pipeline();
+    pipe.hgetall(jobKey);
+    pipe.get(`${jobKey}:data`);
+    pipe.get(`${jobKey}:result`);
+    pipe.lrange(`${jobKey}:logs`, 0, -1);
+
+    const results = (await pipe.exec()) as [Error | null, unknown][];
+    const fields = results[0][1] as Record<string, string>;
+
+    if (!fields || Object.keys(fields).length === 0) return null;
+
+    return {
+      fields,
+      data: results[1][1] as string | null,
+      result: results[2][1] as string | null,
+      logs: results[3][1] as string[],
+    };
+  }
+
+  async getQueueStats(task: string): Promise<Taskora.QueueStats> {
+    const keys = buildKeys(task, this.prefix);
+
+    const pipe = this.client.pipeline();
+    pipe.llen(keys.wait);
+    pipe.llen(keys.active);
+    pipe.zcard(keys.delayed);
+    pipe.zcard(keys.completed);
+    pipe.zcard(keys.failed);
+
+    const results = (await pipe.exec()) as [Error | null, number][];
+    return {
+      waiting: results[0][1],
+      active: results[1][1],
+      delayed: results[2][1],
+      completed: results[3][1],
+      failed: results[4][1],
+    };
+  }
+
+  // ── Dead letter queue ─────────────────────────────────────────────
+
+  async retryFromDLQ(task: string, jobId: string): Promise<boolean> {
+    const keys = buildKeys(task, this.prefix);
+    const result = await this.eval(
+      "retryDLQ",
+      4,
+      keys.failed,
+      keys.wait,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+    );
+    return result === 1;
+  }
+
+  async retryAllFromDLQ(task: string, limit: number): Promise<number> {
+    const keys = buildKeys(task, this.prefix);
+    const result = await this.eval(
+      "retryAllDLQ",
+      4,
+      keys.failed,
+      keys.wait,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      String(limit),
+    );
+    return result as number;
+  }
+
+  async trimDLQ(task: string, before: number): Promise<number> {
+    const keys = buildKeys(task, this.prefix);
+    const result = await this.eval("trimDLQ", 1, keys.failed, keys.jobPrefix, String(before));
+    return result as number;
   }
 
   // ── Scheduling ──────────────────────────────────────────────────────

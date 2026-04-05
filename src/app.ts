@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { DeadLetterManager } from "./dlq.js";
 import { TypedEmitter } from "./emitter.js";
 import { Inspector } from "./inspector.js";
 import type { Duration } from "./scheduler/duration.js";
@@ -13,6 +14,7 @@ export interface TaskoraOptions {
   adapter: Taskora.Adapter;
   serializer?: Taskora.Serializer;
   scheduler?: Taskora.SchedulerConfig;
+  deadLetterQueue?: Taskora.DeadLetterConfig;
   defaults?: {
     retry?: Taskora.RetryConfig;
     timeout?: number;
@@ -63,8 +65,11 @@ export class App {
   readonly adapter: Taskora.Adapter;
   readonly serializer: Taskora.Serializer;
   readonly schedules: ScheduleManager;
+  readonly deadLetters: DeadLetterManager;
   private readonly defaults: NonNullable<TaskoraOptions["defaults"]>;
   private readonly schedulerConfig?: Taskora.SchedulerConfig;
+  /** @internal — used by Worker for DLQ trim */
+  readonly dlqMaxAgeMs: number | null;
 
   private tasks = new Map<string, Task<unknown, unknown>>();
   private workers: Worker[] = [];
@@ -84,6 +89,10 @@ export class App {
     this.defaults = options.defaults ?? {};
     this.schedulerConfig = options.scheduler;
     this.schedules = new ScheduleManager(this);
+    this.deadLetters = new DeadLetterManager(this.adapter, this.tasks, () => this.inspect());
+    this.dlqMaxAgeMs = options.deadLetterQueue?.maxAge
+      ? parseDuration(options.deadLetterQueue.maxAge)
+      : null;
   }
 
   on<K extends keyof Taskora.AppEventMap & string>(
@@ -207,7 +216,7 @@ export class App {
   }
 
   inspect(): Inspector {
-    return new Inspector(this.adapter, this.tasks);
+    return new Inspector(this.adapter, this.serializer, this.tasks);
   }
 
   /** @internal — used by ScheduleManager */
@@ -237,7 +246,7 @@ export class App {
     await this.ensureSubscription();
 
     for (const task of this.tasks.values()) {
-      const worker = new Worker(task, this.adapter, this.serializer);
+      const worker = new Worker(task, this.adapter, this.serializer, this.dlqMaxAgeMs);
       this.workers.push(worker);
       worker.start();
     }
