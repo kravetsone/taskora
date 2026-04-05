@@ -9,6 +9,7 @@ export interface TaskConfig {
   concurrency: number;
   timeout: number;
   retry?: Taskora.RetryConfig;
+  stall?: Taskora.StallConfig;
 }
 
 export interface TaskDeps {

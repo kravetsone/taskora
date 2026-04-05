@@ -278,6 +278,88 @@ redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
 return 1
 `;
 
+// ── stalledCheck ────────────────────────────────────────────────
+// KEYS[1] = <task>:stalled   (Set: candidate stalled IDs from last check)
+// KEYS[2] = <task>:active    (List: currently active jobs)
+// KEYS[3] = <task>:wait      (List: for re-queuing recovered jobs)
+// KEYS[4] = <task>:failed    (Sorted Set: permanently failed jobs)
+// KEYS[5] = <task>:events    (Stream)
+// KEYS[6] = <task>:marker    (Sorted Set: wake workers)
+// ARGV[1] = jobPrefix
+// ARGV[2] = maxStalledCount
+// ARGV[3] = current timestamp (ms)
+// Returns: { recovered[], failed[] } as flat array [#recovered, ...recoveredIds, #failed, ...failedIds]
+export const STALLED_CHECK = `
+local prefix = ARGV[1]
+local maxStalled = tonumber(ARGV[2])
+local now = ARGV[3]
+
+local recovered = {}
+local failed = {}
+
+-- Phase 1: Resolve candidates from last check
+local candidates = redis.call('SMEMBERS', KEYS[1])
+
+for _, jobId in ipairs(candidates) do
+  local lockKey = prefix .. jobId .. ':lock'
+  local exists = redis.call('EXISTS', lockKey)
+
+  if exists == 0 then
+    local jobKey = prefix .. jobId
+    local count = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+
+    if count > maxStalled then
+      -- Permanently fail
+      redis.call('LREM', KEYS[2], 1, jobId)
+      redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', now,
+        'error', 'Job stalled and exceeded max stalled count')
+      redis.call('ZADD', KEYS[4], tonumber(now), jobId)
+
+      redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
+        'event', 'stalled', 'jobId', jobId,
+        'count', tostring(count), 'action', 'failed')
+
+      redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
+        'event', 'failed', 'jobId', jobId)
+
+      table.insert(failed, jobId)
+    else
+      -- Recover: move back to wait
+      redis.call('LREM', KEYS[2], 1, jobId)
+      redis.call('HSET', jobKey, 'state', 'waiting')
+      redis.call('RPUSH', KEYS[3], jobId)
+      redis.call('ZADD', KEYS[6], 0, '0')
+
+      redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
+        'event', 'stalled', 'jobId', jobId,
+        'count', tostring(count), 'action', 'recovered')
+
+      table.insert(recovered, jobId)
+    end
+  end
+
+  redis.call('SREM', KEYS[1], jobId)
+end
+
+-- Phase 2: Copy all current active IDs into stalled set for next check
+local activeIds = redis.call('LRANGE', KEYS[2], 0, -1)
+if #activeIds > 0 then
+  redis.call('SADD', KEYS[1], unpack(activeIds))
+end
+
+-- Return flat: [#recovered, ...ids, #failed, ...ids]
+local result = { #recovered }
+for _, id in ipairs(recovered) do
+  table.insert(result, id)
+end
+table.insert(result, #failed)
+for _, id in ipairs(failed) do
+  table.insert(result, id)
+end
+
+return result
+`;
+
 // ── extendLock ───────────────────────────────────────────────────────
 // KEYS[1] = <task>:stalled   (stalled set — prepared for Phase 7)
 // ARGV[1] = jobPrefix

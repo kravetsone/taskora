@@ -34,18 +34,26 @@ export namespace Taskora {
     attempt: number;
   }
 
+  export interface StalledEvent {
+    id: string;
+    count: number;
+    action: "recovered" | "failed";
+  }
+
   export interface TaskEventMap<TOutput> {
     completed: CompletedEvent<TOutput>;
     failed: FailedEvent;
     retrying: RetryingEvent;
     progress: ProgressEvent;
     active: ActiveEvent;
+    stalled: StalledEvent;
   }
 
   export interface AppEventMap {
     "task:completed": CompletedEvent<unknown> & { task: string };
     "task:failed": FailedEvent & { task: string };
     "task:active": ActiveEvent & { task: string };
+    "task:stalled": StalledEvent & { task: string };
     "worker:ready": undefined;
     "worker:error": Error;
     "worker:closing": undefined;
@@ -79,6 +87,11 @@ export namespace Taskora {
     jitter?: boolean;
     retryOn?: Array<new (...args: any[]) => Error>;
     noRetryOn?: Array<new (...args: any[]) => Error>;
+  }
+
+  export interface StallConfig {
+    interval?: number;
+    maxCount?: number;
   }
 
   export interface JobOptions {
@@ -161,6 +174,10 @@ export namespace Taskora {
     ): Promise<void>;
     nack(task: string, jobId: string, token: string): Promise<void>;
     extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean>;
+    stalledCheck(
+      task: string,
+      maxStalledCount: number,
+    ): Promise<{ recovered: string[]; failed: string[] }>;
     setProgress(task: string, jobId: string, value: string): Promise<void>;
     addLog(task: string, jobId: string, entry: string): Promise<void>;
     getState(task: string, jobId: string): Promise<JobState | null>;

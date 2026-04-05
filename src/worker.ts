@@ -9,6 +9,8 @@ import type { Taskora } from "./types.js";
 const LOCK_TTL = 30_000;
 const LOCK_EXTEND_INTERVAL = 10_000;
 const BLOCK_TIMEOUT = 2_000;
+const DEFAULT_STALL_INTERVAL = 30_000;
+const DEFAULT_MAX_STALLED_COUNT = 1;
 
 interface ActiveJob {
   promise: Promise<void>;
@@ -21,10 +23,13 @@ export class Worker {
   private readonly adapter: Taskora.Adapter;
   private readonly serializer: Taskora.Serializer;
   private readonly concurrency: number;
+  private readonly stallInterval: number;
+  private readonly maxStalledCount: number;
 
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
   private lockTimer: ReturnType<typeof setInterval> | null = null;
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
   private slotResolve: (() => void) | null = null;
 
   constructor(
@@ -36,11 +41,14 @@ export class Worker {
     this.adapter = adapter;
     this.serializer = serializer;
     this.concurrency = task.config.concurrency;
+    this.stallInterval = task.config.stall?.interval ?? DEFAULT_STALL_INTERVAL;
+    this.maxStalledCount = task.config.stall?.maxCount ?? DEFAULT_MAX_STALLED_COUNT;
   }
 
   start(): void {
     this.running = true;
     this.lockTimer = setInterval(() => this.extendAllLocks(), LOCK_EXTEND_INTERVAL);
+    this.stallTimer = setInterval(() => this.runStalledCheck(), this.stallInterval);
     this.poll();
   }
 
@@ -50,6 +58,10 @@ export class Worker {
     if (this.lockTimer) {
       clearInterval(this.lockTimer);
       this.lockTimer = null;
+    }
+    if (this.stallTimer) {
+      clearInterval(this.stallTimer);
+      this.stallTimer = null;
     }
 
     // Wake up the poll loop if it's waiting for a slot
@@ -202,6 +214,14 @@ export class Worker {
     });
 
     this.activeJobs.set(raw.id, { promise: tracked, token, controller });
+  }
+
+  private async runStalledCheck(): Promise<void> {
+    try {
+      await this.adapter.stalledCheck(this.task.name, this.maxStalledCount);
+    } catch {
+      // Stall check failed — will retry on next interval
+    }
   }
 
   private async extendAllLocks(): Promise<void> {

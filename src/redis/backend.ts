@@ -13,6 +13,7 @@ const SCRIPT_MAP: Record<string, string> = {
   ack: scripts.ACK,
   fail: scripts.FAIL,
   nack: scripts.NACK,
+  stalledCheck: scripts.STALLED_CHECK,
   extendLock: scripts.EXTEND_LOCK,
 };
 
@@ -342,6 +343,41 @@ export class RedisBackend implements Taskora.Adapter {
       this.jobWaiter = new JobWaiter(this.client, this.prefix);
     }
     return this.jobWaiter.wait(task, jobId, timeoutMs);
+  }
+
+  async stalledCheck(
+    task: string,
+    maxStalledCount: number,
+  ): Promise<{ recovered: string[]; failed: string[] }> {
+    const keys = buildKeys(task, this.prefix);
+    const result = (await this.eval(
+      "stalledCheck",
+      6,
+      keys.stalled,
+      keys.active,
+      keys.wait,
+      keys.failed,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      String(maxStalledCount),
+      String(Date.now()),
+    )) as (string | number)[];
+
+    const recovered: string[] = [];
+    const failed: string[] = [];
+
+    let idx = 0;
+    const recoveredCount = Number(result[idx++]);
+    for (let i = 0; i < recoveredCount; i++) {
+      recovered.push(String(result[idx++]));
+    }
+    const failedCount = Number(result[idx++]);
+    for (let i = 0; i < failedCount; i++) {
+      failed.push(String(result[idx++]));
+    }
+
+    return { recovered, failed };
   }
 
   async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {

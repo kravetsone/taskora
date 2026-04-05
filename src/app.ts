@@ -12,6 +12,7 @@ export interface TaskoraOptions {
     retry?: Taskora.RetryConfig;
     timeout?: number;
     concurrency?: number;
+    stall?: Taskora.StallConfig;
   };
 }
 
@@ -19,6 +20,7 @@ interface TaskOptionsBase {
   concurrency?: number;
   timeout?: number;
   retry?: Taskora.RetryConfig;
+  stall?: Taskora.StallConfig;
 }
 
 interface TaskOptionsWithSchema<TInput, TOutput> extends TaskOptionsBase {
@@ -117,6 +119,7 @@ export class App {
     const timeout =
       (!isFunction ? handlerOrOptions.timeout : undefined) ?? this.defaults.timeout ?? 30_000;
     const retry = (!isFunction ? handlerOrOptions.retry : undefined) ?? this.defaults.retry;
+    const stall = (!isFunction ? handlerOrOptions.stall : undefined) ?? this.defaults.stall;
 
     const task = new Task<TInput, TOutput>(
       {
@@ -137,7 +140,7 @@ export class App {
       },
       name,
       handler,
-      { concurrency, timeout, retry },
+      { concurrency, timeout, retry, stall },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
     );
 
@@ -278,6 +281,17 @@ export class App {
           }
         }
         task.dispatchEvent("progress", { id: jobId, progress });
+        break;
+      }
+      case "stalled": {
+        const action = fields.action as "recovered" | "failed";
+        const payload: Taskora.StalledEvent = {
+          id: jobId,
+          count: Number(fields.count || 1),
+          action,
+        };
+        task.dispatchEvent("stalled", payload);
+        this.appEmitter.emit("task:stalled", { ...payload, task: raw.task });
         break;
       }
     }
