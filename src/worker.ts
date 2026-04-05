@@ -27,10 +27,21 @@ export class Worker {
   private readonly concurrency: number;
   private readonly stallInterval: number;
   private readonly maxStalledCount: number;
-  private readonly dlqMaxAgeMs: number | null;
+  private readonly retention: {
+    completed: { maxAgeMs: number; maxItems: number };
+    failed: { maxAgeMs: number; maxItems: number };
+  };
   private readonly composed: (ctx: Taskora.MiddlewareContext) => Promise<void>;
   private readonly dequeueOptions: Taskora.DequeueOptions;
   private readonly onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void;
+  private readonly onJobError?: (info: {
+    task: string;
+    jobId: string;
+    error: unknown;
+    attempt: number;
+    maxAttempts: number;
+    willRetry: boolean;
+  }) => void;
 
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
@@ -43,9 +54,20 @@ export class Worker {
     task: Task<unknown, unknown>,
     adapter: Taskora.Adapter,
     serializer: Taskora.Serializer,
-    dlqMaxAgeMs?: number | null,
+    retention: {
+      completed: { maxAgeMs: number; maxItems: number };
+      failed: { maxAgeMs: number; maxItems: number };
+    },
     appMiddleware?: Taskora.Middleware[],
     onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void,
+    onJobError?: (info: {
+      task: string;
+      jobId: string;
+      error: unknown;
+      attempt: number;
+      maxAttempts: number;
+      willRetry: boolean;
+    }) => void,
   ) {
     this.task = task;
     this.adapter = adapter;
@@ -53,8 +75,9 @@ export class Worker {
     this.concurrency = task.config.concurrency;
     this.stallInterval = task.config.stall?.interval ?? DEFAULT_STALL_INTERVAL;
     this.maxStalledCount = task.config.stall?.maxCount ?? DEFAULT_MAX_STALLED_COUNT;
-    this.dlqMaxAgeMs = dlqMaxAgeMs ?? null;
+    this.retention = retention;
     this.onCancel = onCancel;
+    this.onJobError = onJobError;
     this.dequeueOptions = {
       onExpire: task.config.ttl?.onExpire ?? "fail",
       singleton: task.config.singleton,
@@ -282,6 +305,15 @@ export class Worker {
           retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
         }
 
+        this.onJobError?.({
+          task: this.task.name,
+          jobId: raw.id,
+          error: err,
+          attempt: raw.attempt,
+          maxAttempts: retryConfig?.attempts ?? 1,
+          willRetry: !!retryInfo,
+        });
+
         try {
           await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
         } catch {
@@ -323,13 +355,17 @@ export class Worker {
       // Stall check failed — will retry on next interval
     }
 
-    // DLQ retention trim — piggyback on stall check interval
-    if (this.dlqMaxAgeMs !== null) {
-      try {
-        await this.adapter.trimDLQ(this.task.name, Date.now() - this.dlqMaxAgeMs);
-      } catch {
-        // Trim failed — will retry on next interval
-      }
+    // Retention trim — piggyback on stall check interval
+    const now = Date.now();
+    try {
+      await this.adapter.trimCompleted(this.task.name, now - this.retention.completed.maxAgeMs, this.retention.completed.maxItems);
+    } catch {
+      // Trim failed — will retry on next interval
+    }
+    try {
+      await this.adapter.trimDLQ(this.task.name, now - this.retention.failed.maxAgeMs, this.retention.failed.maxItems);
+    } catch {
+      // Trim failed — will retry on next interval
     }
   }
 

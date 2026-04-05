@@ -14,7 +14,7 @@ export interface TaskoraOptions {
   adapter: Taskora.Adapter;
   serializer?: Taskora.Serializer;
   scheduler?: Taskora.SchedulerConfig;
-  deadLetterQueue?: Taskora.DeadLetterConfig;
+  retention?: Taskora.RetentionOptions;
   defaults?: {
     retry?: Taskora.RetryConfig;
     timeout?: number;
@@ -85,8 +85,11 @@ export class App {
   readonly deadLetters: DeadLetterManager;
   private readonly defaults: NonNullable<TaskoraOptions["defaults"]>;
   private readonly schedulerConfig?: Taskora.SchedulerConfig;
-  /** @internal — used by Worker for DLQ trim */
-  readonly dlqMaxAgeMs: number | null;
+  /** @internal — used by Worker for retention trim */
+  readonly retention: {
+    completed: { maxAgeMs: number; maxItems: number };
+    failed: { maxAgeMs: number; maxItems: number };
+  };
 
   private tasks = new Map<string, Task<unknown, unknown>>();
   private workers: Worker[] = [];
@@ -108,9 +111,16 @@ export class App {
     this.schedulerConfig = options.scheduler;
     this.schedules = new ScheduleManager(this);
     this.deadLetters = new DeadLetterManager(this.adapter, this.tasks, () => this.inspect());
-    this.dlqMaxAgeMs = options.deadLetterQueue?.maxAge
-      ? parseDuration(options.deadLetterQueue.maxAge)
-      : null;
+    this.retention = {
+      completed: {
+        maxAgeMs: parseDuration(options.retention?.completed?.maxAge ?? "1h"),
+        maxItems: options.retention?.completed?.maxItems ?? 100,
+      },
+      failed: {
+        maxAgeMs: parseDuration(options.retention?.failed?.maxAge ?? "7d"),
+        maxItems: options.retention?.failed?.maxItems ?? 300,
+      },
+    };
   }
 
   on<K extends keyof Taskora.AppEventMap & string>(
@@ -318,9 +328,26 @@ export class App {
         task,
         this.adapter,
         this.serializer,
-        this.dlqMaxAgeMs,
+        this.retention,
         this.middlewares,
         task.config.onCancel,
+        (info) => {
+          if (
+            task.hasEventListeners("failed") ||
+            this.appEmitter.hasListeners("task:failed")
+          ) {
+            return;
+          }
+          const maxAttempts = info.maxAttempts > 1 ? `/${info.maxAttempts}` : "";
+          const retry = info.willRetry ? ", will retry" : "";
+          const stack =
+            info.error instanceof Error && info.error.stack
+              ? info.error.stack
+              : String(info.error);
+          console.error(
+            `[taskora] task "${info.task}" job ${info.jobId} failed (attempt ${info.attempt}${maxAttempts}${retry})\n${stack}`,
+          );
+        },
       );
       this.workers.push(worker);
       await worker.start();

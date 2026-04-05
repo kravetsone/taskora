@@ -111,8 +111,8 @@ export class Task<TInput, TOutput> {
     this.emitter.emit(event, data);
   }
 
-  hasEventListeners(): boolean {
-    return this.emitter.hasListeners();
+  hasEventListeners(event?: string): boolean {
+    return this.emitter.hasListeners(event);
   }
 
   dispatch(data: TInput, options?: Taskora.DispatchOptions): ResultHandle<TOutput> {

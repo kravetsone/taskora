@@ -776,6 +776,36 @@ app.on("worker:error", (error) => {})
 app.on("worker:closing", () => {})
 ```
 
+### Default error logging
+
+When a task handler throws and **no** `failed` listener is registered (neither `task.on("failed")` nor `app.on("task:failed")`), taskora logs the error to `console.error` automatically:
+
+```
+[taskora] task "send-email" job a1b2c3d4 failed (attempt 1/3, will retry)
+Error: Connection refused
+    at handler (/app/tasks/email.ts:15:11)
+    at Array.handlerMw (/app/node_modules/taskora/src/worker.ts:82:36)
+    ...
+```
+
+This fires synchronously on the worker that processed the job — no Redis round-trip, full stack trace preserved.
+
+The default logger is **automatically suppressed** the moment you register your own `failed` listener:
+
+```typescript
+// Default logging stops as soon as you add this:
+app.on("task:failed", (event) => {
+  myLogger.error({ task: event.task, jobId: event.id, error: event.error })
+})
+```
+
+Per-task listeners also suppress it for that specific task:
+
+```typescript
+sendEmail.on("failed", (event) => { /* ... */ })
+// Default logger no longer fires for send-email, but still fires for other tasks
+```
+
 ---
 
 ## 8. Inspector API
@@ -869,17 +899,21 @@ await sendEmail.dispatch(
 )
 ```
 
-### Dead letter queue
+### Retention & dead letter queue
 
 ```typescript
+// Retention is ON by default — no config needed for safe prod behavior
+// Defaults: completed { maxAge: "1h", maxItems: 100 }, failed { maxAge: "7d", maxItems: 300 }
+// Override if needed:
 const app = taskora({
-  backend: redisAdapter("redis://localhost:6379"),
-  deadLetterQueue: {
-    enabled: true,
-    maxAge: "7d",
+  adapter: redisAdapter("redis://localhost:6379"),
+  retention: {
+    completed: { maxAge: "24h", maxItems: 1_000 },
+    failed: { maxAge: "30d", maxItems: 5_000 },
   },
 })
 
+// DLQ management — retry failed jobs
 const dead = await app.deadLetters.list({ task: "send-email", limit: 20 })
 await app.deadLetters.retry("job-id-123")
 await app.deadLetters.retryAll({ task: "send-email" })

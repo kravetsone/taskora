@@ -1,5 +1,5 @@
 import { Redis } from "ioredis";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { taskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
@@ -282,6 +282,130 @@ describe("event edge cases", () => {
 
     expect(events).toEqual(["second-listener"]);
 
+    await app.close();
+  });
+
+  it("default error logger fires when no failed listener is registered", async () => {
+    const app = taskora({ adapter: redisAdapter(url()) });
+
+    const failing = app.task("default-log", async () => {
+      throw new Error("unhandled boom");
+    });
+
+    // No .on("failed") — default logger should fire
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    failing.dispatch({});
+    await app.start();
+
+    await waitFor(() => errorSpy.mock.calls.length >= 1);
+
+    const output = errorSpy.mock.calls[0][0] as string;
+    expect(output).toContain('[taskora] task "default-log"');
+    expect(output).toContain("failed (attempt 1)");
+    expect(output).toContain("unhandled boom");
+    // Stack trace included
+    expect(output).toContain("at ");
+
+    errorSpy.mockRestore();
+    await app.close();
+  });
+
+  it("default error logger is suppressed when task.on('failed') is registered", async () => {
+    const app = taskora({ adapter: redisAdapter(url()) });
+    const failedEvents: Array<{ error: string }> = [];
+
+    const failing = app.task("suppressed-log", async () => {
+      throw new Error("handled boom");
+    });
+
+    // Register a user listener — should suppress default logging
+    failing.on("failed", (ev) => failedEvents.push(ev));
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    failing.dispatch({});
+    await app.start();
+
+    await waitFor(() => failedEvents.length >= 1);
+    // Small grace period to ensure no default log fires
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(failedEvents[0].error).toBe("handled boom");
+    // Default logger should NOT have fired
+    const taskoraLogs = errorSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[taskora]"),
+    );
+    expect(taskoraLogs).toHaveLength(0);
+
+    errorSpy.mockRestore();
+    await app.close();
+  });
+
+  it("default error logger is suppressed when app.on('task:failed') is registered", async () => {
+    const app = taskora({ adapter: redisAdapter(url()) });
+    const appFailedEvents: Array<{ error: string }> = [];
+
+    const failing = app.task("app-suppressed-log", async () => {
+      throw new Error("app handled");
+    });
+
+    app.on("task:failed", (ev) => appFailedEvents.push(ev));
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    failing.dispatch({});
+    await app.start();
+
+    await waitFor(() => appFailedEvents.length >= 1);
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(appFailedEvents[0].error).toBe("app handled");
+    const taskoraLogs = errorSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[taskora]"),
+    );
+    expect(taskoraLogs).toHaveLength(0);
+
+    errorSpy.mockRestore();
+    await app.close();
+  });
+
+  it("default error logger shows retry info", async () => {
+    const app = taskora({ adapter: redisAdapter(url()) });
+
+    app.task("retry-log", {
+      retry: { attempts: 3, delay: 50 },
+      handler: async () => {
+        throw new Error("retry me");
+      },
+    });
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const task = (app as any).tasks.get("retry-log");
+    task.dispatch({});
+    await app.start();
+
+    // Wait for first attempt + retry
+    await waitFor(() => errorSpy.mock.calls.length >= 1);
+
+    const firstLog = errorSpy.mock.calls[0][0] as string;
+    expect(firstLog).toContain("attempt 1/3, will retry");
+
+    // Wait for final failure
+    await waitFor(() => {
+      return errorSpy.mock.calls.some(
+        (c) => typeof c[0] === "string" && c[0].includes("attempt 3/3)"),
+      );
+    }, 10_000);
+
+    const finalLog = errorSpy.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("attempt 3/3)"),
+    )?.[0] as string;
+    // Final failure — no "will retry"
+    expect(finalLog).not.toContain("will retry");
+
+    errorSpy.mockRestore();
     await app.close();
   });
 
