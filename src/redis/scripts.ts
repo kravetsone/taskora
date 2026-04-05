@@ -185,6 +185,12 @@ redis.call('SET', resultKey, result)
 redis.call('HSET', jobKey, 'state', 'completed', 'finishedOn', now)
 redis.call('ZADD', KEYS[2], tonumber(now), jobId)
 
+-- Clean dedup key if present
+local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+if dedupKey then
+  redis.call('DEL', dedupKey)
+end
+
 redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
   'event', 'completed', 'jobId', jobId)
 
@@ -236,6 +242,12 @@ if retryDelay >= 0 then
 else
   redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', now, 'error', errMsg)
   redis.call('ZADD', KEYS[2], tonumber(now), jobId)
+
+  -- Clean dedup key on permanent failure
+  local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+  if dedupKey then
+    redis.call('DEL', dedupKey)
+  end
 
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
     'event', 'failed', 'jobId', jobId)
@@ -638,4 +650,238 @@ for _, jobId in ipairs(ids) do
 end
 
 return #ids
+`;
+
+// ── debounce ────────────────────────────────────────────────────────
+// Atomically replace a previous debounced delayed job with a new one.
+// KEYS[1] = <task>:delayed   (sorted set)
+// KEYS[2] = <task>:events    (stream)
+// KEYS[3] = <task>:marker    (sorted set)
+// ARGV[1] = jobPrefix
+// ARGV[2] = jobId            (new job UUID)
+// ARGV[3] = serialized data
+// ARGV[4] = timestamp (ms)
+// ARGV[5] = _v
+// ARGV[6] = delay (ms)       — the debounce window
+// ARGV[7] = priority
+// ARGV[8] = maxAttempts
+// ARGV[9] = debounce key     (full Redis key)
+// Returns: 1
+export const DEBOUNCE = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local data = ARGV[3]
+local ts = tonumber(ARGV[4])
+local version = ARGV[5]
+local delay = tonumber(ARGV[6])
+local priority = ARGV[7]
+local maxAttempts = ARGV[8]
+local debounceKey = ARGV[9]
+
+local score = ts + delay
+
+-- Check for existing debounced job
+local oldJobId = redis.call('GET', debounceKey)
+if oldJobId then
+  local removed = redis.call('ZREM', KEYS[1], oldJobId)
+  if removed > 0 then
+    local oldJobKey = prefix .. oldJobId
+    redis.call('DEL', oldJobKey, oldJobKey .. ':data')
+    redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
+      'event', 'debounced', 'jobId', oldJobId, 'replacedBy', jobId)
+  end
+end
+
+-- Create new delayed job
+local jobKey = prefix .. jobId
+local dataKey = jobKey .. ':data'
+
+redis.call('HSET', jobKey,
+  'ts', ARGV[4],
+  'delay', ARGV[6],
+  '_v', version,
+  'attempt', 1,
+  'maxAttempts', maxAttempts,
+  'state', 'delayed',
+  'priority', priority)
+
+redis.call('SET', dataKey, data)
+redis.call('ZADD', KEYS[1], score, jobId)
+redis.call('ZADD', KEYS[3], 'LT', score, '0')
+
+-- Set debounce key -> new jobId with TTL = delay * 2 (self-cleaning)
+redis.call('SET', debounceKey, jobId, 'PX', delay * 2)
+
+redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
+  'event', 'delayed', 'jobId', jobId)
+
+return 1
+`;
+
+// ── throttleEnqueue ─────────────────────────────────────────────────
+// Atomically check throttle counter and enqueue if under limit.
+// KEYS[1] = <task>:wait      (wait list)
+// KEYS[2] = <task>:delayed   (sorted set — for delayed jobs)
+// KEYS[3] = <task>:events    (stream)
+// KEYS[4] = <task>:marker    (sorted set)
+// ARGV[1]  = jobPrefix
+// ARGV[2]  = jobId
+// ARGV[3]  = serialized data
+// ARGV[4]  = timestamp (ms)
+// ARGV[5]  = _v
+// ARGV[6]  = priority
+// ARGV[7]  = maxAttempts
+// ARGV[8]  = throttle key    (full Redis key)
+// ARGV[9]  = max             (max dispatches per window)
+// ARGV[10] = window (ms)
+// ARGV[11] = delay (ms, 0 = immediate)
+// Returns: 1 (enqueued) or 0 (throttled)
+export const THROTTLE_ENQUEUE = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local data = ARGV[3]
+local ts = tonumber(ARGV[4])
+local version = ARGV[5]
+local priority = ARGV[6]
+local maxAttempts = ARGV[7]
+local throttleKey = ARGV[8]
+local max = tonumber(ARGV[9])
+local window = tonumber(ARGV[10])
+local delay = tonumber(ARGV[11])
+
+-- Check throttle counter
+local current = tonumber(redis.call('GET', throttleKey) or '0')
+if current >= max then
+  return 0
+end
+
+-- Increment counter (set TTL on first increment)
+if current == 0 then
+  redis.call('SET', throttleKey, 1, 'PX', window)
+else
+  redis.call('INCR', throttleKey)
+end
+
+-- Enqueue the job
+local jobKey = prefix .. jobId
+local dataKey = jobKey .. ':data'
+
+if delay > 0 then
+  local score = ts + delay
+  redis.call('HSET', jobKey,
+    'ts', ARGV[4],
+    'delay', ARGV[11],
+    '_v', version,
+    'attempt', 1,
+    'maxAttempts', maxAttempts,
+    'state', 'delayed',
+    'priority', priority)
+  redis.call('SET', dataKey, data)
+  redis.call('ZADD', KEYS[2], score, jobId)
+  redis.call('ZADD', KEYS[4], 'LT', score, '0')
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'delayed', 'jobId', jobId)
+else
+  redis.call('HSET', jobKey,
+    'ts', ARGV[4],
+    '_v', version,
+    'attempt', 1,
+    'maxAttempts', maxAttempts,
+    'state', 'waiting',
+    'priority', priority)
+  redis.call('SET', dataKey, data)
+  redis.call('LPUSH', KEYS[1], jobId)
+  redis.call('ZADD', KEYS[4], 0, '0')
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'waiting', 'jobId', jobId)
+end
+
+return 1
+`;
+
+// ── deduplicateEnqueue ──────────────────────────────────────────────
+// Atomically check dedup key + existing job state, enqueue if no dupe.
+// KEYS[1] = <task>:wait      (wait list)
+// KEYS[2] = <task>:delayed   (sorted set)
+// KEYS[3] = <task>:events    (stream)
+// KEYS[4] = <task>:marker    (sorted set)
+// ARGV[1]  = jobPrefix
+// ARGV[2]  = jobId
+// ARGV[3]  = serialized data
+// ARGV[4]  = timestamp (ms)
+// ARGV[5]  = _v
+// ARGV[6]  = priority
+// ARGV[7]  = maxAttempts
+// ARGV[8]  = dedup key       (full Redis key)
+// ARGV[9]  = delay (ms, 0 = immediate)
+// ARGV[10+] = allowed states (e.g. "waiting", "delayed", "active")
+// Returns: [1] (created) or [0, existingJobId] (duplicate found)
+export const DEDUPLICATE_ENQUEUE = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local data = ARGV[3]
+local ts = tonumber(ARGV[4])
+local version = ARGV[5]
+local priority = ARGV[6]
+local maxAttempts = ARGV[7]
+local dedupKey = ARGV[8]
+local delay = tonumber(ARGV[9])
+
+-- Collect allowed states
+local allowedStates = {}
+for i = 10, #ARGV do
+  allowedStates[ARGV[i]] = true
+end
+
+-- Check dedup key
+local existingId = redis.call('GET', dedupKey)
+if existingId then
+  local existingState = redis.call('HGET', prefix .. existingId, 'state')
+  if existingState and allowedStates[existingState] then
+    return {0, existingId}
+  end
+  -- Existing job in non-blocking state (completed/failed) — clear and proceed
+  redis.call('DEL', dedupKey)
+end
+
+-- Enqueue the job
+local jobKey = prefix .. jobId
+local dataKey = jobKey .. ':data'
+
+if delay > 0 then
+  local score = ts + delay
+  redis.call('HSET', jobKey,
+    'ts', ARGV[4],
+    'delay', ARGV[9],
+    '_v', version,
+    'attempt', 1,
+    'maxAttempts', maxAttempts,
+    'state', 'delayed',
+    'priority', priority,
+    'dedupKey', dedupKey)
+  redis.call('SET', dataKey, data)
+  redis.call('ZADD', KEYS[2], score, jobId)
+  redis.call('ZADD', KEYS[4], 'LT', score, '0')
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'delayed', 'jobId', jobId)
+else
+  redis.call('HSET', jobKey,
+    'ts', ARGV[4],
+    '_v', version,
+    'attempt', 1,
+    'maxAttempts', maxAttempts,
+    'state', 'waiting',
+    'priority', priority,
+    'dedupKey', dedupKey)
+  redis.call('SET', dataKey, data)
+  redis.call('LPUSH', KEYS[1], jobId)
+  redis.call('ZADD', KEYS[4], 0, '0')
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'waiting', 'jobId', jobId)
+end
+
+-- Set dedup key -> jobId (no TTL — cleaned on ack/fail)
+redis.call('SET', dedupKey, jobId)
+
+return {1}
 `;

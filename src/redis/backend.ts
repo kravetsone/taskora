@@ -23,6 +23,9 @@ const SCRIPT_MAP: Record<string, string> = {
   retryDLQ: scripts.RETRY_DLQ,
   retryAllDLQ: scripts.RETRY_ALL_DLQ,
   trimDLQ: scripts.TRIM_DLQ,
+  debounce: scripts.DEBOUNCE,
+  throttleEnqueue: scripts.THROTTLE_ENQUEUE,
+  deduplicateEnqueue: scripts.DEDUPLICATE_ENQUEUE,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -117,6 +120,108 @@ export class RedisBackend implements Taskora.Adapter {
       String(options.priority ?? 0),
       maxAttempts,
     );
+  }
+
+  async debounceEnqueue(
+    task: string,
+    jobId: string,
+    data: string,
+    options: { _v: number; maxAttempts?: number; priority?: number },
+    debounceKey: string,
+    delayMs: number,
+  ): Promise<void> {
+    const keys = buildKeys(task, this.prefix);
+    const base = this.prefix ? `taskora:${this.prefix}:{${task}}` : `taskora:{${task}}`;
+    const fullDebounceKey = `${base}:debounce:${debounceKey}`;
+
+    await this.eval(
+      "debounce",
+      3,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+      data,
+      String(Date.now()),
+      String(options._v),
+      String(delayMs),
+      String(options.priority ?? 0),
+      String(options.maxAttempts ?? 1),
+      fullDebounceKey,
+    );
+  }
+
+  async throttleEnqueue(
+    task: string,
+    jobId: string,
+    data: string,
+    options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+    throttleKey: string,
+    max: number,
+    windowMs: number,
+  ): Promise<boolean> {
+    const keys = buildKeys(task, this.prefix);
+    const base = this.prefix ? `taskora:${this.prefix}:{${task}}` : `taskora:{${task}}`;
+    const fullThrottleKey = `${base}:throttle:${throttleKey}`;
+
+    const result = await this.eval(
+      "throttleEnqueue",
+      4,
+      keys.wait,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+      data,
+      String(Date.now()),
+      String(options._v),
+      String(options.priority ?? 0),
+      String(options.maxAttempts ?? 1),
+      fullThrottleKey,
+      String(max),
+      String(windowMs),
+      String(options.delay ?? 0),
+    );
+    return result === 1;
+  }
+
+  async deduplicateEnqueue(
+    task: string,
+    jobId: string,
+    data: string,
+    options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+    dedupKey: string,
+    states: string[],
+  ): Promise<{ created: true } | { created: false; existingId: string }> {
+    const keys = buildKeys(task, this.prefix);
+    const base = this.prefix ? `taskora:${this.prefix}:{${task}}` : `taskora:{${task}}`;
+    const fullDedupKey = `${base}:dedup:${dedupKey}`;
+
+    const result = (await this.eval(
+      "deduplicateEnqueue",
+      4,
+      keys.wait,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+      data,
+      String(Date.now()),
+      String(options._v),
+      String(options.priority ?? 0),
+      String(options.maxAttempts ?? 1),
+      fullDedupKey,
+      String(options.delay ?? 0),
+      ...states,
+    )) as [number, string?];
+
+    if (result[0] === 0) {
+      return { created: false, existingId: result[1] as string };
+    }
+    return { created: true };
   }
 
   async dequeue(
