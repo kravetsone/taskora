@@ -1229,12 +1229,13 @@ return {0, count}
 `;
 
 // ── cancel ──────────────────────────────────────────────────────────
-// Cancel a job. Immediate for waiting/delayed/retrying; flags active.
+// Cancel a job. Immediate for waiting/delayed/retrying; flags active + PUBLISH.
 // KEYS[1] = <task>:wait
 // KEYS[2] = <task>:delayed
 // KEYS[3] = <task>:cancelled  (sorted set, score = finishedOn)
 // KEYS[4] = <task>:events
 // KEYS[5] = <task>:marker
+// KEYS[6] = <task>:cancel     (pub/sub channel — instant notification to worker)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobId
 // ARGV[3] = reason ("" = none)
@@ -1292,11 +1293,12 @@ if state == 'delayed' or state == 'retrying' then
 end
 
 if state == 'active' then
-  -- Flag only — worker detects via extendLock return
+  -- Flag + instant pub/sub notification to worker
   redis.call('HSET', jobKey, 'cancelledAt', now)
   if reason ~= '' then
     redis.call('HSET', jobKey, 'cancelReason', reason)
   end
+  redis.call('PUBLISH', KEYS[6], jobId)
   return 2
 end
 

@@ -310,7 +310,7 @@ export class App {
         task.config.onCancel,
       );
       this.workers.push(worker);
-      worker.start();
+      await worker.start();
     }
 
     // Start scheduler if there are schedules or scheduler config is provided

@@ -172,8 +172,8 @@ describe("graceful cancellation", () => {
     // Cancel the active job
     await handle.cancel({ reason: "user abort" });
 
-    // Wait for worker to detect cancel via lock extension (up to 15s)
-    await waitFor(() => signalAborted, 15_000);
+    // Pub/sub delivers cancel signal near-instantly
+    await waitFor(() => signalAborted, 5_000);
 
     expect(signalAborted).toBe(true);
     expect(abortReason).toBe("cancelled");
@@ -182,7 +182,7 @@ describe("graceful cancellation", () => {
     await waitFor(async () => {
       const state = await handle.getState();
       return state === "cancelled";
-    }, 15_000);
+    }, 5_000);
 
     await app.close();
   });
@@ -203,7 +203,7 @@ describe("graceful cancellation", () => {
         hookRan = true;
         hookData = data;
       },
-      handler: async (data, ctx) => {
+      handler: async (_data, ctx) => {
         handlerStartResolve2();
         await new Promise<void>((res) => {
           ctx.signal.addEventListener("abort", () => res());
@@ -221,11 +221,8 @@ describe("graceful cancellation", () => {
 
     await handle.cancel({ reason: "cleanup needed" });
 
-    // Wait for hook to run
-    await waitFor(
-      () => hookRan,
-      15_000,
-    );
+    // Pub/sub delivers cancel signal near-instantly
+    await waitFor(() => hookRan, 5_000);
 
     expect(hookRan).toBe(true);
     expect(hookData).toEqual({ importId: "imp-123" });
@@ -234,7 +231,7 @@ describe("graceful cancellation", () => {
     await waitFor(async () => {
       const state = await handle.getState();
       return state === "cancelled";
-    }, 15_000);
+    }, 5_000);
 
     await app.close();
   });

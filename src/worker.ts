@@ -37,6 +37,7 @@ export class Worker {
   private lockTimer: ReturnType<typeof setInterval> | null = null;
   private stallTimer: ReturnType<typeof setInterval> | null = null;
   private slotResolve: (() => void) | null = null;
+  private unsubCancel: (() => void) | null = null;
 
   constructor(
     task: Task<unknown, unknown>,
@@ -67,10 +68,18 @@ export class Worker {
     this.composed = compose(chain);
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.running = true;
     this.lockTimer = setInterval(() => this.extendAllLocks(), LOCK_EXTEND_INTERVAL);
     this.stallTimer = setInterval(() => this.runStalledCheck(), this.stallInterval);
+    try {
+      this.unsubCancel = await this.adapter.onCancel(this.task.name, (jobId) => {
+        const job = this.activeJobs.get(jobId);
+        if (job) job.controller.abort("cancelled");
+      });
+    } catch {
+      // Subscription failed — fall back to extendLock-based detection
+    }
     this.poll();
   }
 
@@ -84,6 +93,10 @@ export class Worker {
     if (this.stallTimer) {
       clearInterval(this.stallTimer);
       this.stallTimer = null;
+    }
+    if (this.unsubCancel) {
+      this.unsubCancel();
+      this.unsubCancel = null;
     }
 
     // Wake up the poll loop if it's waiting for a slot

@@ -924,12 +924,13 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = await this.eval(
       "cancel",
-      5,
+      6,
       keys.wait,
       keys.delayed,
       keys.cancelled,
       keys.events,
       keys.marker,
+      keys.cancelChannel,
       keys.jobPrefix,
       jobId,
       reason ?? "",
@@ -938,6 +939,20 @@ export class RedisBackend implements Taskora.Adapter {
     if (result === 1) return "cancelled";
     if (result === 2) return "flagged";
     return "not_cancellable";
+  }
+
+  async onCancel(task: string, handler: (jobId: string) => void): Promise<() => void> {
+    const keys = buildKeys(task, this.prefix);
+    const sub = this.client.duplicate();
+    await sub.connect();
+    await sub.subscribe(keys.cancelChannel);
+    sub.on("message", (_channel: string, message: string) => {
+      handler(message);
+    });
+    return () => {
+      sub.unsubscribe();
+      sub.disconnect(false);
+    };
   }
 
   async finishCancel(task: string, jobId: string, token: string): Promise<void> {
