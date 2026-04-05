@@ -18,6 +18,7 @@ const SCRIPT_MAP: Record<string, string> = {
   tickScheduler: scripts.TICK_SCHEDULER,
   acquireSchedulerLock: scripts.ACQUIRE_SCHEDULER_LOCK,
   renewSchedulerLock: scripts.RENEW_SCHEDULER_LOCK,
+  versionDistribution: scripts.VERSION_DISTRIBUTION,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -381,6 +382,42 @@ export class RedisBackend implements Taskora.Adapter {
     }
 
     return { recovered, failed };
+  }
+
+  async getVersionDistribution(task: string): Promise<{
+    waiting: Record<number, number>;
+    active: Record<number, number>;
+    delayed: Record<number, number>;
+  }> {
+    const keys = buildKeys(task, this.prefix);
+    const result = (await this.eval(
+      "versionDistribution",
+      3,
+      keys.wait,
+      keys.active,
+      keys.delayed,
+      keys.jobPrefix,
+    )) as string[];
+
+    const distribution: {
+      waiting: Record<number, number>;
+      active: Record<number, number>;
+      delayed: Record<number, number>;
+    } = { waiting: {}, active: {}, delayed: {} };
+
+    let i = 0;
+    while (i < result.length) {
+      const section = result[i++] as "waiting" | "active" | "delayed";
+      const bucket = distribution[section];
+      while (i < result.length && result[i] !== "END") {
+        const version = Number(result[i++]);
+        const count = Number(result[i++]);
+        bucket[version] = count;
+      }
+      i++; // skip "END"
+    }
+
+    return distribution;
   }
 
   // ── Scheduling ──────────────────────────────────────────────────────

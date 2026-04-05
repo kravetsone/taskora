@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { computeDelay, shouldRetry } from "./backoff.js";
 import { createContext } from "./context.js";
 import { RetryError, TimeoutError } from "./errors.js";
+import { runMigrations } from "./migration.js";
 import { validateSchema } from "./schema.js";
 import type { Task } from "./task.js";
 import type { Taskora } from "./types.js";
@@ -120,9 +121,46 @@ export class Worker {
     const controller = new AbortController();
 
     const promise = (async () => {
+      // ── Version checks ──────────────────────────────────────────
+      const jobVersion = raw._v ?? 1;
+      const taskVersion = this.task.version;
+
+      // Future version — nack silently, leave for a newer worker
+      if (jobVersion > taskVersion) {
+        try {
+          await this.adapter.nack(this.task.name, raw.id, token);
+        } catch {
+          // nack failed (e.g. lock expired)
+        }
+        return;
+      }
+
+      // Expired version — fail permanently, migration code is gone
+      if (jobVersion < this.task.since) {
+        const msg = `Job version ${jobVersion} is below minimum supported version ${this.task.since} — migration no longer available`;
+        try {
+          await this.adapter.fail(this.task.name, raw.id, token, msg);
+        } catch {
+          // fail() itself failed
+        }
+        return;
+      }
+
       let handlerResult: unknown;
       try {
-        const data = this.serializer.deserialize(raw.data);
+        let data: unknown = this.serializer.deserialize(raw.data);
+
+        // ── Migration + validation ────────────────────────────────
+        if (jobVersion < taskVersion) {
+          data = runMigrations(data, jobVersion, taskVersion, this.task.migrations);
+        }
+
+        // Validate input after migration (applies .default() values)
+        // Only for versioned tasks (version > 1 or has migrations)
+        if (this.task.inputSchema && (taskVersion > 1 || this.task.migrations.size > 0)) {
+          data = await validateSchema(this.task.inputSchema, data);
+        }
+
         const ctx = createContext({
           id: raw.id,
           attempt: raw.attempt,

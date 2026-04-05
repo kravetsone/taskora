@@ -1,5 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { TypedEmitter } from "./emitter.js";
+import { Inspector } from "./inspector.js";
 import type { Duration } from "./scheduler/duration.js";
 import { parseDuration } from "./scheduler/duration.js";
 import { Scheduler } from "./scheduler/scheduler.js";
@@ -20,11 +21,16 @@ export interface TaskoraOptions {
   };
 }
 
+type MigrationFn = (data: unknown) => unknown;
+
 interface TaskOptionsBase {
   concurrency?: number;
   timeout?: number;
   retry?: Taskora.RetryConfig;
   stall?: Taskora.StallConfig;
+  version?: number;
+  since?: number;
+  migrate?: readonly MigrationFn[] | Record<number, MigrationFn>;
   schedule?: {
     every?: Duration;
     cron?: string;
@@ -139,6 +145,16 @@ export class App {
     const retry = (!isFunction ? handlerOrOptions.retry : undefined) ?? this.defaults.retry;
     const stall = (!isFunction ? handlerOrOptions.stall : undefined) ?? this.defaults.stall;
 
+    const migrationConfig =
+      !isFunction &&
+      (handlerOrOptions.version || handlerOrOptions.since || handlerOrOptions.migrate)
+        ? {
+            version: handlerOrOptions.version,
+            since: handlerOrOptions.since,
+            migrate: handlerOrOptions.migrate,
+          }
+        : undefined;
+
     const task = new Task<TInput, TOutput>(
       {
         adapter: this.adapter,
@@ -160,6 +176,7 @@ export class App {
       handler,
       { concurrency, timeout, retry, stall },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
+      migrationConfig,
     );
 
     this.tasks.set(name, task as Task<unknown, unknown>);
@@ -187,6 +204,10 @@ export class App {
       throw new Error("Schedule must have either 'every' or 'cron'");
     }
     this.pendingSchedules.push({ name, config });
+  }
+
+  inspect(): Inspector {
+    return new Inspector(this.adapter, this.tasks);
   }
 
   /** @internal — used by ScheduleManager */

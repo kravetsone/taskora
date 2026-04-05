@@ -440,3 +440,56 @@ if val == ARGV[1] then
 end
 return 0
 `;
+
+// ── versionDistribution ─────────────────────────────────────────────
+// Collect _v counts for all jobs in waiting, active, and delayed sets.
+// KEYS[1] = <task>:wait      (List)
+// KEYS[2] = <task>:active    (List)
+// KEYS[3] = <task>:delayed   (Sorted Set)
+// ARGV[1] = jobPrefix
+// Returns: flat array [section, version, count, ..., "END", section, ...]
+export const VERSION_DISTRIBUTION = `
+local prefix = ARGV[1]
+
+local function countVersions(ids)
+  local counts = {}
+  for _, id in ipairs(ids) do
+    local v = redis.call('HGET', prefix .. id, '_v')
+    if v then
+      v = tostring(v)
+      counts[v] = (counts[v] or 0) + 1
+    end
+  end
+  local result = {}
+  for v, c in pairs(counts) do
+    table.insert(result, v)
+    table.insert(result, c)
+  end
+  return result
+end
+
+local result = {}
+
+-- Waiting
+local waitIds = redis.call('LRANGE', KEYS[1], 0, -1)
+table.insert(result, 'waiting')
+local wv = countVersions(waitIds)
+for _, x in ipairs(wv) do table.insert(result, x) end
+table.insert(result, 'END')
+
+-- Active
+local activeIds = redis.call('LRANGE', KEYS[2], 0, -1)
+table.insert(result, 'active')
+local av = countVersions(activeIds)
+for _, x in ipairs(av) do table.insert(result, x) end
+table.insert(result, 'END')
+
+-- Delayed
+local delayedIds = redis.call('ZRANGE', KEYS[3], 0, -1)
+table.insert(result, 'delayed')
+local dv = countVersions(delayedIds)
+for _, x in ipairs(dv) do table.insert(result, x) end
+table.insert(result, 'END')
+
+return result
+`;

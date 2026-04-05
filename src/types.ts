@@ -188,6 +188,11 @@ export namespace Taskora {
     getLogs(task: string, jobId: string): Promise<string[]>;
     subscribe(tasks: string[], handler: (event: StreamEvent) => void): Promise<() => Promise<void>>;
     awaitJob(task: string, jobId: string, timeoutMs?: number): Promise<AwaitJobResult | null>;
+    getVersionDistribution(task: string): Promise<{
+      waiting: Record<number, number>;
+      active: Record<number, number>;
+      delayed: Record<number, number>;
+    }>;
 
     // Scheduling
     addSchedule(name: string, config: string, nextRun: number): Promise<void>;
@@ -208,6 +213,21 @@ export namespace Taskora {
     state: "completed" | "failed" | "cancelled";
     result?: string;
     error?: string;
+  }
+
+  export interface MigrationStatus {
+    version: number;
+    since: number;
+    migrations: number;
+    queue: {
+      oldest: number | null;
+      byVersion: Record<number, number>;
+    };
+    delayed: {
+      oldest: number | null;
+      byVersion: Record<number, number>;
+    };
+    canBumpSince: number;
   }
 
   // ── Scheduling ────────────────────────────────────────────────────
