@@ -117,6 +117,13 @@ export namespace Taskora {
     onExpire?: "fail" | "discard";
   }
 
+  export interface CollectConfig<TInput = unknown> {
+    key: ((data: TInput) => string) | string;
+    delay: DurationType;
+    maxSize?: number;
+    maxWait?: DurationType;
+  }
+
   export interface DispatchOptions {
     delay?: number;
     priority?: number;
@@ -259,6 +266,19 @@ export namespace Taskora {
       dedupKey: string,
       states: string[],
     ): Promise<{ created: true } | { created: false; existingId: string }>;
+    collectPush(
+      task: string,
+      jobId: string,
+      item: string,
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        collectKey: string;
+        delayMs: number;
+        maxSize: number;
+        maxWaitMs: number;
+      },
+    ): Promise<{ flushed: boolean; count: number }>;
     dequeue(
       task: string,
       lockTtl: number,
