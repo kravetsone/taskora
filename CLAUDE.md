@@ -86,7 +86,20 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–10 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 11: Middleware**.
+Phases 1–11 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 12: Flow Control**.
+
+Phase 11 delivered:
+- `src/middleware.ts`: `compose()` function — Koa-style onion model with next()-called-twice guard
+- `Taskora.MiddlewareContext`: extends `Context` with `task: { name }`, mutable `data`, mutable `result`
+- `Taskora.Middleware` type: `(ctx, next) => Promise<void> | void`
+- `app.use(middleware)` — app-level middleware, chainable, throws after `start()`
+- Task option `middleware: [fn, fn]` — per-task middleware
+- Execution order: app middleware → task middleware → handler
+- Pipeline: `deserialize → migrate → validate → [middleware chain → handler]`
+- Composition happens once per Worker at construction (not per job)
+- `ctx.result` set by handler wrapper, readable/writable by middleware after `await next()`
+- `ctx.data` mutable — middleware can transform input before handler
+- 9 unit tests, 10 integration tests (167 total)
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
