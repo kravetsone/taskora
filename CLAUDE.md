@@ -85,7 +85,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–8 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 9: Schema Versioning & Migrations**.
+Phases 1–9 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 10: Inspector + Dead Letter Queue**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -183,3 +183,18 @@ Phase 8 delivered:
 - Adapter additions: `addSchedule`, `removeSchedule`, `getSchedule`, `listSchedules`, `tickScheduler`, `updateScheduleNextRun`, `pauseSchedule`, `resumeSchedule`, `acquireSchedulerLock`, `renewSchedulerLock`
 - Scheduler starts if `pendingSchedules.length > 0` OR `scheduler` config is provided
 - 8 unit tests (parseDuration), 12 integration tests (108 total)
+
+Phase 9 delivered:
+- `dispatch()` stamps `_v = task.version` (was hardcoded `1`)
+- Worker version check: nack future (`_v > version`, silent), fail expired (`_v < since`, error message)
+- Migration chain: tuple form (version = since + length), record form (sparse, explicit version)
+- Schema validation AFTER migration — `.default()` values applied; only for versioned tasks
+- `src/migration.ts`: `resolveVersion()`, `normalizeMigrations()`, `runMigrations()`
+- `into(schema, fn)` type helper for tuple migrations — locks return type to schema
+- `src/inspector.ts`: `Inspector` class, `app.inspect().migrations(taskName)` → `MigrationStatus`
+- `VERSION_DISTRIBUTION` Lua script: scans wait/active/delayed, pipelines HGET `_v`, returns flat counts
+- `Taskora.MigrationStatus`: `{ version, since, migrations, queue: { oldest, byVersion }, delayed: { oldest, byVersion }, canBumpSince }`
+- Adapter addition: `getVersionDistribution(task)`
+- Task constructor accepts `TaskMigrationConfig`: `{ version?, since?, migrate? }`
+- Exports: `into()`, `Inspector` from `taskora`
+- 15 unit tests (version resolution, normalization, chain), 9 integration tests (132 total)
