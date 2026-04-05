@@ -9,7 +9,7 @@ import * as scripts from "./scripts.js";
 const SCRIPT_MAP: Record<string, string> = {
   enqueue: scripts.ENQUEUE,
   enqueueDelayed: scripts.ENQUEUE_DELAYED,
-  dequeue: scripts.DEQUEUE,
+  moveToActive: scripts.MOVE_TO_ACTIVE,
   ack: scripts.ACK,
   fail: scripts.FAIL,
   nack: scripts.NACK,
@@ -22,6 +22,7 @@ export class RedisBackend implements Taskora.Adapter {
   private prefix?: string;
   private shas = new Map<string, string>();
   private jobWaiter: JobWaiter | null = null;
+  private blockingClients = new Map<string, Redis>();
 
   constructor(connection: string | RedisOptions | Redis, options?: { prefix?: string }) {
     if (connection instanceof Redis) {
@@ -51,6 +52,10 @@ export class RedisBackend implements Taskora.Adapter {
   }
 
   async disconnect(): Promise<void> {
+    for (const client of this.blockingClients.values()) {
+      client.disconnect(false);
+    }
+    this.blockingClients.clear();
     if (this.jobWaiter) {
       await this.jobWaiter.shutdown();
       this.jobWaiter = null;
@@ -73,9 +78,10 @@ export class RedisBackend implements Taskora.Adapter {
     if (options.delay && options.delay > 0) {
       await this.eval(
         "enqueueDelayed",
-        2,
+        3,
         keys.delayed,
         keys.events,
+        keys.marker,
         keys.jobPrefix,
         jobId,
         data,
@@ -90,9 +96,10 @@ export class RedisBackend implements Taskora.Adapter {
 
     await this.eval(
       "enqueue",
-      2,
+      3,
       keys.wait,
       keys.events,
+      keys.marker,
       keys.jobPrefix,
       jobId,
       data,
@@ -111,12 +118,13 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
 
     const result = await this.eval(
-      "dequeue",
-      4,
+      "moveToActive",
+      5,
       keys.wait,
       keys.active,
       keys.delayed,
       keys.events,
+      keys.marker,
       keys.jobPrefix,
       String(lockTtl),
       token,
@@ -133,6 +141,71 @@ export class RedisBackend implements Taskora.Adapter {
       attempt: Number(attempt),
       timestamp: Number(ts),
     };
+  }
+
+  async blockingDequeue(
+    task: string,
+    lockTtl: number,
+    token: string,
+    timeoutMs: number,
+  ): Promise<Taskora.DequeueResult | null> {
+    const keys = buildKeys(task, this.prefix);
+
+    // Fast path: try non-blocking moveToActive first
+    const quick = await this.dequeue(task, lockTtl, token);
+    if (quick) return quick;
+
+    const blockClient = await this.getBlockingClient(task);
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const remaining = Math.max(0, deadline - Date.now());
+      if (remaining <= 0) return null;
+
+      const blockSec = Math.min(remaining, 2000) / 1000;
+      let popped: [string, string, string] | null = null;
+
+      try {
+        popped = (await blockClient.bzpopmin(keys.marker, blockSec)) as
+          | [string, string, string]
+          | null;
+      } catch {
+        return null; // connection interrupted (shutdown)
+      }
+
+      if (popped) {
+        const score = Number(popped[2]);
+        const now = Date.now();
+
+        if (score > now) {
+          // Delayed marker — wait until due or new marker
+          const waitMs = Math.min(score - now, Math.max(0, deadline - now));
+          if (waitMs > 0) {
+            try {
+              await blockClient.bzpopmin(keys.marker, waitMs / 1000);
+            } catch {
+              return null;
+            }
+          }
+        }
+      }
+
+      // Try moveToActive (promotes delayed + dequeues)
+      const result = await this.dequeue(task, lockTtl, token);
+      if (result) return result;
+    }
+
+    return null;
+  }
+
+  private async getBlockingClient(task: string): Promise<import("ioredis").default> {
+    let client = this.blockingClients.get(task);
+    if (!client) {
+      client = this.client.duplicate();
+      await client.connect();
+      this.blockingClients.set(task, client);
+    }
+    return client;
   }
 
   async ack(task: string, jobId: string, token: string, result: string): Promise<void> {
@@ -161,11 +234,12 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     await this.eval(
       "fail",
-      4,
+      5,
       keys.active,
       keys.failed,
       keys.events,
       keys.delayed,
+      keys.marker,
       keys.jobPrefix,
       jobId,
       token,
@@ -177,7 +251,17 @@ export class RedisBackend implements Taskora.Adapter {
 
   async nack(task: string, jobId: string, token: string): Promise<void> {
     const keys = buildKeys(task, this.prefix);
-    await this.eval("nack", 3, keys.active, keys.wait, keys.events, keys.jobPrefix, jobId, token);
+    await this.eval(
+      "nack",
+      4,
+      keys.active,
+      keys.wait,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+      token,
+    );
   }
 
   async setProgress(task: string, jobId: string, value: string): Promise<void> {

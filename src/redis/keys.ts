@@ -9,6 +9,7 @@ export function buildKeys(task: string, prefix?: string) {
     failed: `${base}:failed`,
     events: `${base}:events`,
     stalled: `${base}:stalled`,
+    marker: `${base}:marker`,
     jobPrefix: `${base}:`,
   };
 }

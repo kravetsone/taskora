@@ -145,6 +145,12 @@ export namespace Taskora {
       options: { _v: number; maxAttempts?: number } & JobOptions,
     ): Promise<void>;
     dequeue(task: string, lockTtl: number, token: string): Promise<DequeueResult | null>;
+    blockingDequeue(
+      task: string,
+      lockTtl: number,
+      token: string,
+      timeoutMs: number,
+    ): Promise<DequeueResult | null>;
     ack(task: string, jobId: string, token: string, result: string): Promise<void>;
     fail(
       task: string,

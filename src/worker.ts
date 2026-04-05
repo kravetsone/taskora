@@ -8,9 +8,7 @@ import type { Taskora } from "./types.js";
 
 const LOCK_TTL = 30_000;
 const LOCK_EXTEND_INTERVAL = 10_000;
-const BACKOFF_MIN = 50;
-const BACKOFF_MAX = 1_000;
-const BACKOFF_FACTOR = 2;
+const BLOCK_TIMEOUT = 2_000;
 
 interface ActiveJob {
   promise: Promise<void>;
@@ -27,7 +25,6 @@ export class Worker {
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
   private lockTimer: ReturnType<typeof setInterval> | null = null;
-  private backoffMs = BACKOFF_MIN;
   private slotResolve: (() => void) | null = null;
 
   constructor(
@@ -82,7 +79,6 @@ export class Worker {
 
   private async poll(): Promise<void> {
     while (this.running) {
-      // Wait for a free slot if at capacity
       if (this.activeJobs.size >= this.concurrency) {
         await new Promise<void>((resolve) => {
           this.slotResolve = resolve;
@@ -93,20 +89,17 @@ export class Worker {
 
       try {
         const token = randomUUID();
-        const result = await this.adapter.dequeue(this.task.name, LOCK_TTL, token);
+        const result = await this.adapter.blockingDequeue(
+          this.task.name,
+          LOCK_TTL,
+          token,
+          BLOCK_TIMEOUT,
+        );
 
-        if (!result) {
-          await this.sleep(this.backoffMs);
-          this.backoffMs = Math.min(this.backoffMs * BACKOFF_FACTOR, BACKOFF_MAX);
-          continue;
-        }
-
-        this.backoffMs = BACKOFF_MIN;
+        if (!result) continue;
         this.processJob(result, token);
       } catch {
-        // Dequeue error — back off and retry
-        await this.sleep(this.backoffMs);
-        this.backoffMs = Math.min(this.backoffMs * BACKOFF_FACTOR, BACKOFF_MAX);
+        if (!this.running) break;
       }
     }
   }
@@ -219,9 +212,5 @@ export class Worker {
         // Extension failed — lock may have expired
       }
     }
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
