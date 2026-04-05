@@ -94,3 +94,13 @@ export class DuplicateJobError extends TaskoraError {
     this.existingId = existingId;
   }
 }
+
+export class ExpiredError extends TaskoraError {
+  readonly jobId: string;
+
+  constructor(jobId: string) {
+    super(`Job ${jobId} expired before processing`);
+    this.name = "ExpiredError";
+    this.jobId = jobId;
+  }
+}

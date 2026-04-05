@@ -76,7 +76,8 @@ export namespace Taskora {
     | "completed"
     | "failed"
     | "retrying"
-    | "cancelled";
+    | "cancelled"
+    | "expired";
 
   export type BackoffStrategy = "fixed" | "exponential" | "linear" | ((attempt: number) => number);
 
@@ -111,13 +112,26 @@ export namespace Taskora {
     while?: Array<"waiting" | "delayed" | "active">;
   }
 
+  export interface TtlConfig {
+    max: DurationType;
+    onExpire?: "fail" | "discard";
+  }
+
   export interface DispatchOptions {
     delay?: number;
     priority?: number;
+    ttl?: DurationType;
+    concurrencyKey?: string;
+    concurrencyLimit?: number;
     debounce?: DebounceConfig;
     throttle?: ThrottleConfig;
     deduplicate?: DeduplicateConfig;
     throwOnReject?: boolean;
+  }
+
+  export interface DequeueOptions {
+    onExpire?: "fail" | "discard";
+    singleton?: boolean;
   }
 
   /** @deprecated Use DispatchOptions instead */
@@ -189,13 +203,26 @@ export namespace Taskora {
       task: string,
       jobId: string,
       data: string,
-      options: { _v: number; maxAttempts?: number } & DispatchOptions,
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        expireAt?: number;
+        concurrencyKey?: string;
+        concurrencyLimit?: number;
+      } & DispatchOptions,
     ): Promise<void>;
     debounceEnqueue(
       task: string,
       jobId: string,
       data: string,
-      options: { _v: number; maxAttempts?: number; priority?: number },
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        priority?: number;
+        expireAt?: number;
+        concurrencyKey?: string;
+        concurrencyLimit?: number;
+      },
       debounceKey: string,
       delayMs: number,
     ): Promise<void>;
@@ -203,7 +230,15 @@ export namespace Taskora {
       task: string,
       jobId: string,
       data: string,
-      options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        delay?: number;
+        priority?: number;
+        expireAt?: number;
+        concurrencyKey?: string;
+        concurrencyLimit?: number;
+      },
       throttleKey: string,
       max: number,
       windowMs: number,
@@ -212,16 +247,30 @@ export namespace Taskora {
       task: string,
       jobId: string,
       data: string,
-      options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        delay?: number;
+        priority?: number;
+        expireAt?: number;
+        concurrencyKey?: string;
+        concurrencyLimit?: number;
+      },
       dedupKey: string,
       states: string[],
     ): Promise<{ created: true } | { created: false; existingId: string }>;
-    dequeue(task: string, lockTtl: number, token: string): Promise<DequeueResult | null>;
+    dequeue(
+      task: string,
+      lockTtl: number,
+      token: string,
+      options?: DequeueOptions,
+    ): Promise<DequeueResult | null>;
     blockingDequeue(
       task: string,
       lockTtl: number,
       token: string,
       timeoutMs: number,
+      options?: DequeueOptions,
     ): Promise<DequeueResult | null>;
     ack(task: string, jobId: string, token: string, result: string): Promise<void>;
     fail(
@@ -249,7 +298,7 @@ export namespace Taskora {
     // Inspector
     listJobDetails(
       task: string,
-      state: "waiting" | "active" | "delayed" | "completed" | "failed",
+      state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired",
       offset: number,
       limit: number,
     ): Promise<Array<{ id: string; details: RawJobDetails }>>;
@@ -313,6 +362,7 @@ export namespace Taskora {
     delayed: number;
     completed: number;
     failed: number;
+    expired: number;
   }
 
   export interface RawJobDetails {

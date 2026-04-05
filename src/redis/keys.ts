@@ -7,6 +7,7 @@ export function buildKeys(task: string, prefix?: string) {
     delayed: `${base}:delayed`,
     completed: `${base}:completed`,
     failed: `${base}:failed`,
+    expired: `${base}:expired`,
     events: `${base}:events`,
     stalled: `${base}:stalled`,
     marker: `${base}:marker`,
