@@ -2,6 +2,7 @@ import { Redis } from "ioredis";
 import type { RedisOptions } from "ioredis";
 import type { Taskora } from "../types.js";
 import { EventReader } from "./event-reader.js";
+import { JobWaiter } from "./job-waiter.js";
 import { buildKeys } from "./keys.js";
 import * as scripts from "./scripts.js";
 
@@ -20,6 +21,7 @@ export class RedisBackend implements Taskora.Adapter {
   private ownsClient: boolean;
   private prefix?: string;
   private shas = new Map<string, string>();
+  private jobWaiter: JobWaiter | null = null;
 
   constructor(connection: string | RedisOptions | Redis, options?: { prefix?: string }) {
     if (connection instanceof Redis) {
@@ -49,6 +51,10 @@ export class RedisBackend implements Taskora.Adapter {
   }
 
   async disconnect(): Promise<void> {
+    if (this.jobWaiter) {
+      await this.jobWaiter.shutdown();
+      this.jobWaiter = null;
+    }
     if (this.ownsClient) {
       await this.client.quit();
     }
@@ -241,6 +247,17 @@ export class RedisBackend implements Taskora.Adapter {
         // Already disconnected by reader.stop()
       }
     };
+  }
+
+  async awaitJob(
+    task: string,
+    jobId: string,
+    timeoutMs?: number,
+  ): Promise<Taskora.AwaitJobResult | null> {
+    if (!this.jobWaiter) {
+      this.jobWaiter = new JobWaiter(this.client, this.prefix);
+    }
+    return this.jobWaiter.wait(task, jobId, timeoutMs);
   }
 
   async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {

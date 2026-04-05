@@ -1,10 +1,6 @@
 import { JobFailedError, TimeoutError } from "./errors.js";
 import type { Taskora } from "./types.js";
 
-const POLL_MIN = 50;
-const POLL_MAX = 500;
-const POLL_FACTOR = 1.5;
-
 export class ResultHandle<TOutput> {
   readonly id: string;
 
@@ -64,34 +60,25 @@ export class ResultHandle<TOutput> {
   async waitFor(timeout?: number): Promise<TOutput> {
     await this.ensureEnqueued();
 
-    const deadline = timeout != null ? Date.now() + timeout : undefined;
-    let delay = POLL_MIN;
+    const result = await this.adapter.awaitJob(this.taskName, this.id, timeout);
 
-    while (true) {
-      const state = await this.adapter.getState(this.taskName, this.id);
-
-      if (state === "completed") {
-        const raw = await this.adapter.getResult(this.taskName, this.id);
-        if (raw == null) throw new JobFailedError(this.id, this.taskName, "Result missing");
-        return this.serializer.deserialize(raw) as TOutput;
-      }
-
-      if (state === "failed") {
-        const errMsg = await this.adapter.getError(this.taskName, this.id);
-        throw new JobFailedError(this.id, this.taskName, errMsg ?? `Job ${this.id} failed`);
-      }
-
-      if (state === "cancelled") {
-        throw new JobFailedError(this.id, this.taskName, "Job was cancelled");
-      }
-
-      if (deadline != null && Date.now() + delay >= deadline) {
-        throw new TimeoutError(this.id, timeout as number);
-      }
-
-      await sleep(delay);
-      delay = Math.min(delay * POLL_FACTOR, POLL_MAX);
+    if (!result) {
+      throw new TimeoutError(this.id, timeout as number);
     }
+
+    if (result.state === "completed") {
+      if (result.result == null) {
+        throw new JobFailedError(this.id, this.taskName, "Result missing");
+      }
+      return this.serializer.deserialize(result.result) as TOutput;
+    }
+
+    if (result.state === "failed") {
+      throw new JobFailedError(this.id, this.taskName, result.error ?? `Job ${this.id} failed`);
+    }
+
+    // cancelled
+    throw new JobFailedError(this.id, this.taskName, "Job was cancelled");
   }
 
   async getState(): Promise<Taskora.JobState | null> {
@@ -110,8 +97,4 @@ export class ResultHandle<TOutput> {
     const raw = await this.adapter.getLogs(this.taskName, this.id);
     return raw.map((entry) => JSON.parse(entry));
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

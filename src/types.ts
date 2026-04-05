@@ -163,5 +163,12 @@ export namespace Taskora {
     getProgress(task: string, jobId: string): Promise<string | null>;
     getLogs(task: string, jobId: string): Promise<string[]>;
     subscribe(tasks: string[], handler: (event: StreamEvent) => void): Promise<() => Promise<void>>;
+    awaitJob(task: string, jobId: string, timeoutMs?: number): Promise<AwaitJobResult | null>;
+  }
+
+  export interface AwaitJobResult {
+    state: "completed" | "failed" | "cancelled";
+    result?: string;
+    error?: string;
   }
 }
