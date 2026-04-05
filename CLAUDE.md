@@ -29,9 +29,10 @@ Task queue library for Node.js. TypeScript-first, Celery-inspired, BullMQ replac
 taskora              — core engine, types, task API (zero DB deps)
 taskora/redis        — Redis adapter (peer dep: ioredis)
 taskora/postgres     — future
-taskora/test         — in-memory runner (future)
-taskora/telemetry    — OpenTelemetry adapter (future)
-taskora/react        — React hooks (future)
+taskora/memory       — in-memory adapter (zero DB deps)
+taskora/test         — test runner (wraps memory adapter)
+taskora/telemetry    — OpenTelemetry adapter (deferred)
+taskora/react        — React hooks (deferred)
 ```
 
 `ioredis` is an optional peer dep — only required when using `taskora/redis`.
@@ -63,6 +64,11 @@ src/
 │   ├── event-reader.ts   — XREAD BLOCK stream reader
 │   ├── job-waiter.ts     — Push-based ResultHandle (shared XREAD)
 │   └── scripts.ts        — Lua scripts (inline, SCRIPT LOAD)
+├── memory/
+│   ├── index.ts          — memoryAdapter() factory
+│   └── backend.ts        — MemoryBackend (in-memory Adapter)
+├── test/
+│   └── index.ts          — createTestRunner(), TestRunner, ExecutionResult
 └── ...
 ```
 
@@ -86,7 +92,22 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–11 completed. Phase 12a, 12b, 12c, and Phase 13 complete. See `docs/IMPLEMENTATION.md` for full phase breakdown.
+Phases 1–13 and Phase 14 complete. Phases 15 (OpenTelemetry) and 16 (React Hooks) deferred — cool features but not in scope yet. Next: Phase 17 (Workflows). See `docs/IMPLEMENTATION.md` for full phase breakdown.
+
+Phase 14 delivered:
+- `taskora/memory` entrypoint: `memoryAdapter()` — in-memory `Taskora.Adapter` implementation
+- `MemoryBackend`: all ~40 Adapter methods using plain JS (arrays, Maps, sorted arrays)
+- `taskora/test` entrypoint: `createTestRunner()` — test runner with virtual time
+- `runner.run(task, data)` — direct handler execution with inline retry loop
+- `runner.execute(task, data)` — full queue pipeline: dispatch → process → auto-advance retries → returns `ExecutionResult` with result, state, attempts, logs, progress, error, handle
+- `runner.importTask(task)` — copy production task to memory adapter for queue-based testing
+- `createTestRunner({ from: app })` — patches all tasks on existing app to use memory backend; interconnected multi-task chains work in-memory without rewriting handlers
+- `runner.dispatch/advanceTime/processAll/flush/clear/dispose`
+- `Task._patchDeps()` — internal adapter swap with restore function
+- `App.registerExternalTask()` / `getRegisteredTasks()` — internal task registration
+- `MemoryBackend.getEarliestDelayedScore()` — for auto-retry time advancement
+- `runner.jobs` — all jobs with states; `runner.steps` — placeholder for Phase 17
+- 16 memory adapter unit tests + 25 test runner unit tests (88 unit tests total, 207 integration)
 
 Phase 13 delivered:
 - Graceful Cancellation: first-class `"cancelled"` state distinct from `"failed"`
