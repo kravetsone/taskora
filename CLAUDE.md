@@ -86,7 +86,21 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–11 completed. Phase 12a and 12b complete. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 12c: Flow Control — Collect (Batch Accumulator)**.
+Phases 1–11 completed. Phase 12a, 12b, and 12c complete. See `docs/IMPLEMENTATION.md` for full phase breakdown.
+
+Phase 12c delivered:
+- Collect (batch accumulator): `collect: { key, delay, maxSize?, maxWait? }` task option
+- `dispatch()` pushes items to per-key Redis accumulator list via `COLLECT_PUSH` Lua script
+- Three flush triggers (whichever first): debounce delay, maxSize, maxWait
+- Flush sentinel: delayed job with `collectKey` field, replaced on each dispatch (debounce reset)
+- `moveToActive.lua` drains buffer into `:data` at claim time — worker unchanged
+- maxSize immediate flush: inline in `COLLECT_PUSH` Lua, creates real job directly in wait list
+- `HDEL collectKey` after drain prevents retry double-drain
+- Typing: `CollectTaskOptions<I, O>` overload on `app.task()`, handler receives `I[]`
+- `dispatch()` returns lightweight `ResultHandle` (push confirmation only)
+- Collect tasks are mutually exclusive with debounce/throttle/dedup dispatch options
+- Redis keys: `{prefix}collect:{key}:items` (List), `{prefix}collect:{key}:meta` (Hash), `{prefix}collect:{key}:job` (flush sentinel ID)
+- 5 integration tests (197 total)
 
 Phase 12b delivered:
 - TTL/Expiration: `ttl: { max: Duration, onExpire: "fail" | "discard" }` task option, `ttl: Duration` dispatch option

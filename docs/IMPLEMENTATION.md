@@ -553,24 +553,26 @@ tests/
 **Tasks**:
 
 1. **Collect** (debounce + accumulator)
-   - [ ] `collect_push.lua` — RPUSH item to `:items` list + HSET `:meta` (firstAt, lastAt, count) + reset debounce timer
-   - [ ] `collect_flush.lua` — atomically LRANGE + DEL `:items` `:meta` `:flush` + create regular job with items as data
-   - [ ] Dispatch: serialize item → push to accumulator list → check flush triggers
-   - [ ] Flush triggers: delay (debounce), maxSize, maxWait — any first
-   - [ ] On flush: items become a regular job's `:data` (array) → normal worker picks it up
-   - [ ] Task typing: `collect` present → handler receives `TInput[]`
-   - [ ] Redis keys per accumulator:
+   - [x] `COLLECT_PUSH` Lua — RPUSH item, HINCRBY count, manage flush sentinel, maxSize inline flush
+   - [x] Flush via `moveToActive.lua` — drain buffer into `:data` at claim time (no separate flush script)
+   - [x] Dispatch: serialize item → `collectPush` adapter method → check flush triggers
+   - [x] Flush triggers: delay (debounce), maxSize, maxWait — any first
+   - [x] On flush: items become a regular job's `:data` (array) → normal worker picks it up
+   - [x] Task typing: `CollectTaskOptions<I, O>` overload, handler receives `TInput[]`
+   - [x] HDEL collectKey after drain prevents retry double-drain
+   - [x] Redis keys per accumulator:
      ```
      {taskora:<pfx>:<task>:collect:<key>}:items   — List: accumulated items
      {taskora:<pfx>:<task>:collect:<key>}:meta    — Hash: firstAt, lastAt, count
-     {taskora:<pfx>:<task>:collect:<key>}:flush   — delayed job (debounce timer)
+     {taskora:<pfx>:<task>:collect:<key>}:job     — String: flush sentinel job ID
      ```
 
-**Tests**:
-- Integration: collect — 10 dispatches within delay window → handler receives array of 10
-- Integration: collect maxSize — flush triggers at maxSize even if delay hasn't passed
-- Integration: collect maxWait — flush triggers at maxWait even if dispatches keep coming
-- Integration: collect failure — batch retries as one job, no data loss
+**Tests** (5 integration, 197 total):
+- [x] Integration: collect — 5 dispatches within delay → handler receives array of 5
+- [x] Integration: collect dynamic key — groups items by key separately
+- [x] Integration: collect maxSize — flush triggers at maxSize even if delay hasn't passed
+- [x] Integration: collect maxWait — flush triggers at maxWait even if dispatches keep coming
+- [x] Integration: collect failure — batch retries as one job, no data loss
 
 ---
 
