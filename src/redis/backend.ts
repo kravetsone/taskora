@@ -57,10 +57,11 @@ export class RedisBackend implements Taskora.Adapter {
     task: string,
     jobId: string,
     data: string,
-    options: { _v: number } & Taskora.JobOptions,
+    options: { _v: number; maxAttempts?: number } & Taskora.JobOptions,
   ): Promise<void> {
     const keys = buildKeys(task, this.prefix);
     const now = String(Date.now());
+    const maxAttempts = String(options.maxAttempts ?? 1);
 
     if (options.delay && options.delay > 0) {
       await this.eval(
@@ -75,6 +76,7 @@ export class RedisBackend implements Taskora.Adapter {
         String(options._v),
         String(options.delay),
         String(options.priority ?? 0),
+        maxAttempts,
       );
       return;
     }
@@ -90,6 +92,7 @@ export class RedisBackend implements Taskora.Adapter {
       now,
       String(options._v),
       String(options.priority ?? 0),
+      maxAttempts,
     );
   }
 
@@ -141,19 +144,27 @@ export class RedisBackend implements Taskora.Adapter {
     );
   }
 
-  async fail(task: string, jobId: string, token: string, error: string): Promise<void> {
+  async fail(
+    task: string,
+    jobId: string,
+    token: string,
+    error: string,
+    retry?: { delay: number },
+  ): Promise<void> {
     const keys = buildKeys(task, this.prefix);
     await this.eval(
       "fail",
-      3,
+      4,
       keys.active,
       keys.failed,
       keys.events,
+      keys.delayed,
       keys.jobPrefix,
       jobId,
       token,
       error,
       String(Date.now()),
+      String(retry ? retry.delay : -1),
     );
   }
 

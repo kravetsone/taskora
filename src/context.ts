@@ -1,3 +1,4 @@
+import { RetryError } from "./errors.js";
 import type { Taskora } from "./types.js";
 
 export function createContext(options: {
@@ -13,5 +14,11 @@ export function createContext(options: {
     timestamp: options.timestamp,
     signal: options.signal,
     heartbeat: options.onHeartbeat,
+    retry(retryOptions) {
+      return new RetryError({
+        message: retryOptions?.reason,
+        delay: retryOptions?.delay,
+      });
+    },
   };
 }

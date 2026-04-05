@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { computeDelay, shouldRetry } from "./backoff.js";
 import { createContext } from "./context.js";
+import { RetryError } from "./errors.js";
 import { validateSchema } from "./schema.js";
 import type { Task } from "./task.js";
 import type { Taskora } from "./types.js";
@@ -131,10 +133,26 @@ export class Worker {
           handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
         }
       } catch (err) {
-        // Handler failed — mark job as failed
         const errorMsg = err instanceof Error ? err.message : String(err);
+        const retryConfig = this.task.config.retry;
+        let retryInfo: { delay: number } | undefined;
+
+        if (err instanceof RetryError) {
+          // Manual retry via ctx.retry() or throw new RetryError()
+          // Always retry unless attempts exhausted
+          if (!retryConfig || raw.attempt >= retryConfig.attempts) {
+            retryInfo = undefined;
+          } else {
+            const delay =
+              err.delay ?? (retryConfig ? computeDelay(raw.attempt, retryConfig) : 1000);
+            retryInfo = { delay };
+          }
+        } else if (retryConfig && shouldRetry(err, raw.attempt, retryConfig)) {
+          retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
+        }
+
         try {
-          await this.adapter.fail(this.task.name, raw.id, token, errorMsg);
+          await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
         } catch {
           // fail() itself failed (e.g. lock expired)
         }

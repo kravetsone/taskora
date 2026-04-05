@@ -1,3 +1,5 @@
+import type { RetryError } from "./errors.js";
+
 export namespace Taskora {
   export type JobState =
     | "waiting"
@@ -7,6 +9,18 @@ export namespace Taskora {
     | "failed"
     | "retrying"
     | "cancelled";
+
+  export type BackoffStrategy = "fixed" | "exponential" | "linear" | ((attempt: number) => number);
+
+  export interface RetryConfig {
+    attempts: number;
+    backoff?: BackoffStrategy;
+    delay?: number;
+    maxDelay?: number;
+    jitter?: boolean;
+    retryOn?: Array<new (...args: any[]) => Error>;
+    noRetryOn?: Array<new (...args: any[]) => Error>;
+  }
 
   export interface JobOptions {
     delay?: number;
@@ -44,6 +58,7 @@ export namespace Taskora {
     timestamp: number;
     signal: AbortSignal;
     heartbeat(): void;
+    retry(options?: { delay?: number; reason?: string }): RetryError;
   }
 
   export interface Adapter {
@@ -53,11 +68,17 @@ export namespace Taskora {
       task: string,
       jobId: string,
       data: string,
-      options: { _v: number } & JobOptions,
+      options: { _v: number; maxAttempts?: number } & JobOptions,
     ): Promise<void>;
     dequeue(task: string, lockTtl: number, token: string): Promise<DequeueResult | null>;
     ack(task: string, jobId: string, token: string, result: string): Promise<void>;
-    fail(task: string, jobId: string, token: string, error: string): Promise<void>;
+    fail(
+      task: string,
+      jobId: string,
+      token: string,
+      error: string,
+      retry?: { delay: number },
+    ): Promise<void>;
     nack(task: string, jobId: string, token: string): Promise<void>;
     extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean>;
     getState(task: string, jobId: string): Promise<JobState | null>;

@@ -19,6 +19,7 @@
 // ARGV[4] = timestamp (ms)
 // ARGV[5] = _v (version)
 // ARGV[6] = priority
+// ARGV[7] = maxAttempts
 // Returns: 1
 export const ENQUEUE = `
 local jobKey = ARGV[1] .. ARGV[2]
@@ -28,6 +29,7 @@ redis.call('HSET', jobKey,
   'ts', ARGV[4],
   '_v', ARGV[5],
   'attempt', 1,
+  'maxAttempts', ARGV[7],
   'state', 'waiting',
   'priority', ARGV[6])
 
@@ -50,6 +52,7 @@ return 1
 // ARGV[5] = _v
 // ARGV[6] = delay (ms)
 // ARGV[7] = priority
+// ARGV[8] = maxAttempts
 // Returns: 1
 export const ENQUEUE_DELAYED = `
 local jobKey = ARGV[1] .. ARGV[2]
@@ -64,6 +67,7 @@ redis.call('HSET', jobKey,
   'delay', ARGV[6],
   '_v', ARGV[5],
   'attempt', 1,
+  'maxAttempts', ARGV[8],
   'state', 'delayed',
   'priority', ARGV[7])
 
@@ -174,11 +178,13 @@ return 1
 // KEYS[1] = <task>:active
 // KEYS[2] = <task>:failed     (sorted set, score = finishedOn)
 // KEYS[3] = <task>:events
+// KEYS[4] = <task>:delayed    (sorted set for retry re-enqueue)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobId
 // ARGV[3] = lock token
 // ARGV[4] = error message
 // ARGV[5] = current timestamp
+// ARGV[6] = retryDelay (ms, -1 = permanent fail)
 // Returns: 1 or error
 export const FAIL = `
 local prefix = ARGV[1]
@@ -186,6 +192,7 @@ local jobId = ARGV[2]
 local token = ARGV[3]
 local errMsg = ARGV[4]
 local now = ARGV[5]
+local retryDelay = tonumber(ARGV[6])
 
 local jobKey = prefix .. jobId
 local lockKey = jobKey .. ':lock'
@@ -197,11 +204,25 @@ end
 
 redis.call('LREM', KEYS[1], 1, jobId)
 redis.call('DEL', lockKey)
-redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', now, 'error', errMsg)
-redis.call('ZADD', KEYS[2], tonumber(now), jobId)
 
-redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
-  'event', 'failed', 'jobId', jobId)
+if retryDelay >= 0 then
+  -- Retry: increment attempt, set state to retrying, add to delayed set
+  local newAttempt = redis.call('HINCRBY', jobKey, 'attempt', 1)
+  local score = tonumber(now) + retryDelay
+  redis.call('HSET', jobKey, 'state', 'retrying', 'error', errMsg)
+  redis.call('ZADD', KEYS[4], score, jobId)
+
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'retrying', 'jobId', jobId,
+    'attempt', tostring(newAttempt), 'nextAttemptAt', tostring(score))
+else
+  -- Permanent fail
+  redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', now, 'error', errMsg)
+  redis.call('ZADD', KEYS[2], tonumber(now), jobId)
+
+  redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+    'event', 'failed', 'jobId', jobId)
+end
 
 return 1
 `;

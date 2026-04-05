@@ -8,7 +8,7 @@ export interface TaskoraOptions {
   adapter: Taskora.Adapter;
   serializer?: Taskora.Serializer;
   defaults?: {
-    retry?: { max?: number; backoff?: "exponential" | "linear" | "fixed" };
+    retry?: Taskora.RetryConfig;
     timeout?: number;
     concurrency?: number;
   };
@@ -17,6 +17,7 @@ export interface TaskoraOptions {
 interface TaskOptionsBase {
   concurrency?: number;
   timeout?: number;
+  retry?: Taskora.RetryConfig;
 }
 
 interface TaskOptionsWithSchema<TInput, TOutput> extends TaskOptionsBase {
@@ -89,6 +90,7 @@ export class App {
       (!isFunction ? handlerOrOptions.concurrency : undefined) ?? this.defaults.concurrency ?? 1;
     const timeout =
       (!isFunction ? handlerOrOptions.timeout : undefined) ?? this.defaults.timeout ?? 30_000;
+    const retry = (!isFunction ? handlerOrOptions.retry : undefined) ?? this.defaults.retry;
 
     const task = new Task<TInput, TOutput>(
       {
@@ -98,7 +100,7 @@ export class App {
       },
       name,
       handler,
-      { concurrency, timeout },
+      { concurrency, timeout, retry },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
     );
 

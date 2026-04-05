@@ -7,6 +7,7 @@ import type { Taskora } from "./types.js";
 export interface TaskConfig {
   concurrency: number;
   timeout: number;
+  retry?: Taskora.RetryConfig;
 }
 
 export interface TaskDeps {
@@ -51,6 +52,7 @@ export class Task<TInput, TOutput> {
       const serialized = this.deps.serializer.serialize(data);
       await this.deps.adapter.enqueue(this.name, id, serialized, {
         _v: 1,
+        maxAttempts: this.config.retry?.attempts,
         ...options,
       });
     })();
