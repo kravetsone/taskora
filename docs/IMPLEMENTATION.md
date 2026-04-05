@@ -479,9 +479,9 @@ tests/
 
 ---
 
-### Phase 12: Flow Control
+### Phase 12a: Flow Control — Debounce, Throttle, Deduplication
 
-**Goal**: Debounce, throttle, deduplication, TTL, singleton, concurrency per key, cron overlap prevention.
+**Goal**: Dispatch-time flow control primitives — all implemented as atomic Lua scripts.
 
 **Tasks**:
 
@@ -502,30 +502,57 @@ tests/
    - [ ] Redis key: `taskora:<pfx>:<task>:dedup:<key>` → jobId
    - [ ] Clean dedup key on job completion/failure
 
-4. **TTL / Expiration**
+**Tests**:
+- Integration: debounce — 5 dispatches, only last runs
+- Integration: throttle — exceeding limit drops jobs
+- Integration: deduplication — second dispatch returns existing handle
+
+---
+
+### Phase 12b: Flow Control — TTL, Singleton, Concurrency per Key
+
+**Goal**: Worker-time flow control — TTL expiration, singleton tasks, per-key concurrency limits.
+
+**Tasks**:
+
+1. **TTL / Expiration**
    - [ ] Store `expireAt` in job hash
    - [ ] Worker: check TTL before processing, skip expired
    - [ ] `promoteDelayed.lua`: skip expired delayed jobs
    - [ ] Task option + dispatch option: `ttl`
    - [ ] `onExpire: "fail" | "discard"` behavior
 
-5. **Singleton**
+2. **Singleton**
    - [ ] Task option: `singleton: true`
    - [ ] `dequeue.lua`: check active count for task before claiming
    - [ ] Global lock across workers (not per-worker concurrency)
 
-6. **Concurrency per key**
+3. **Concurrency per key**
    - [ ] Dispatch option: `concurrencyKey` + `concurrencyLimit`
    - [ ] Redis key: `taskora:<pfx>:<task>:conc:<key>` → active count
    - [ ] `dequeue.lua`: check per-key count before claiming
    - [ ] Decrement on ack/fail
 
-7. **Cron overlap prevention**
+4. **Cron overlap prevention**
    - [ ] Schedule option: `overlap: false`
    - [ ] Scheduler: check if previous run is still active before dispatching
    - [ ] Redis key: `taskora:<pfx>:schedules:<name>:active` → jobId
 
-8. **Collect** (debounce + accumulator)
+**Tests**:
+- Integration: TTL — expired job not processed
+- Integration: singleton — second job waits for first to complete
+- Integration: concurrency per key — respects per-key limit
+- Integration: cron overlap — skips when previous still active
+
+---
+
+### Phase 12c: Flow Control — Collect (Batch Accumulator)
+
+**Goal**: Debounce + accumulator pattern — collect multiple dispatches into a single batched job.
+
+**Tasks**:
+
+1. **Collect** (debounce + accumulator)
    - [ ] `collect_push.lua` — RPUSH item to `:items` list + HSET `:meta` (firstAt, lastAt, count) + reset debounce timer
    - [ ] `collect_flush.lua` — atomically LRANGE + DEL `:items` `:meta` `:flush` + create regular job with items as data
    - [ ] Dispatch: serialize item → push to accumulator list → check flush triggers
@@ -540,13 +567,6 @@ tests/
      ```
 
 **Tests**:
-- Integration: debounce — 5 dispatches, only last runs
-- Integration: throttle — exceeding limit drops jobs
-- Integration: deduplication — second dispatch returns existing handle
-- Integration: TTL — expired job not processed
-- Integration: singleton — second job waits for first to complete
-- Integration: concurrency per key — respects per-key limit
-- Integration: cron overlap — skips when previous still active
 - Integration: collect — 10 dispatches within delay window → handler receives array of 10
 - Integration: collect maxSize — flush triggers at maxSize even if delay hasn't passed
 - Integration: collect maxWait — flush triggers at maxWait even if dispatches keep coming
