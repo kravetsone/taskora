@@ -10,6 +10,13 @@ import type { Taskora } from "./types.js";
 
 type MigrationFn = (data: unknown) => unknown;
 
+export interface CollectConfigResolved {
+  key: ((data: unknown) => string) | string;
+  delayMs: number;
+  maxSize: number;
+  maxWaitMs: number;
+}
+
 export interface TaskConfig {
   concurrency: number;
   timeout: number;
@@ -18,6 +25,7 @@ export interface TaskConfig {
   singleton?: boolean;
   concurrencyLimit?: number;
   ttl?: { maxMs: number; onExpire: "fail" | "discard" };
+  collect?: CollectConfigResolved;
 }
 
 export interface TaskMigrationConfig {
@@ -94,6 +102,36 @@ export class Task<TInput, TOutput> {
 
   dispatch(data: TInput, options?: Taskora.DispatchOptions): ResultHandle<TOutput> {
     const id = randomUUID();
+
+    // Collect tasks use a simplified dispatch path
+    if (this.config.collect) {
+      const collect = this.config.collect;
+      const handle = new ResultHandle<TOutput>(
+        id,
+        this.name,
+        this.deps.adapter,
+        this.deps.serializer,
+        (async () => {
+          await this.deps.ensureConnected();
+          if (this.inputSchema) {
+            await validateSchema(this.inputSchema, data);
+          }
+          const serialized = this.deps.serializer.serialize(data);
+          const collectKey = typeof collect.key === "function" ? collect.key(data) : collect.key;
+
+          await this.deps.adapter.collectPush(this.name, id, serialized, {
+            _v: this.version,
+            maxAttempts: this.config.retry?.attempts,
+            collectKey,
+            delayMs: collect.delayMs,
+            maxSize: collect.maxSize,
+            maxWaitMs: collect.maxWaitMs,
+          });
+        })(),
+      );
+      return handle;
+    }
+
     const handle = new ResultHandle<TOutput>(
       id,
       this.name,

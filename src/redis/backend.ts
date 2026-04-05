@@ -26,6 +26,7 @@ const SCRIPT_MAP: Record<string, string> = {
   debounce: scripts.DEBOUNCE,
   throttleEnqueue: scripts.THROTTLE_ENQUEUE,
   deduplicateEnqueue: scripts.DEDUPLICATE_ENQUEUE,
+  collectPush: scripts.COLLECT_PUSH,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -269,6 +270,43 @@ export class RedisBackend implements Taskora.Adapter {
       return { created: false, existingId: result[1] as string };
     }
     return { created: true };
+  }
+
+  async collectPush(
+    task: string,
+    jobId: string,
+    item: string,
+    options: {
+      _v: number;
+      maxAttempts?: number;
+      collectKey: string;
+      delayMs: number;
+      maxSize: number;
+      maxWaitMs: number;
+    },
+  ): Promise<{ flushed: boolean; count: number }> {
+    const keys = buildKeys(task, this.prefix);
+
+    const result = (await this.eval(
+      "collectPush",
+      4,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      keys.wait,
+      keys.jobPrefix,
+      jobId,
+      item,
+      String(Date.now()),
+      String(options._v),
+      String(options.delayMs),
+      String(options.maxSize),
+      String(options.maxWaitMs),
+      options.collectKey,
+      String(options.maxAttempts ?? 1),
+    )) as [number, number];
+
+    return { flushed: result[0] === 1, count: result[1] };
   }
 
   async dequeue(

@@ -208,24 +208,48 @@ for _attempt = 1, 100 do
       redis.call('SET', lockKey, token, 'PX', lockTtl)
       redis.call('HSET', jobKey, 'state', 'active', 'processedOn', tostring(now))
 
-      local data = redis.call('GET', dataKey)
-      local meta = redis.call('HMGET', jobKey, '_v', 'attempt', 'ts')
-
-      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
-        'event', 'active', 'jobId', id)
-
-      -- Re-add marker if more work exists
-      local waitLen = redis.call('LLEN', KEYS[1])
-      if waitLen > 0 then
-        redis.call('ZADD', KEYS[5], 0, '0')
-      else
-        local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
-        if #nx > 0 then
-          redis.call('ZADD', KEYS[5], nx[2], '0')
+      -- Collect drain: if this is a flush sentinel, drain the buffer into :data
+      local skipCollect = false
+      local ck = redis.call('HGET', jobKey, 'collectKey')
+      if ck then
+        local cItemsKey = prefix .. 'collect:' .. ck .. ':items'
+        local cMetaKey  = prefix .. 'collect:' .. ck .. ':meta'
+        local cFlushKey = prefix .. 'collect:' .. ck .. ':job'
+        local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
+        if #cItems == 0 then
+          -- Already flushed (race) — unclaim and skip
+          redis.call('LREM', KEYS[2], 1, id)
+          redis.call('DEL', jobKey, jobKey .. ':data', lockKey)
+          skipCollect = true
+        else
+          local arr = '[' .. table.concat(cItems, ',') .. ']'
+          redis.call('SET', jobKey .. ':data', arr)
+          redis.call('DEL', cItemsKey, cMetaKey, cFlushKey)
+          -- Clear collectKey so retries don't try to drain again
+          redis.call('HDEL', jobKey, 'collectKey')
         end
       end
 
-      return {id, data, meta[1], meta[2], meta[3]}
+      if not skipCollect then
+        local data = redis.call('GET', dataKey)
+        local meta = redis.call('HMGET', jobKey, '_v', 'attempt', 'ts')
+
+        redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+          'event', 'active', 'jobId', id)
+
+        -- Re-add marker if more work exists
+        local waitLen = redis.call('LLEN', KEYS[1])
+        if waitLen > 0 then
+          redis.call('ZADD', KEYS[5], 0, '0')
+        else
+          local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+          if #nx > 0 then
+            redis.call('ZADD', KEYS[5], nx[2], '0')
+          end
+        end
+
+        return {id, data, meta[1], meta[2], meta[3]}
+      end
     end
   end
 end
@@ -1049,4 +1073,118 @@ end
 redis.call('SET', dedupKey, jobId)
 
 return {1}
+`;
+
+// ── collectPush ─────────────────────────────────────────────────────
+// Accumulate an item into a collect buffer. Manages debounce flush
+// sentinel in the delayed sorted set. On maxSize: immediate flush.
+// KEYS[1] = <task>:delayed   (sorted set — flush sentinel lives here)
+// KEYS[2] = <task>:events    (stream)
+// KEYS[3] = <task>:marker    (sorted set — wakes workers)
+// KEYS[4] = <task>:wait      (wait list — for maxSize immediate flush)
+// ARGV[1]  = jobPrefix       (e.g. "taskora:{task}:")
+// ARGV[2]  = jobId           (UUID for new flush sentinel / real job)
+// ARGV[3]  = serialized item (single, already serialized by caller)
+// ARGV[4]  = timestamp (ms)
+// ARGV[5]  = _v
+// ARGV[6]  = delayMs         (debounce window)
+// ARGV[7]  = maxSize         (0 = unlimited)
+// ARGV[8]  = maxWaitMs       (0 = unlimited)
+// ARGV[9]  = collectKey      (the resolved key string)
+// ARGV[10] = maxAttempts
+// Returns: {0, count} (buffered) or {1, count} (flushed)
+export const COLLECT_PUSH = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local item = ARGV[3]
+local now = tonumber(ARGV[4])
+local version = ARGV[5]
+local delayMs = tonumber(ARGV[6])
+local maxSize = tonumber(ARGV[7])
+local maxWaitMs = tonumber(ARGV[8])
+local collectKey = ARGV[9]
+local maxAttempts = ARGV[10]
+
+local itemsKey = prefix .. 'collect:' .. collectKey .. ':items'
+local metaKey  = prefix .. 'collect:' .. collectKey .. ':meta'
+local flushIdKey = prefix .. 'collect:' .. collectKey .. ':job'
+
+-- Push item to accumulator list
+redis.call('RPUSH', itemsKey, item)
+
+-- Update meta: firstAt (only on first), lastAt, count
+local count = tonumber(redis.call('HINCRBY', metaKey, 'count', 1))
+redis.call('HSET', metaKey, 'lastAt', tostring(now))
+if count == 1 then
+  redis.call('HSET', metaKey, 'firstAt', tostring(now))
+end
+
+-- Check maxSize → immediate flush
+if maxSize > 0 and count >= maxSize then
+  -- Remove existing flush sentinel if any
+  local oldFlushId = redis.call('GET', flushIdKey)
+  if oldFlushId then
+    redis.call('ZREM', KEYS[1], oldFlushId)
+    local oldKey = prefix .. oldFlushId
+    redis.call('DEL', oldKey, oldKey .. ':data')
+  end
+
+  -- Drain buffer into a real job
+  local items = redis.call('LRANGE', itemsKey, 0, -1)
+  local arr = '[' .. table.concat(items, ',') .. ']'
+  redis.call('DEL', itemsKey, metaKey, flushIdKey)
+
+  local jobKey = prefix .. jobId
+  redis.call('HSET', jobKey,
+    'ts', ARGV[4],
+    '_v', version,
+    'attempt', 1,
+    'maxAttempts', maxAttempts,
+    'state', 'waiting')
+  redis.call('SET', jobKey .. ':data', arr)
+  redis.call('LPUSH', KEYS[4], jobId)
+  redis.call('ZADD', KEYS[3], 0, '0')
+  redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
+    'event', 'waiting', 'jobId', jobId)
+
+  return {1, count}
+end
+
+-- Remove old flush sentinel (debounce reset)
+local oldFlushId = redis.call('GET', flushIdKey)
+if oldFlushId then
+  redis.call('ZREM', KEYS[1], oldFlushId)
+  local oldKey = prefix .. oldFlushId
+  redis.call('DEL', oldKey, oldKey .. ':data')
+end
+
+-- Compute flush score: min(now + delay, firstAt + maxWait)
+local flushScore = now + delayMs
+if maxWaitMs > 0 then
+  local firstAt = tonumber(redis.call('HGET', metaKey, 'firstAt'))
+  local maxWaitDeadline = firstAt + maxWaitMs
+  if maxWaitDeadline < flushScore then
+    flushScore = maxWaitDeadline
+  end
+end
+
+-- Create new flush sentinel as a delayed job
+local jobKey = prefix .. jobId
+redis.call('HSET', jobKey,
+  'ts', ARGV[4],
+  '_v', version,
+  'attempt', 1,
+  'maxAttempts', maxAttempts,
+  'state', 'delayed',
+  'collectKey', collectKey)
+-- No :data yet — moveToActive will drain the buffer
+redis.call('SET', jobKey .. ':data', '[]')
+redis.call('ZADD', KEYS[1], flushScore, jobId)
+redis.call('ZADD', KEYS[3], 'LT', flushScore, '0')
+redis.call('SET', flushIdKey, jobId, 'PX', math.max(delayMs, maxWaitMs > 0 and maxWaitMs or delayMs) * 2)
+
+redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
+  'event', 'collect', 'jobId', jobId, 'count', tostring(count), 'key', collectKey)
+
+return {0, count}
 `;

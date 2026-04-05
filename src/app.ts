@@ -65,6 +65,18 @@ interface TaskOptionsNoSchema<TInput, TOutput> extends TaskOptionsBase {
   handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
 }
 
+interface CollectTaskOptions<TInput, TOutput> extends TaskOptionsBase {
+  collect: {
+    key: ((data: TInput) => string) | string;
+    delay: Duration;
+    maxSize?: number;
+    maxWait?: Duration;
+  };
+  input?: StandardSchemaV1<unknown, TInput>;
+  output?: StandardSchemaV1<unknown, TOutput>;
+  handler: (items: TInput[], ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+}
+
 export class App {
   readonly adapter: Taskora.Adapter;
   readonly serializer: Taskora.Serializer;
@@ -134,6 +146,10 @@ export class App {
   ): Task<TInput, TOutput>;
   task<TInput, TOutput>(
     name: string,
+    options: CollectTaskOptions<TInput, TOutput>,
+  ): Task<TInput, TOutput>;
+  task<TInput, TOutput>(
+    name: string,
     options: TaskOptionsWithSchema<TInput, TOutput>,
   ): Task<TInput, TOutput>;
   task<TInput, TOutput>(
@@ -151,7 +167,8 @@ export class App {
       | (TaskOptionsBase & {
           input?: StandardSchemaV1<unknown, TInput>;
           output?: StandardSchemaV1<unknown, TOutput>;
-          handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+          handler: (data: TInput | TInput[], ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+          collect?: CollectTaskOptions<TInput, TOutput>["collect"];
         }),
   ): Task<TInput, TOutput> {
     if (this.tasks.has(name)) {
@@ -176,6 +193,18 @@ export class App {
         }
       : undefined;
     const taskMiddleware = !isFunction ? handlerOrOptions.middleware : undefined;
+
+    const collectOpt = !isFunction
+      ? (handlerOrOptions as { collect?: CollectTaskOptions<TInput, TOutput>["collect"] }).collect
+      : undefined;
+    const collect = collectOpt
+      ? {
+          key: collectOpt.key as ((data: unknown) => string) | string,
+          delayMs: parseDuration(collectOpt.delay),
+          maxSize: collectOpt.maxSize ?? 0,
+          maxWaitMs: collectOpt.maxWait ? parseDuration(collectOpt.maxWait) : 0,
+        }
+      : undefined;
 
     const migrationConfig =
       !isFunction &&
@@ -206,7 +235,7 @@ export class App {
       },
       name,
       handler,
-      { concurrency, timeout, retry, stall, singleton, concurrencyLimit, ttl },
+      { concurrency, timeout, retry, stall, singleton, concurrencyLimit, ttl, collect },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
       migrationConfig,
       taskMiddleware,
