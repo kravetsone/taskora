@@ -91,9 +91,10 @@ Phases 1–11 completed. Phase 12a, 12b, 12c, and Phase 13 complete. See `docs/I
 Phase 13 delivered:
 - Graceful Cancellation: first-class `"cancelled"` state distinct from `"failed"`
 - `handle.cancel({ reason? })` — cancel any dispatched job by ID
-- `cancel.lua` — atomic Lua: waiting/delayed/retrying → cancelled set immediately; active → sets `cancelledAt` flag
+- `cancel.lua` — atomic Lua: waiting/delayed/retrying → cancelled set immediately; active → sets `cancelledAt` flag + PUBLISH to cancel channel
 - `finishCancel.lua` — worker calls after onCancel hook: active → cancelled set, cleans dedup/concurrency
-- `extendLock.lua` returns `"extended" | "lost" | "cancelled"` — worker detects cancel flag on lock extension
+- Instant cancel via Redis pub/sub: `cancel.lua` PUBLISHes jobId, worker subscribes on start → `controller.abort("cancelled")` fires immediately
+- `extendLock.lua` returns `"extended" | "lost" | "cancelled"` — fallback detection if pub/sub message missed
 - `stalledCheck.lua` updated: cancelled-flagged stalled jobs move to cancelled set (not recovered)
 - Worker: cancel detection in `extendAllLocks()` + heartbeat, cancel check after handler success/error
 - `onCancel` hook on task definition — cleanup callback runs before finalization, receives aborted ctx
