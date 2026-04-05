@@ -95,17 +95,39 @@ export namespace Taskora {
     maxCount?: number;
   }
 
-  export interface JobOptions {
+  export interface DebounceConfig {
+    key: string;
+    delay: DurationType;
+  }
+
+  export interface ThrottleConfig {
+    key: string;
+    max: number;
+    window: DurationType;
+  }
+
+  export interface DeduplicateConfig {
+    key: string;
+    while?: Array<"waiting" | "delayed" | "active">;
+  }
+
+  export interface DispatchOptions {
     delay?: number;
     priority?: number;
-    deduplicate?: string;
+    debounce?: DebounceConfig;
+    throttle?: ThrottleConfig;
+    deduplicate?: DeduplicateConfig;
+    throwOnReject?: boolean;
   }
+
+  /** @deprecated Use DispatchOptions instead */
+  export type JobOptions = DispatchOptions;
 
   export interface RawJob {
     id: string;
     task: string;
     data: unknown;
-    options: JobOptions;
+    options: DispatchOptions;
     state: JobState;
     _v: number;
     attempt: number;
@@ -167,8 +189,33 @@ export namespace Taskora {
       task: string,
       jobId: string,
       data: string,
-      options: { _v: number; maxAttempts?: number } & JobOptions,
+      options: { _v: number; maxAttempts?: number } & DispatchOptions,
     ): Promise<void>;
+    debounceEnqueue(
+      task: string,
+      jobId: string,
+      data: string,
+      options: { _v: number; maxAttempts?: number; priority?: number },
+      debounceKey: string,
+      delayMs: number,
+    ): Promise<void>;
+    throttleEnqueue(
+      task: string,
+      jobId: string,
+      data: string,
+      options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+      throttleKey: string,
+      max: number,
+      windowMs: number,
+    ): Promise<boolean>;
+    deduplicateEnqueue(
+      task: string,
+      jobId: string,
+      data: string,
+      options: { _v: number; maxAttempts?: number; delay?: number; priority?: number },
+      dedupKey: string,
+      states: string[],
+    ): Promise<{ created: true } | { created: false; existingId: string }>;
     dequeue(task: string, lockTtl: number, token: string): Promise<DequeueResult | null>;
     blockingDequeue(
       task: string,

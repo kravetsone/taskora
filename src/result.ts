@@ -4,12 +4,24 @@ import type { Taskora } from "./types.js";
 export class ResultHandle<TOutput> {
   readonly id: string;
 
+  /**
+   * Whether the job was actually enqueued.
+   * - `null` — enqueue still pending
+   * - `true` — job created in queue
+   * - `false` — rejected by flow control (throttled or deduplicated)
+   */
+  enqueued: boolean | null = null;
+
+  /**
+   * When deduplicated, the ID of the existing job that blocked this dispatch.
+   */
+  existingId: string | null = null;
+
   private readonly taskName: string;
   private readonly adapter: Taskora.Adapter;
   private readonly serializer: Taskora.Serializer;
   private readonly enqueuePromise: Promise<void>;
   private enqueueError: unknown = undefined;
-  private enqueued = false;
 
   constructor(
     id: string,
@@ -24,7 +36,7 @@ export class ResultHandle<TOutput> {
     this.serializer = serializer;
     this.enqueuePromise = enqueuePromise.then(
       () => {
-        this.enqueued = true;
+        if (this.enqueued === null) this.enqueued = true;
       },
       (err) => {
         this.enqueueError = err;
@@ -60,7 +72,7 @@ export class ResultHandle<TOutput> {
   async waitFor(timeout?: number): Promise<TOutput> {
     await this.ensureEnqueued();
 
-    const result = await this.adapter.awaitJob(this.taskName, this.id, timeout);
+    const result = await this.adapter.awaitJob(this.taskName, this.resolvedId, timeout);
 
     if (!result) {
       throw new TimeoutError(this.id, timeout as number);
@@ -81,12 +93,17 @@ export class ResultHandle<TOutput> {
     throw new JobFailedError(this.id, this.taskName, "Job was cancelled");
   }
 
+  /** Resolved job ID — redirects to existingId when deduplicated */
+  private get resolvedId(): string {
+    return this.existingId ?? this.id;
+  }
+
   async getState(): Promise<Taskora.JobState | null> {
-    return this.adapter.getState(this.taskName, this.id);
+    return this.adapter.getState(this.taskName, this.resolvedId);
   }
 
   async getProgress(): Promise<number | Record<string, unknown> | null> {
-    const raw = await this.adapter.getProgress(this.taskName, this.id);
+    const raw = await this.adapter.getProgress(this.taskName, this.resolvedId);
     if (raw == null) return null;
     const num = Number(raw);
     if (!Number.isNaN(num) && String(num) === raw) return num;
@@ -94,7 +111,7 @@ export class ResultHandle<TOutput> {
   }
 
   async getLogs(): Promise<Taskora.LogEntry[]> {
-    const raw = await this.adapter.getLogs(this.taskName, this.id);
+    const raw = await this.adapter.getLogs(this.taskName, this.resolvedId);
     return raw.map((entry) => JSON.parse(entry));
   }
 }

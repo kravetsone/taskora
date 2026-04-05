@@ -68,3 +68,29 @@ export class TimeoutError extends TaskoraError {
     this.timeoutMs = timeoutMs;
   }
 }
+
+export class ThrottledError extends TaskoraError {
+  readonly jobId: string;
+  readonly key: string;
+
+  constructor(jobId: string, key: string) {
+    super(`Job ${jobId} throttled on key "${key}"`);
+    this.name = "ThrottledError";
+    this.jobId = jobId;
+    this.key = key;
+  }
+}
+
+export class DuplicateJobError extends TaskoraError {
+  readonly jobId: string;
+  readonly key: string;
+  readonly existingId: string;
+
+  constructor(jobId: string, key: string, existingId: string) {
+    super(`Job ${jobId} deduplicated on key "${key}" — existing job ${existingId}`);
+    this.name = "DuplicateJobError";
+    this.jobId = jobId;
+    this.key = key;
+    this.existingId = existingId;
+  }
+}
