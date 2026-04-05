@@ -3,7 +3,7 @@ import type { RedisOptions } from "ioredis";
 import type { Taskora } from "../types.js";
 import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
-import { buildKeys } from "./keys.js";
+import { buildKeys, buildScheduleKeys } from "./keys.js";
 import * as scripts from "./scripts.js";
 
 const SCRIPT_MAP: Record<string, string> = {
@@ -15,6 +15,9 @@ const SCRIPT_MAP: Record<string, string> = {
   nack: scripts.NACK,
   stalledCheck: scripts.STALLED_CHECK,
   extendLock: scripts.EXTEND_LOCK,
+  tickScheduler: scripts.TICK_SCHEDULER,
+  acquireSchedulerLock: scripts.ACQUIRE_SCHEDULER_LOCK,
+  renewSchedulerLock: scripts.RENEW_SCHEDULER_LOCK,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -378,6 +381,118 @@ export class RedisBackend implements Taskora.Adapter {
     }
 
     return { recovered, failed };
+  }
+
+  // ── Scheduling ──────────────────────────────────────────────────────
+
+  async addSchedule(name: string, config: string, nextRun: number): Promise<void> {
+    const keys = buildScheduleKeys(this.prefix);
+    await this.client
+      .pipeline()
+      .hset(keys.schedules, name, config)
+      .zadd(keys.schedulesNext, String(nextRun), name)
+      .exec();
+  }
+
+  async removeSchedule(name: string): Promise<void> {
+    const keys = buildScheduleKeys(this.prefix);
+    await this.client.pipeline().hdel(keys.schedules, name).zrem(keys.schedulesNext, name).exec();
+  }
+
+  async getSchedule(
+    name: string,
+  ): Promise<{ config: string; nextRun: number | null; paused: boolean } | null> {
+    const keys = buildScheduleKeys(this.prefix);
+    const [config, score] = await this.client
+      .pipeline()
+      .hget(keys.schedules, name)
+      .zscore(keys.schedulesNext, name)
+      .exec()
+      .then((results) => [
+        (results as [Error | null, unknown][])[0][1] as string | null,
+        (results as [Error | null, unknown][])[1][1] as string | null,
+      ]);
+
+    if (!config) return null;
+
+    return {
+      config,
+      nextRun: score !== null ? Number(score) : null,
+      paused: score === null,
+    };
+  }
+
+  async listSchedules(): Promise<Taskora.ScheduleRecord[]> {
+    const keys = buildScheduleKeys(this.prefix);
+    const [all, scores] = await Promise.all([
+      this.client.hgetall(keys.schedules),
+      this.client.zrange(keys.schedulesNext, 0, -1, "WITHSCORES"),
+    ]);
+
+    const scoreMap = new Map<string, number>();
+    for (let i = 0; i < scores.length; i += 2) {
+      scoreMap.set(scores[i], Number(scores[i + 1]));
+    }
+
+    return Object.entries(all).map(([name, config]) => ({
+      name,
+      config,
+      nextRun: scoreMap.get(name) ?? null,
+    }));
+  }
+
+  async tickScheduler(now: number): Promise<Array<{ name: string; config: string }>> {
+    const keys = buildScheduleKeys(this.prefix);
+    const result = (await this.eval(
+      "tickScheduler",
+      2,
+      keys.schedulesNext,
+      keys.schedules,
+      String(now),
+    )) as string[];
+
+    const schedules: Array<{ name: string; config: string }> = [];
+    for (let i = 0; i < result.length; i += 2) {
+      schedules.push({ name: result[i], config: result[i + 1] });
+    }
+    return schedules;
+  }
+
+  async updateScheduleNextRun(name: string, config: string, nextRun: number): Promise<void> {
+    const keys = buildScheduleKeys(this.prefix);
+    await this.client
+      .pipeline()
+      .hset(keys.schedules, name, config)
+      .zadd(keys.schedulesNext, String(nextRun), name)
+      .exec();
+  }
+
+  async pauseSchedule(name: string): Promise<void> {
+    const keys = buildScheduleKeys(this.prefix);
+    await this.client.zrem(keys.schedulesNext, name);
+  }
+
+  async resumeSchedule(name: string, nextRun: number): Promise<void> {
+    const keys = buildScheduleKeys(this.prefix);
+    await this.client.zadd(keys.schedulesNext, String(nextRun), name);
+  }
+
+  async acquireSchedulerLock(token: string, ttl: number): Promise<boolean> {
+    const keys = buildScheduleKeys(this.prefix);
+    const result = await this.eval(
+      "acquireSchedulerLock",
+      1,
+      keys.schedulerLock,
+      token,
+      String(ttl),
+    );
+    return result === 1;
+  }
+
+  async renewSchedulerLock(token: string, ttl: number): Promise<boolean> {
+    const keys = buildScheduleKeys(this.prefix);
+    const result = await this.eval("renewSchedulerLock", 1, keys.schedulerLock, token, String(ttl));
+    return result === 1;
   }
 
   async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {

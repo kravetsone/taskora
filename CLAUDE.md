@@ -52,6 +52,10 @@ src/
 ├── types.ts              — Taskora namespace (all public types)
 ├── errors.ts             — Error classes
 ├── emitter.ts            — Lightweight typed EventEmitter
+├── scheduler/
+│   ├── index.ts          — re-exports
+│   ├── scheduler.ts      — Scheduler class (leader election, poll, dispatch)
+│   └── duration.ts       — Duration type + parseDuration()
 ├── redis/
 │   ├── index.ts          — redisAdapter() factory
 │   ├── backend.ts        — Adapter implementation
@@ -81,7 +85,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–7 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 8: Scheduling / Cron**.
+Phases 1–8 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 9: Schema Versioning & Migrations**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -159,3 +163,23 @@ Phase 7 delivered:
 - Failed stalled jobs also emit `failed` stream event
 - No throttle key — Lua script is idempotent across concurrent workers
 - 7 new integration tests (88 total)
+
+Phase 8 delivered:
+- `app.schedule(name, config)` — register named schedules with interval or cron
+- Inline schedule: `app.task("x", { schedule: { every: "30s" }, handler })`
+- `Duration` template literal type: `number | \`${number}s\` | \`${number}m\` | \`${number}h\` | \`${number}d\``
+- `parseDuration()` — converts "30s", "5m", "2h", "1d" to milliseconds
+- `cron-parser` (optional peer dep) — dynamic import, only loaded for `cron:` schedules
+- `src/scheduler/` directory: `scheduler.ts` (Scheduler class), `duration.ts` (Duration type + parser), `index.ts`
+- Redis keys: `taskora:<pfx>:schedules` (Hash), `taskora:<pfx>:schedules:next` (Sorted Set), `taskora:<pfx>:schedules:lock` (String PX)
+- `TICK_SCHEDULER` Lua — atomic claim: ZRANGEBYSCORE + ZREM + HGET configs
+- `ACQUIRE_SCHEDULER_LOCK` / `RENEW_SCHEDULER_LOCK` Lua — SET NX PX / GET + compare token
+- Leader election: SET NX PX 30s, token-based renewal, automatic failover
+- Scheduler poll loop: configurable interval (default 1s), non-fatal error handling
+- Overlap prevention: `overlap: false` (default) — checks `lastJobId` state before dispatching
+- Missed run policy: `"skip"` (default), `"catch-up"`, `"catch-up-limit:N"`
+- `app.schedules.list/pause/resume/update/remove/trigger` — runtime schedule management
+- `Taskora.ScheduleConfig`, `ScheduleInfo`, `SchedulerConfig`, `MissedPolicy`, `ScheduleRecord` types
+- Adapter additions: `addSchedule`, `removeSchedule`, `getSchedule`, `listSchedules`, `tickScheduler`, `updateScheduleNextRun`, `pauseSchedule`, `resumeSchedule`, `acquireSchedulerLock`, `renewSchedulerLock`
+- Scheduler starts if `pendingSchedules.length > 0` OR `scheduler` config is provided
+- 8 unit tests (parseDuration), 12 integration tests (108 total)

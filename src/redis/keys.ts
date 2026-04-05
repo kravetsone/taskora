@@ -13,3 +13,13 @@ export function buildKeys(task: string, prefix?: string) {
     jobPrefix: `${base}:`,
   };
 }
+
+export function buildScheduleKeys(prefix?: string) {
+  const base = prefix ? `taskora:${prefix}` : "taskora";
+
+  return {
+    schedules: `${base}:schedules`,
+    schedulesNext: `${base}:schedules:next`,
+    schedulerLock: `${base}:schedules:lock`,
+  };
+}

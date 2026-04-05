@@ -11,6 +11,7 @@ export { json } from "./serializer.js";
 export { type TaskoraOptions, App } from "./app.js";
 export { Task } from "./task.js";
 export { ResultHandle } from "./result.js";
+export { parseDuration, type Duration } from "./scheduler/duration.js";
 
 import { App, type TaskoraOptions } from "./app.js";
 

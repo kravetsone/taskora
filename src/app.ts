@@ -1,5 +1,8 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { TypedEmitter } from "./emitter.js";
+import type { Duration } from "./scheduler/duration.js";
+import { parseDuration } from "./scheduler/duration.js";
+import { Scheduler } from "./scheduler/scheduler.js";
 import { json } from "./serializer.js";
 import { Task } from "./task.js";
 import type { Taskora } from "./types.js";
@@ -8,6 +11,7 @@ import { Worker } from "./worker.js";
 export interface TaskoraOptions {
   adapter: Taskora.Adapter;
   serializer?: Taskora.Serializer;
+  scheduler?: Taskora.SchedulerConfig;
   defaults?: {
     retry?: Taskora.RetryConfig;
     timeout?: number;
@@ -21,6 +25,14 @@ interface TaskOptionsBase {
   timeout?: number;
   retry?: Taskora.RetryConfig;
   stall?: Taskora.StallConfig;
+  schedule?: {
+    every?: Duration;
+    cron?: string;
+    timezone?: string;
+    onMissed?: Taskora.MissedPolicy;
+    overlap?: boolean;
+    data?: unknown;
+  };
 }
 
 interface TaskOptionsWithSchema<TInput, TOutput> extends TaskOptionsBase {
@@ -44,10 +56,14 @@ interface TaskOptionsNoSchema<TInput, TOutput> extends TaskOptionsBase {
 export class App {
   readonly adapter: Taskora.Adapter;
   readonly serializer: Taskora.Serializer;
+  readonly schedules: ScheduleManager;
   private readonly defaults: NonNullable<TaskoraOptions["defaults"]>;
+  private readonly schedulerConfig?: Taskora.SchedulerConfig;
 
   private tasks = new Map<string, Task<unknown, unknown>>();
   private workers: Worker[] = [];
+  private scheduler: Scheduler | null = null;
+  private pendingSchedules: Array<{ name: string; config: Taskora.ScheduleConfig }> = [];
   private connected = false;
   private started = false;
 
@@ -60,6 +76,8 @@ export class App {
     this.adapter = options.adapter;
     this.serializer = options.serializer ?? json();
     this.defaults = options.defaults ?? {};
+    this.schedulerConfig = options.scheduler;
+    this.schedules = new ScheduleManager(this);
   }
 
   on<K extends keyof Taskora.AppEventMap & string>(
@@ -145,7 +163,40 @@ export class App {
     );
 
     this.tasks.set(name, task as Task<unknown, unknown>);
+
+    // Inline schedule support
+    const scheduleOpts = !isFunction ? handlerOrOptions.schedule : undefined;
+    if (scheduleOpts) {
+      const config: Taskora.ScheduleConfig = {
+        task: name,
+        every: scheduleOpts.every,
+        cron: scheduleOpts.cron,
+        timezone: scheduleOpts.timezone,
+        onMissed: scheduleOpts.onMissed,
+        overlap: scheduleOpts.overlap,
+        data: scheduleOpts.data,
+      };
+      this.pendingSchedules.push({ name, config });
+    }
+
     return task;
+  }
+
+  schedule(name: string, config: Taskora.ScheduleConfig): void {
+    if (!config.every && !config.cron) {
+      throw new Error("Schedule must have either 'every' or 'cron'");
+    }
+    this.pendingSchedules.push({ name, config });
+  }
+
+  /** @internal — used by ScheduleManager */
+  getTaskByName(name: string): Task<unknown, unknown> | undefined {
+    return this.tasks.get(name);
+  }
+
+  /** @internal — used by ScheduleManager */
+  getScheduler(): Scheduler | null {
+    return this.scheduler;
   }
 
   async ensureConnected(): Promise<void> {
@@ -170,11 +221,35 @@ export class App {
       worker.start();
     }
 
+    // Start scheduler if there are schedules or scheduler config is provided
+    if (this.pendingSchedules.length > 0 || this.schedulerConfig) {
+      this.scheduler = new Scheduler(
+        {
+          adapter: this.adapter,
+          serializer: this.serializer,
+          getTask: (name) => this.tasks.get(name),
+        },
+        this.schedulerConfig,
+      );
+
+      for (const { name, config } of this.pendingSchedules) {
+        await this.scheduler.registerSchedule(name, config);
+      }
+      this.pendingSchedules = [];
+
+      await this.scheduler.start();
+    }
+
     this.appEmitter.emit("worker:ready");
   }
 
   async close(options?: { timeout?: number }): Promise<void> {
     this.appEmitter.emit("worker:closing");
+
+    if (this.scheduler) {
+      await this.scheduler.stop();
+      this.scheduler = null;
+    }
 
     if (this.unsubscribe) {
       const unsub = this.unsubscribe;
@@ -295,5 +370,91 @@ export class App {
         break;
       }
     }
+  }
+}
+
+// ── ScheduleManager ─────────────────────────────────────────────────
+
+class ScheduleManager {
+  constructor(private readonly app: App) {}
+
+  async list(): Promise<Taskora.ScheduleInfo[]> {
+    const records = await this.app.adapter.listSchedules();
+    return records.map((r) => {
+      const config: Taskora.ScheduleConfig = JSON.parse(r.config);
+      const stored = JSON.parse(r.config);
+      return {
+        name: r.name,
+        config,
+        nextRun: r.nextRun,
+        lastRun: stored.lastRun ?? null,
+        lastJobId: stored.lastJobId ?? null,
+        paused: r.nextRun === null,
+      };
+    });
+  }
+
+  async pause(name: string): Promise<void> {
+    await this.app.adapter.pauseSchedule(name);
+  }
+
+  async resume(name: string): Promise<void> {
+    const record = await this.app.adapter.getSchedule(name);
+    if (!record) throw new Error(`Schedule "${name}" not found`);
+
+    const scheduler = this.app.getScheduler();
+    if (!scheduler) throw new Error("Scheduler is not running");
+
+    const stored = JSON.parse(record.config);
+    const nextRun = await scheduler.computeNextRun(stored, Date.now());
+    await this.app.adapter.resumeSchedule(name, nextRun);
+  }
+
+  async update(
+    name: string,
+    updates: Partial<
+      Pick<Taskora.ScheduleConfig, "every" | "cron" | "timezone" | "onMissed" | "overlap" | "data">
+    >,
+  ): Promise<void> {
+    const record = await this.app.adapter.getSchedule(name);
+    if (!record) throw new Error(`Schedule "${name}" not found`);
+
+    const stored = JSON.parse(record.config);
+
+    if (updates.every !== undefined) {
+      stored.every = parseDuration(updates.every);
+      stored.cron = undefined;
+      stored.timezone = undefined;
+    }
+    if (updates.cron !== undefined) {
+      stored.cron = updates.cron;
+      stored.every = undefined;
+    }
+    if (updates.timezone !== undefined) stored.timezone = updates.timezone;
+    if (updates.onMissed !== undefined) stored.onMissed = updates.onMissed;
+    if (updates.overlap !== undefined) stored.overlap = updates.overlap;
+    if (updates.data !== undefined) stored.data = updates.data;
+
+    const scheduler = this.app.getScheduler();
+    if (!scheduler) throw new Error("Scheduler is not running");
+
+    const nextRun = await scheduler.computeNextRun(stored, Date.now());
+    await this.app.adapter.updateScheduleNextRun(name, JSON.stringify(stored), nextRun);
+  }
+
+  async remove(name: string): Promise<void> {
+    await this.app.adapter.removeSchedule(name);
+  }
+
+  async trigger(name: string): Promise<import("./result.js").ResultHandle<unknown>> {
+    const record = await this.app.adapter.getSchedule(name);
+    if (!record) throw new Error(`Schedule "${name}" not found`);
+
+    const config: Taskora.ScheduleConfig = JSON.parse(record.config);
+    const task = this.app.getTaskByName(config.task);
+    if (!task) throw new Error(`Task "${config.task}" not found`);
+
+    const data = config.data !== undefined ? config.data : null;
+    return task.dispatch(data as never);
   }
 }

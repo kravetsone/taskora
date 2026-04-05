@@ -1,4 +1,5 @@
 import type { RetryError } from "./errors.js";
+import type { Duration as DurationType } from "./scheduler/duration.js";
 
 export namespace Taskora {
   // ── Event payloads ──────────────────────────────────────────────────
@@ -187,11 +188,61 @@ export namespace Taskora {
     getLogs(task: string, jobId: string): Promise<string[]>;
     subscribe(tasks: string[], handler: (event: StreamEvent) => void): Promise<() => Promise<void>>;
     awaitJob(task: string, jobId: string, timeoutMs?: number): Promise<AwaitJobResult | null>;
+
+    // Scheduling
+    addSchedule(name: string, config: string, nextRun: number): Promise<void>;
+    removeSchedule(name: string): Promise<void>;
+    getSchedule(
+      name: string,
+    ): Promise<{ config: string; nextRun: number | null; paused: boolean } | null>;
+    listSchedules(): Promise<ScheduleRecord[]>;
+    tickScheduler(now: number): Promise<Array<{ name: string; config: string }>>;
+    updateScheduleNextRun(name: string, config: string, nextRun: number): Promise<void>;
+    pauseSchedule(name: string): Promise<void>;
+    resumeSchedule(name: string, nextRun: number): Promise<void>;
+    acquireSchedulerLock(token: string, ttl: number): Promise<boolean>;
+    renewSchedulerLock(token: string, ttl: number): Promise<boolean>;
   }
 
   export interface AwaitJobResult {
     state: "completed" | "failed" | "cancelled";
     result?: string;
     error?: string;
+  }
+
+  // ── Scheduling ────────────────────────────────────────────────────
+
+  export type Duration = DurationType;
+
+  export type MissedPolicy = "skip" | "catch-up" | `catch-up-limit:${number}`;
+
+  export interface ScheduleConfig {
+    task: string;
+    data?: unknown;
+    every?: Duration;
+    cron?: string;
+    timezone?: string;
+    onMissed?: MissedPolicy;
+    overlap?: boolean;
+  }
+
+  export interface ScheduleInfo {
+    name: string;
+    config: ScheduleConfig;
+    nextRun: number | null;
+    lastRun: number | null;
+    lastJobId: string | null;
+    paused: boolean;
+  }
+
+  export interface SchedulerConfig {
+    pollInterval?: number;
+    lockTtl?: number;
+  }
+
+  export interface ScheduleRecord {
+    name: string;
+    config: string;
+    nextRun: number | null;
   }
 }

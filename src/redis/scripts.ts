@@ -385,3 +385,58 @@ redis.call('SREM', KEYS[1], jobId)
 
 return 1
 `;
+
+// ── tickScheduler ───────────────────────────────────────────────────
+// Atomically claim all due schedules: ZRANGEBYSCORE + ZREM + HGET configs.
+// The caller (TypeScript) dispatches tasks and ZADDs the next run time.
+// KEYS[1] = schedules:next   (Sorted Set: name → next run timestamp)
+// KEYS[2] = schedules        (Hash: name → JSON config)
+// ARGV[1] = current timestamp (ms)
+// Returns: flat array [name1, config1, name2, config2, ...]
+export const TICK_SCHEDULER = `
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1])
+if #due == 0 then
+  return {}
+end
+
+local results = {}
+for _, name in ipairs(due) do
+  local cfg = redis.call('HGET', KEYS[2], name)
+  if cfg then
+    table.insert(results, name)
+    table.insert(results, cfg)
+  end
+  redis.call('ZREM', KEYS[1], name)
+end
+
+return results
+`;
+
+// ── acquireSchedulerLock ────────────────────────────────────────────
+// SET NX PX — only succeeds if no lock exists.
+// KEYS[1] = schedules:lock
+// ARGV[1] = token (UUID)
+// ARGV[2] = TTL (ms)
+// Returns: 1 (acquired) or 0
+export const ACQUIRE_SCHEDULER_LOCK = `
+local ok = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
+if ok then
+  return 1
+end
+return 0
+`;
+
+// ── renewSchedulerLock ──────────────────────────────────────────────
+// Only renew if we own the lock (token matches).
+// KEYS[1] = schedules:lock
+// ARGV[1] = token (UUID)
+// ARGV[2] = TTL (ms)
+// Returns: 1 (renewed) or 0 (lost)
+export const RENEW_SCHEDULER_LOCK = `
+local val = redis.call('GET', KEYS[1])
+if val == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+  return 1
+end
+return 0
+`;
