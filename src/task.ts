@@ -26,6 +26,7 @@ export interface TaskConfig {
   concurrencyLimit?: number;
   ttl?: { maxMs: number; onExpire: "fail" | "discard" };
   collect?: CollectConfigResolved;
+  onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void;
 }
 
 export interface TaskMigrationConfig {

@@ -1,4 +1,4 @@
-import { JobFailedError, TimeoutError } from "./errors.js";
+import { CancelledError, JobFailedError, TimeoutError } from "./errors.js";
 import type { Taskora } from "./types.js";
 
 export class ResultHandle<TOutput> {
@@ -90,7 +90,12 @@ export class ResultHandle<TOutput> {
     }
 
     // cancelled
-    throw new JobFailedError(this.id, this.taskName, "Job was cancelled");
+    throw new CancelledError(this.id, result.error);
+  }
+
+  async cancel(options?: { reason?: string }): Promise<void> {
+    await this.ensureEnqueued();
+    await this.adapter.cancel(this.taskName, this.resolvedId, options?.reason);
   }
 
   /** Resolved job ID — redirects to existingId when deduplicated */

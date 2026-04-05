@@ -8,6 +8,8 @@ export function buildKeys(task: string, prefix?: string) {
     completed: `${base}:completed`,
     failed: `${base}:failed`,
     expired: `${base}:expired`,
+    cancelled: `${base}:cancelled`,
+    cancelChannel: `${base}:cancel`,
     events: `${base}:events`,
     stalled: `${base}:stalled`,
     marker: `${base}:marker`,

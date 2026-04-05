@@ -446,6 +446,7 @@ return 1
 // KEYS[4] = <task>:failed    (Sorted Set: permanently failed jobs)
 // KEYS[5] = <task>:events    (Stream)
 // KEYS[6] = <task>:marker    (Sorted Set: wake workers)
+// KEYS[7] = <task>:cancelled (Sorted Set: cancelled jobs)
 // ARGV[1] = jobPrefix
 // ARGV[2] = maxStalledCount
 // ARGV[3] = current timestamp (ms)
@@ -467,49 +468,81 @@ for _, jobId in ipairs(candidates) do
 
   if exists == 0 then
     local jobKey = prefix .. jobId
-    local count = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
 
-    -- Concurrency per key: decrement counter (job leaving active)
-    local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
-    if concKey and concKey ~= '' then
-      local counterKey = prefix .. 'conc:' .. concKey
-      local val = redis.call('DECR', counterKey)
-      if val <= 0 then
-        redis.call('DEL', counterKey)
+    -- If job was flagged for cancellation, move to cancelled instead of recovering
+    local cancelledAt = redis.call('HGET', jobKey, 'cancelledAt')
+    if cancelledAt then
+      redis.call('LREM', KEYS[2], 1, jobId)
+
+      -- Concurrency per key cleanup
+      local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+      if concKey and concKey ~= '' then
+        local counterKey = prefix .. 'conc:' .. concKey
+        local val = redis.call('DECR', counterKey)
+        if val <= 0 then
+          redis.call('DEL', counterKey)
+        end
       end
-    end
 
-    if count > maxStalled then
-      -- Permanently fail
-      redis.call('LREM', KEYS[2], 1, jobId)
-      redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', now,
-        'error', 'Job stalled and exceeded max stalled count')
-      redis.call('ZADD', KEYS[4], tonumber(now), jobId)
+      local reason = redis.call('HGET', jobKey, 'cancelReason') or ''
+      redis.call('HSET', jobKey, 'state', 'cancelled', 'finishedOn', now)
+      redis.call('ZADD', KEYS[7], tonumber(now), jobId)
 
-      redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
-        'event', 'stalled', 'jobId', jobId,
-        'count', tostring(count), 'action', 'failed')
+      -- Clean dedup key
+      local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+      if dedupKey then
+        redis.call('DEL', dedupKey)
+      end
 
       redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
-        'event', 'failed', 'jobId', jobId)
+        'event', 'cancelled', 'jobId', jobId, 'reason', reason)
 
-      table.insert(failed, jobId)
+      redis.call('SREM', KEYS[1], jobId)
     else
-      -- Recover: move back to wait
-      redis.call('LREM', KEYS[2], 1, jobId)
-      redis.call('HSET', jobKey, 'state', 'waiting')
-      redis.call('RPUSH', KEYS[3], jobId)
-      redis.call('ZADD', KEYS[6], 0, '0')
+      local count = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
 
-      redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
-        'event', 'stalled', 'jobId', jobId,
-        'count', tostring(count), 'action', 'recovered')
+      -- Concurrency per key: decrement counter (job leaving active)
+      local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+      if concKey and concKey ~= '' then
+        local counterKey = prefix .. 'conc:' .. concKey
+        local val = redis.call('DECR', counterKey)
+        if val <= 0 then
+          redis.call('DEL', counterKey)
+        end
+      end
 
-      table.insert(recovered, jobId)
+      if count > maxStalled then
+        -- Permanently fail
+        redis.call('LREM', KEYS[2], 1, jobId)
+        redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', now,
+          'error', 'Job stalled and exceeded max stalled count')
+        redis.call('ZADD', KEYS[4], tonumber(now), jobId)
+
+        redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
+          'event', 'stalled', 'jobId', jobId,
+          'count', tostring(count), 'action', 'failed')
+
+        redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
+          'event', 'failed', 'jobId', jobId)
+
+        table.insert(failed, jobId)
+      else
+        -- Recover: move back to wait
+        redis.call('LREM', KEYS[2], 1, jobId)
+        redis.call('HSET', jobKey, 'state', 'waiting')
+        redis.call('RPUSH', KEYS[3], jobId)
+        redis.call('ZADD', KEYS[6], 0, '0')
+
+        redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
+          'event', 'stalled', 'jobId', jobId,
+          'count', tostring(count), 'action', 'recovered')
+
+        table.insert(recovered, jobId)
+      end
+
+      redis.call('SREM', KEYS[1], jobId)
     end
   end
-
-  redis.call('SREM', KEYS[1], jobId)
 end
 
 -- Phase 2: Copy all current active IDs into stalled set for next check
@@ -553,6 +586,12 @@ end
 
 redis.call('SET', lockKey, token, 'PX', ttl)
 redis.call('SREM', KEYS[1], jobId)
+
+-- Check cancel flag
+local cancelled = redis.call('HGET', prefix .. jobId, 'cancelledAt')
+if cancelled then
+  return -1
+end
 
 return 1
 `;
@@ -1187,4 +1226,136 @@ redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
   'event', 'collect', 'jobId', jobId, 'count', tostring(count), 'key', collectKey)
 
 return {0, count}
+`;
+
+// ── cancel ──────────────────────────────────────────────────────────
+// Cancel a job. Immediate for waiting/delayed/retrying; flags active.
+// KEYS[1] = <task>:wait
+// KEYS[2] = <task>:delayed
+// KEYS[3] = <task>:cancelled  (sorted set, score = finishedOn)
+// KEYS[4] = <task>:events
+// KEYS[5] = <task>:marker
+// ARGV[1] = jobPrefix
+// ARGV[2] = jobId
+// ARGV[3] = reason ("" = none)
+// ARGV[4] = current timestamp (ms)
+// Returns: 1 (cancelled immediately), 2 (active — flagged), 0 (not cancellable)
+export const CANCEL = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local reason = ARGV[3]
+local now = ARGV[4]
+
+local jobKey = prefix .. jobId
+local state = redis.call('HGET', jobKey, 'state')
+
+if not state then
+  return 0
+end
+
+if state == 'waiting' then
+  redis.call('LREM', KEYS[1], 1, jobId)
+  redis.call('HSET', jobKey, 'state', 'cancelled', 'finishedOn', now)
+  if reason ~= '' then
+    redis.call('HSET', jobKey, 'cancelReason', reason)
+  end
+  redis.call('ZADD', KEYS[3], tonumber(now), jobId)
+
+  -- Clean dedup key
+  local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+  if dedupKey then
+    redis.call('DEL', dedupKey)
+  end
+
+  redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+    'event', 'cancelled', 'jobId', jobId, 'reason', reason)
+  return 1
+end
+
+if state == 'delayed' or state == 'retrying' then
+  redis.call('ZREM', KEYS[2], jobId)
+  redis.call('HSET', jobKey, 'state', 'cancelled', 'finishedOn', now)
+  if reason ~= '' then
+    redis.call('HSET', jobKey, 'cancelReason', reason)
+  end
+  redis.call('ZADD', KEYS[3], tonumber(now), jobId)
+
+  -- Clean dedup key
+  local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+  if dedupKey then
+    redis.call('DEL', dedupKey)
+  end
+
+  redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+    'event', 'cancelled', 'jobId', jobId, 'reason', reason)
+  return 1
+end
+
+if state == 'active' then
+  -- Flag only — worker detects via extendLock return
+  redis.call('HSET', jobKey, 'cancelledAt', now)
+  if reason ~= '' then
+    redis.call('HSET', jobKey, 'cancelReason', reason)
+  end
+  return 2
+end
+
+-- Terminal state (completed, failed, cancelled, expired) — can't cancel
+return 0
+`;
+
+// ── finishCancel ────────────────────────────────────────────────────
+// Worker calls this after onCancel hook runs to finalize active → cancelled.
+// KEYS[1] = <task>:active
+// KEYS[2] = <task>:cancelled  (sorted set)
+// KEYS[3] = <task>:events
+// KEYS[4] = <task>:marker
+// ARGV[1] = jobPrefix
+// ARGV[2] = jobId
+// ARGV[3] = lock token
+// ARGV[4] = current timestamp (ms)
+// Returns: 1 or LOCK_MISMATCH error
+export const FINISH_CANCEL = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local token = ARGV[3]
+local now = ARGV[4]
+
+local jobKey = prefix .. jobId
+local lockKey = jobKey .. ':lock'
+
+-- Verify lock ownership
+local lockVal = redis.call('GET', lockKey)
+if lockVal ~= token then
+  return redis.error_reply('LOCK_MISMATCH')
+end
+
+redis.call('LREM', KEYS[1], 1, jobId)
+redis.call('DEL', lockKey)
+
+local reason = redis.call('HGET', jobKey, 'cancelReason') or ''
+redis.call('HSET', jobKey, 'state', 'cancelled', 'finishedOn', now)
+redis.call('ZADD', KEYS[2], tonumber(now), jobId)
+
+-- Clean dedup key
+local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+if dedupKey then
+  redis.call('DEL', dedupKey)
+end
+
+-- Concurrency per key: decrement counter, wake workers
+local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+if concKey and concKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. concKey
+  local val = redis.call('DECR', counterKey)
+  if val <= 0 then
+    redis.call('DEL', counterKey)
+  end
+  redis.call('ZADD', KEYS[4], 0, '0')
+end
+
+redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+  'event', 'cancelled', 'jobId', jobId, 'reason', reason)
+
+return 1
 `;

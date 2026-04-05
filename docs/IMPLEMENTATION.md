@@ -583,20 +583,20 @@ tests/
 BullMQ issue #632 — requested for 3+ years. No clean solution exists.
 
 **Tasks**:
-- [ ] New `JobState`: `"cancelled"` — distinct from `"failed"`
-- [ ] `handle.cancel({ reason? })` — cancel a dispatched job
-- [ ] `cancel.lua` — if waiting/delayed: move to cancelled set. If active: set abort flag
-- [ ] Worker: check abort flag → fire `AbortSignal` on `ctx.signal`
-- [ ] `onCancel` hook on task definition — cleanup logic
-- [ ] Cascade: cancelling a workflow/chain cancels all pending child jobs
-- [ ] `cancelled` event on task and app
-- [ ] Inspector: `inspector.cancelled()` query
+- [x] New `JobState`: `"cancelled"` — distinct from `"failed"`
+- [x] `handle.cancel({ reason? })` — cancel a dispatched job
+- [x] `cancel.lua` — if waiting/delayed: move to cancelled set. If active: set abort flag
+- [x] Worker: check abort flag → fire `AbortSignal` on `ctx.signal`
+- [x] `onCancel` hook on task definition — cleanup logic
+- [ ] Cascade: cancelling a workflow/chain cancels all pending child jobs (deferred to Phase 17)
+- [x] `cancelled` event on task and app
+- [x] Inspector: `inspector.cancelled()` query
 
 **Tests**:
-- Integration: cancel waiting job → state is "cancelled" not "failed"
-- Integration: cancel active job → ctx.signal fires, onCancel runs
-- Integration: cancel chain → all pending steps cancelled
-- Unit: cancelled jobs don't count toward retry stats
+- [x] Integration: cancel waiting job → state is "cancelled" not "failed"
+- [x] Integration: cancel active job → ctx.signal fires, onCancel runs
+- [ ] Integration: cancel chain → all pending steps cancelled (deferred to Phase 17)
+- [x] Cancel delayed, retrying, completed (no-op), events, inspector, CancelledError, reason preserved
 
 ---
 

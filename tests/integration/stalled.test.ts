@@ -294,7 +294,7 @@ describe("stall detection", () => {
 
     // Extend lock should remove from stalled set
     const ok = await adapter.extendLock("stall-extend", jobId, token, 30000);
-    expect(ok).toBe(true);
+    expect(ok).toBe("extended");
 
     // Verify removed from stalled set
     const isMember = await redis.sismember("taskora:{stall-extend}:stalled", jobId);

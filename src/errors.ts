@@ -104,3 +104,15 @@ export class ExpiredError extends TaskoraError {
     this.jobId = jobId;
   }
 }
+
+export class CancelledError extends TaskoraError {
+  readonly jobId: string;
+  readonly reason?: string;
+
+  constructor(jobId: string, reason?: string) {
+    super(reason ? `Job ${jobId} cancelled: ${reason}` : `Job ${jobId} cancelled`);
+    this.name = "CancelledError";
+    this.jobId = jobId;
+    this.reason = reason;
+  }
+}

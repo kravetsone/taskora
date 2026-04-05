@@ -27,6 +27,8 @@ const SCRIPT_MAP: Record<string, string> = {
   throttleEnqueue: scripts.THROTTLE_ENQUEUE,
   deduplicateEnqueue: scripts.DEDUPLICATE_ENQUEUE,
   collectPush: scripts.COLLECT_PUSH,
+  cancel: scripts.CANCEL,
+  finishCancel: scripts.FINISH_CANCEL,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -556,13 +558,14 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = (await this.eval(
       "stalledCheck",
-      6,
+      7,
       keys.stalled,
       keys.active,
       keys.wait,
       keys.failed,
       keys.events,
       keys.marker,
+      keys.cancelled,
       keys.jobPrefix,
       String(maxStalledCount),
       String(Date.now()),
@@ -635,7 +638,10 @@ export class RedisBackend implements Taskora.Adapter {
 
   private static readonly STATE_MODE: Record<
     string,
-    { key: "wait" | "active" | "delayed" | "completed" | "failed" | "expired"; mode: string }
+    {
+      key: "wait" | "active" | "delayed" | "completed" | "failed" | "expired" | "cancelled";
+      mode: string;
+    }
   > = {
     waiting: { key: "wait", mode: "lrange" },
     active: { key: "active", mode: "lrange" },
@@ -643,11 +649,12 @@ export class RedisBackend implements Taskora.Adapter {
     completed: { key: "completed", mode: "zrevrange" },
     failed: { key: "failed", mode: "zrevrange" },
     expired: { key: "expired", mode: "zrevrange" },
+    cancelled: { key: "cancelled", mode: "zrevrange" },
   };
 
   async listJobDetails(
     task: string,
-    state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired",
+    state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired" | "cancelled",
     offset: number,
     limit: number,
   ): Promise<Array<{ id: string; details: Taskora.RawJobDetails }>> {
@@ -724,6 +731,7 @@ export class RedisBackend implements Taskora.Adapter {
     pipe.zcard(keys.completed);
     pipe.zcard(keys.failed);
     pipe.zcard(keys.expired);
+    pipe.zcard(keys.cancelled);
 
     const results = (await pipe.exec()) as [Error | null, number][];
     return {
@@ -733,6 +741,7 @@ export class RedisBackend implements Taskora.Adapter {
       completed: results[3][1],
       failed: results[4][1],
       expired: results[5][1],
+      cancelled: results[6][1],
     };
   }
 
@@ -886,7 +895,12 @@ export class RedisBackend implements Taskora.Adapter {
     return result === 1;
   }
 
-  async extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean> {
+  async extendLock(
+    task: string,
+    jobId: string,
+    token: string,
+    ttl: number,
+  ): Promise<"extended" | "lost" | "cancelled"> {
     const keys = buildKeys(task, this.prefix);
     const result = await this.eval(
       "extendLock",
@@ -897,7 +911,49 @@ export class RedisBackend implements Taskora.Adapter {
       token,
       String(ttl),
     );
-    return result === 1;
+    if (result === -1) return "cancelled";
+    if (result === 1) return "extended";
+    return "lost";
+  }
+
+  async cancel(
+    task: string,
+    jobId: string,
+    reason?: string,
+  ): Promise<"cancelled" | "flagged" | "not_cancellable"> {
+    const keys = buildKeys(task, this.prefix);
+    const result = await this.eval(
+      "cancel",
+      5,
+      keys.wait,
+      keys.delayed,
+      keys.cancelled,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+      reason ?? "",
+      String(Date.now()),
+    );
+    if (result === 1) return "cancelled";
+    if (result === 2) return "flagged";
+    return "not_cancellable";
+  }
+
+  async finishCancel(task: string, jobId: string, token: string): Promise<void> {
+    const keys = buildKeys(task, this.prefix);
+    await this.eval(
+      "finishCancel",
+      4,
+      keys.active,
+      keys.cancelled,
+      keys.events,
+      keys.marker,
+      keys.jobPrefix,
+      jobId,
+      token,
+      String(Date.now()),
+    );
   }
 
   private async loadScripts(): Promise<void> {

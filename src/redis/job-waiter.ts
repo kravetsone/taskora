@@ -141,7 +141,7 @@ export class JobWaiter {
             const event = fields.event;
             if (!jobId || !event) continue;
 
-            if (event !== "completed" && event !== "failed") continue;
+            if (event !== "completed" && event !== "failed" && event !== "cancelled") continue;
 
             const key = `${task}:${jobId}`;
             const pending = this.pending.get(key);

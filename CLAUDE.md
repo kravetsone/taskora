@@ -86,7 +86,23 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–11 completed. Phase 12a, 12b, and 12c complete. See `docs/IMPLEMENTATION.md` for full phase breakdown.
+Phases 1–11 completed. Phase 12a, 12b, 12c, and Phase 13 complete. See `docs/IMPLEMENTATION.md` for full phase breakdown.
+
+Phase 13 delivered:
+- Graceful Cancellation: first-class `"cancelled"` state distinct from `"failed"`
+- `handle.cancel({ reason? })` — cancel any dispatched job by ID
+- `cancel.lua` — atomic Lua: waiting/delayed/retrying → cancelled set immediately; active → sets `cancelledAt` flag
+- `finishCancel.lua` — worker calls after onCancel hook: active → cancelled set, cleans dedup/concurrency
+- `extendLock.lua` returns `"extended" | "lost" | "cancelled"` — worker detects cancel flag on lock extension
+- `stalledCheck.lua` updated: cancelled-flagged stalled jobs move to cancelled set (not recovered)
+- Worker: cancel detection in `extendAllLocks()` + heartbeat, cancel check after handler success/error
+- `onCancel` hook on task definition — cleanup callback runs before finalization, receives aborted ctx
+- `CancelledError` class — distinct from `JobFailedError`, thrown by `handle.waitFor()` / `handle.result`
+- `cancelled` event on task emitter + `task:cancelled` on app emitter
+- Inspector: `inspector.cancelled()` query, `QueueStats.cancelled`
+- `JobWaiter` handles `cancelled` stream event for push-based result resolution
+- Cascade cancellation deferred to Phase 17 (workflows)
+- 10 integration tests (207 total)
 
 Phase 12c delivered:
 - Collect (batch accumulator): `collect: { key, delay, maxSize?, maxWait? }` task option

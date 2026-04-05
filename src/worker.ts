@@ -30,6 +30,7 @@ export class Worker {
   private readonly dlqMaxAgeMs: number | null;
   private readonly composed: (ctx: Taskora.MiddlewareContext) => Promise<void>;
   private readonly dequeueOptions: Taskora.DequeueOptions;
+  private readonly onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void;
 
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
@@ -43,6 +44,7 @@ export class Worker {
     serializer: Taskora.Serializer,
     dlqMaxAgeMs?: number | null,
     appMiddleware?: Taskora.Middleware[],
+    onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void,
   ) {
     this.task = task;
     this.adapter = adapter;
@@ -51,6 +53,7 @@ export class Worker {
     this.stallInterval = task.config.stall?.interval ?? DEFAULT_STALL_INTERVAL;
     this.maxStalledCount = task.config.stall?.maxCount ?? DEFAULT_MAX_STALLED_COUNT;
     this.dlqMaxAgeMs = dlqMaxAgeMs ?? null;
+    this.onCancel = onCancel;
     this.dequeueOptions = {
       onExpire: task.config.ttl?.onExpire ?? "fail",
       singleton: task.config.singleton,
@@ -166,8 +169,10 @@ export class Worker {
       }
 
       let handlerResult: unknown;
+      let data: unknown;
+      let ctx: Taskora.Context | undefined;
       try {
-        let data: unknown = this.serializer.deserialize(raw.data);
+        data = this.serializer.deserialize(raw.data);
 
         // ── Migration + validation ────────────────────────────────
         if (jobVersion < taskVersion) {
@@ -180,13 +185,18 @@ export class Worker {
           data = await validateSchema(this.task.inputSchema, data);
         }
 
-        const ctx = createContext({
+        ctx = createContext({
           id: raw.id,
           attempt: raw.attempt,
           timestamp: raw.timestamp,
           signal: controller.signal,
           onHeartbeat: () => {
-            this.adapter.extendLock(this.task.name, raw.id, token, LOCK_TTL).catch(() => {});
+            this.adapter
+              .extendLock(this.task.name, raw.id, token, LOCK_TTL)
+              .then((status) => {
+                if (status === "cancelled") controller.abort("cancelled");
+              })
+              .catch(() => {});
           },
           onProgress: (value) => {
             this.adapter.setProgress(this.task.name, raw.id, value).catch(() => {});
@@ -229,6 +239,12 @@ export class Worker {
           handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
         }
       } catch (err) {
+        // Check if this was a cancellation
+        if (controller.signal.aborted && controller.signal.reason === "cancelled") {
+          await this.handleCancellation(raw.id, token, data, ctx);
+          return;
+        }
+
         const errorMsg = err instanceof Error ? err.message : String(err);
         const retryConfig = this.task.config.retry;
         let retryInfo: { delay: number } | undefined;
@@ -258,6 +274,12 @@ export class Worker {
         } catch {
           // fail() itself failed (e.g. lock expired)
         }
+        return;
+      }
+
+      // Check if cancelled while handler was running (handler didn't check signal)
+      if (controller.signal.aborted && controller.signal.reason === "cancelled") {
+        await this.handleCancellation(raw.id, token, data, ctx);
         return;
       }
 
@@ -298,10 +320,33 @@ export class Worker {
     }
   }
 
-  private async extendAllLocks(): Promise<void> {
-    for (const [jobId, { token }] of this.activeJobs) {
+  private async handleCancellation(
+    jobId: string,
+    token: string,
+    data: unknown,
+    ctx?: Taskora.Context,
+  ): Promise<void> {
+    if (this.onCancel && ctx) {
       try {
-        await this.adapter.extendLock(this.task.name, jobId, token, LOCK_TTL);
+        await this.onCancel(data, ctx);
+      } catch {
+        // onCancel hook failed — continue with finalization
+      }
+    }
+    try {
+      await this.adapter.finishCancel(this.task.name, jobId, token);
+    } catch {
+      // finishCancel failed — stall check will handle it
+    }
+  }
+
+  private async extendAllLocks(): Promise<void> {
+    for (const [jobId, { token, controller }] of this.activeJobs) {
+      try {
+        const status = await this.adapter.extendLock(this.task.name, jobId, token, LOCK_TTL);
+        if (status === "cancelled") {
+          controller.abort("cancelled");
+        }
       } catch {
         // Extension failed — lock may have expired
       }

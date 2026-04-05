@@ -34,6 +34,7 @@ interface TaskOptionsBase {
   concurrencyLimit?: number;
   ttl?: Taskora.TtlConfig;
   middleware?: Taskora.Middleware[];
+  onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void;
   version?: number;
   since?: number;
   migrate?: readonly MigrationFn[] | Record<number, MigrationFn>;
@@ -193,6 +194,7 @@ export class App {
         }
       : undefined;
     const taskMiddleware = !isFunction ? handlerOrOptions.middleware : undefined;
+    const onCancel = !isFunction ? handlerOrOptions.onCancel : undefined;
 
     const collectOpt = !isFunction
       ? (handlerOrOptions as { collect?: CollectTaskOptions<TInput, TOutput>["collect"] }).collect
@@ -235,7 +237,7 @@ export class App {
       },
       name,
       handler,
-      { concurrency, timeout, retry, stall, singleton, concurrencyLimit, ttl, collect },
+      { concurrency, timeout, retry, stall, singleton, concurrencyLimit, ttl, collect, onCancel },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
       migrationConfig,
       taskMiddleware,
@@ -305,6 +307,7 @@ export class App {
         this.serializer,
         this.dlqMaxAgeMs,
         this.middlewares,
+        task.config.onCancel,
       );
       this.workers.push(worker);
       worker.start();
@@ -456,6 +459,15 @@ export class App {
         };
         task.dispatchEvent("stalled", payload);
         this.appEmitter.emit("task:stalled", { ...payload, task: raw.task });
+        break;
+      }
+      case "cancelled": {
+        const payload: Taskora.CancelledEvent = {
+          id: jobId,
+          reason: fields.reason || undefined,
+        };
+        task.dispatchEvent("cancelled", payload);
+        this.appEmitter.emit("task:cancelled", { ...payload, task: raw.task });
         break;
       }
     }

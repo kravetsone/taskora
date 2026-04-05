@@ -41,6 +41,11 @@ export namespace Taskora {
     action: "recovered" | "failed";
   }
 
+  export interface CancelledEvent {
+    id: string;
+    reason?: string;
+  }
+
   export interface TaskEventMap<TOutput> {
     completed: CompletedEvent<TOutput>;
     failed: FailedEvent;
@@ -48,6 +53,7 @@ export namespace Taskora {
     progress: ProgressEvent;
     active: ActiveEvent;
     stalled: StalledEvent;
+    cancelled: CancelledEvent;
   }
 
   export interface AppEventMap {
@@ -55,6 +61,7 @@ export namespace Taskora {
     "task:failed": FailedEvent & { task: string };
     "task:active": ActiveEvent & { task: string };
     "task:stalled": StalledEvent & { task: string };
+    "task:cancelled": CancelledEvent & { task: string };
     "worker:ready": undefined;
     "worker:error": Error;
     "worker:closing": undefined;
@@ -301,7 +308,19 @@ export namespace Taskora {
       retry?: { delay: number },
     ): Promise<void>;
     nack(task: string, jobId: string, token: string): Promise<void>;
-    extendLock(task: string, jobId: string, token: string, ttl: number): Promise<boolean>;
+    extendLock(
+      task: string,
+      jobId: string,
+      token: string,
+      ttl: number,
+    ): Promise<"extended" | "lost" | "cancelled">;
+    cancel(
+      task: string,
+      jobId: string,
+      reason?: string,
+    ): Promise<"cancelled" | "flagged" | "not_cancellable">;
+    finishCancel(task: string, jobId: string, token: string): Promise<void>;
+    onCancel(task: string, handler: (jobId: string) => void): Promise<() => void>;
     stalledCheck(
       task: string,
       maxStalledCount: number,
@@ -318,7 +337,7 @@ export namespace Taskora {
     // Inspector
     listJobDetails(
       task: string,
-      state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired",
+      state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired" | "cancelled",
       offset: number,
       limit: number,
     ): Promise<Array<{ id: string; details: RawJobDetails }>>;
@@ -383,6 +402,7 @@ export namespace Taskora {
     completed: number;
     failed: number;
     expired: number;
+    cancelled: number;
   }
 
   export interface RawJobDetails {
