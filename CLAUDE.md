@@ -51,10 +51,13 @@ src/
 ├── serializer.ts         — Serializer interface + json() default
 ├── types.ts              — Taskora namespace (all public types)
 ├── errors.ts             — Error classes
+├── emitter.ts            — Lightweight typed EventEmitter
 ├── redis/
 │   ├── index.ts          — redisAdapter() factory
 │   ├── backend.ts        — Adapter implementation
-│   └── lua/              — Lua scripts
+│   ├── event-reader.ts   — XREAD BLOCK stream reader
+│   ├── job-waiter.ts     — Push-based ResultHandle (shared XREAD)
+│   └── scripts.ts        — Lua scripts (inline, SCRIPT LOAD)
 └── ...
 ```
 
@@ -78,7 +81,7 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–5 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 6: Events**.
+Phases 1–6 completed. See `docs/IMPLEMENTATION.md` for full phase breakdown. Next: **Phase 7: Stall Detection**.
 
 Phase 1 delivered:
 - Expanded `Taskora.Adapter` interface (8 methods: enqueue, dequeue, ack, fail, nack, extendLock, connect, disconnect)
@@ -86,7 +89,7 @@ Phase 1 delivered:
 - Redis backend: SCRIPT LOAD/EVALSHA with NOSCRIPT fallback, lazyConnect, {hash tag} Cluster compat
 - `Taskora.Serializer` interface + `json()` default
 - `Task<TInput, TOutput>` class with `dispatch()` / `dispatchMany()`
-- `Worker`: exponential backoff polling (50ms→1s), concurrency control, lock extension (30s/10s), graceful shutdown with AbortSignal
+- `Worker`: BZPOPMIN marker-based blocking dequeue, concurrency control, lock extension (30s/10s), graceful shutdown with AbortSignal
 - `App`: task registry, `start()` / `close()`, auto-connect on first dispatch
 - Property name: `adapter` (not `backend`) — consistent with `Taskora.Adapter` / `redisAdapter()`
 - Key prefix optional, omitted by default: `taskora:{task}:key`
@@ -96,7 +99,7 @@ Phase 3 delivered:
 - `ResultHandle<TOutput>` — thenable class returned synchronously from `dispatch()`
 - `dispatch()` is sync: returns handle immediately with UUID v4 id
 - `await handle` = ensure enqueued (resolves to id string, backward compatible)
-- `handle.result` / `handle.waitFor(ms)` = poll for job completion with exponential backoff (50ms→500ms)
+- `handle.result` / `handle.waitFor(ms)` = push-based via shared XREAD connection (JobWaiter)
 - `handle.getState()` = query adapter for current `JobState | null`
 - Adapter additions: `getState()`, `getResult()`, `getError()` — plain reads, no Lua
 - Job IDs: switched from INCR integers to client-side UUID v4 (`crypto.randomUUID()`)
@@ -129,3 +132,17 @@ Phase 5 delivered:
 - `handle.getLogs()` — returns `LogEntry[]`
 - Adapter additions: `setProgress()`, `addLog()`, `getProgress()`, `getLogs()` — plain Redis commands
 - 9 new integration tests (69 total)
+
+Phase 6 delivered:
+- Typed event emitter: `task.on("completed" | "failed" | "retrying" | "progress" | "active", handler)`
+- App events: `app.on("task:completed" | "task:failed" | "task:active" | "worker:ready" | "worker:error" | "worker:closing")`
+- `src/emitter.ts`: lightweight `TypedEmitter<TEventMap>` (Map of handlers)
+- `src/redis/event-reader.ts`: XREAD BLOCK on duplicate connection, per-event enrichment (HMGET/GET pipeline)
+- `Adapter.subscribe(tasks, handler)` — background stream reader, lazy subscriber connection
+- `retrying` stream event dispatches both `failed` (willRetry=true) and `retrying` events
+- Subscription snapshots stream positions via XREVRANGE before workers start (prevents race)
+- Push-based `ResultHandle`: `Adapter.awaitJob()` + `JobWaiter` (shared XREAD connection, periodic state fallback)
+- BZPOPMIN marker-based blocking dequeue: marker ZSET (score=0 immediate, score=timestamp delayed), `moveToActive.lua` re-adds marker if more work, all Lua scripts ZADD marker, `ZADD LT` for delayed, dedicated blocking connection per task
+- `Adapter.blockingDequeue()` — BZPOPMIN + moveToActive loop, fast-path non-blocking attempt first
+- Worker rewritten: no backoff, BZPOPMIN-driven poll loop with 2s block timeout
+- 12 new integration tests (81 total)
