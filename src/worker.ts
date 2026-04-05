@@ -29,6 +29,7 @@ export class Worker {
   private readonly maxStalledCount: number;
   private readonly dlqMaxAgeMs: number | null;
   private readonly composed: (ctx: Taskora.MiddlewareContext) => Promise<void>;
+  private readonly dequeueOptions: Taskora.DequeueOptions;
 
   private running = false;
   private activeJobs = new Map<string, ActiveJob>();
@@ -50,6 +51,10 @@ export class Worker {
     this.stallInterval = task.config.stall?.interval ?? DEFAULT_STALL_INTERVAL;
     this.maxStalledCount = task.config.stall?.maxCount ?? DEFAULT_MAX_STALLED_COUNT;
     this.dlqMaxAgeMs = dlqMaxAgeMs ?? null;
+    this.dequeueOptions = {
+      onExpire: task.config.ttl?.onExpire ?? "fail",
+      singleton: task.config.singleton,
+    };
 
     // Compose once: app middleware → task middleware → handler
     const handlerMw: Taskora.Middleware = async (ctx) => {
@@ -120,6 +125,7 @@ export class Worker {
           LOCK_TTL,
           token,
           BLOCK_TIMEOUT,
+          this.dequeueOptions,
         );
 
         if (!result) continue;

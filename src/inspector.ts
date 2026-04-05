@@ -40,6 +40,10 @@ export class Inspector {
     return this.listByState("completed", options);
   }
 
+  async expired(options?: Taskora.InspectorListOptions): Promise<Taskora.JobInfo[]> {
+    return this.listByState("expired", options);
+  }
+
   // ── Stats ─────────────────────────────────────────────────────────
 
   async stats(options?: { task?: string }): Promise<Taskora.QueueStats> {
@@ -52,6 +56,7 @@ export class Inspector {
       delayed: 0,
       completed: 0,
       failed: 0,
+      expired: 0,
     };
     for (const s of results) {
       merged.waiting += s.waiting;
@@ -59,6 +64,7 @@ export class Inspector {
       merged.delayed += s.delayed;
       merged.completed += s.completed;
       merged.failed += s.failed;
+      merged.expired += s.expired;
     }
     return merged;
   }
@@ -151,7 +157,7 @@ export class Inspector {
   // ── Private ───────────────────────────────────────────────────────
 
   private async listByState(
-    state: "waiting" | "active" | "delayed" | "completed" | "failed",
+    state: "waiting" | "active" | "delayed" | "completed" | "failed" | "expired",
     options?: Taskora.InspectorListOptions,
   ): Promise<Taskora.JobInfo[]> {
     const limit = options?.limit ?? DEFAULT_LIMIT;
@@ -192,7 +198,8 @@ export class Inspector {
     if (timestamp) timeline.push({ state: "waiting", at: timestamp });
     if (processedOn) timeline.push({ state: "active", at: processedOn });
     if (finishedOn) {
-      const terminalState = state === "completed" ? "completed" : "failed";
+      const terminalState =
+        state === "completed" ? "completed" : state === "expired" ? "expired" : "failed";
       timeline.push({ state: terminalState, at: finishedOn });
     }
 

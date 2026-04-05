@@ -15,6 +15,9 @@ export interface TaskConfig {
   timeout: number;
   retry?: Taskora.RetryConfig;
   stall?: Taskora.StallConfig;
+  singleton?: boolean;
+  concurrencyLimit?: number;
+  ttl?: { maxMs: number; onExpire: "fail" | "discard" };
 }
 
 export interface TaskMigrationConfig {
@@ -102,10 +105,28 @@ export class Task<TInput, TOutput> {
           await validateSchema(this.inputSchema, data);
         }
         const serialized = this.deps.serializer.serialize(data);
+
+        // Compute TTL expireAt
+        const ttlMs = options?.ttl
+          ? parseDuration(options.ttl)
+          : this.config.ttl
+            ? this.config.ttl.maxMs
+            : 0;
+        const expireAt = ttlMs > 0 ? Date.now() + ttlMs : 0;
+
+        // Concurrency per key
+        const concurrencyKey = options?.concurrencyKey;
+        const concurrencyLimit = concurrencyKey
+          ? (options?.concurrencyLimit ?? this.config.concurrencyLimit ?? 1)
+          : 0;
+
         const baseOpts = {
           _v: this.version,
           maxAttempts: this.config.retry?.attempts,
           priority: options?.priority,
+          expireAt: expireAt || undefined,
+          concurrencyKey,
+          concurrencyLimit: concurrencyLimit || undefined,
         };
 
         if (options?.debounce) {

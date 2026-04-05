@@ -8,6 +8,7 @@ export {
   TimeoutError,
   ThrottledError,
   DuplicateJobError,
+  ExpiredError,
 } from "./errors.js";
 export { json } from "./serializer.js";
 export { type TaskoraOptions, App } from "./app.js";

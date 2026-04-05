@@ -30,6 +30,9 @@ interface TaskOptionsBase {
   timeout?: number;
   retry?: Taskora.RetryConfig;
   stall?: Taskora.StallConfig;
+  singleton?: boolean;
+  concurrencyLimit?: number;
+  ttl?: Taskora.TtlConfig;
   middleware?: Taskora.Middleware[];
   version?: number;
   since?: number;
@@ -163,6 +166,15 @@ export class App {
       (!isFunction ? handlerOrOptions.timeout : undefined) ?? this.defaults.timeout ?? 30_000;
     const retry = (!isFunction ? handlerOrOptions.retry : undefined) ?? this.defaults.retry;
     const stall = (!isFunction ? handlerOrOptions.stall : undefined) ?? this.defaults.stall;
+    const singleton = !isFunction ? handlerOrOptions.singleton : undefined;
+    const concurrencyLimit = !isFunction ? handlerOrOptions.concurrencyLimit : undefined;
+    const ttlOpt = !isFunction ? handlerOrOptions.ttl : undefined;
+    const ttl = ttlOpt
+      ? {
+          maxMs: parseDuration(ttlOpt.max),
+          onExpire: (ttlOpt.onExpire ?? "fail") as "fail" | "discard",
+        }
+      : undefined;
     const taskMiddleware = !isFunction ? handlerOrOptions.middleware : undefined;
 
     const migrationConfig =
@@ -194,7 +206,7 @@ export class App {
       },
       name,
       handler,
-      { concurrency, timeout, retry, stall },
+      { concurrency, timeout, retry, stall, singleton, concurrencyLimit, ttl },
       !isFunction ? { input: handlerOrOptions.input, output: handlerOrOptions.output } : undefined,
       migrationConfig,
       taskMiddleware,
