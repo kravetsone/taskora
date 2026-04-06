@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import DefaultTheme from "vitepress/theme"
+import { PackageManagerSwitch } from "vitepress-plugin-package-managers/client"
 import { nextTick, provide } from "vue"
 import { useData } from "vitepress"
 
@@ -44,7 +45,11 @@ provide("toggle-appearance", async ({ clientX: x, clientY: y }: MouseEvent) => {
 </script>
 
 <template>
-  <DefaultTheme.Layout />
+  <DefaultTheme.Layout>
+    <template #nav-bar-content-after>
+      <PackageManagerSwitch />
+    </template>
+  </DefaultTheme.Layout>
 </template>
 
 <style>

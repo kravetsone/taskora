@@ -29,6 +29,7 @@ try {
 }
 
 export default defineConfig({
+  base: process.env.BASE_URL ?? "/",
   title: "Taskora",
   description:
     "The task queue Node.js deserves. TypeScript-first, batteries-included.",
