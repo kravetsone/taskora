@@ -82,6 +82,8 @@ export default defineConfig({
   },
 
   themeConfig: {
+    logo: "/logo.svg",
+
     nav: [
       { text: "Guide", link: "/guide/" },
       { text: "Features", link: "/features/retry-backoff" },

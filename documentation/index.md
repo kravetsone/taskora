@@ -5,6 +5,9 @@ hero:
   name: Taskora
   text: The task queue Node.js deserves
   tagline: TypeScript-first, batteries-included distributed task queue for Node.js.
+  image:
+    src: /logo.svg
+    alt: Taskora
   actions:
     - theme: brand
       text: Get Started
