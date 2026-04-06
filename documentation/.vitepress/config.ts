@@ -1,6 +1,30 @@
 import { defineConfig } from "vitepress"
 import { transformerTwoslash } from "@shikijs/vitepress-twoslash"
 import UnoCSS from "unocss/vite"
+import llms from "vitepress-plugin-llms"
+
+// Load TypeDoc-generated sidebar — may not exist before first `bun run gen:typedoc`
+let typeDocSidebar: Record<string, unknown[]> = {}
+try {
+  const { default: sidebarItems } = await import(
+    // @ts-ignore — generated file, not always present
+    "../api/typedoc-sidebar.json",
+    { with: { type: "json" } }
+  )
+  if (Array.isArray(sidebarItems) && sidebarItems.length > 0) {
+    typeDocSidebar = {
+      "/api/": [
+        {
+          text: "API Reference",
+          link: "/api/",
+          items: sidebarItems,
+        },
+      ],
+    }
+  }
+} catch {
+  // Not yet generated — use static fallback in sidebar
+}
 
 export default defineConfig({
   title: "Taskora",
@@ -8,6 +32,14 @@ export default defineConfig({
     "The task queue Node.js deserves. TypeScript-first, batteries-included.",
 
   cleanUrls: true,
+
+  ignoreDeadLinks: [
+    /^\/api\//,
+    (link: string) =>
+      /^\.\.\//.test(link) ||
+      (link.startsWith("./") && link.includes("../")) ||
+      link.includes("%5B"),
+  ],
 
   head: [
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
@@ -39,7 +71,14 @@ export default defineConfig({
   },
 
   vite: {
-    plugins: [UnoCSS()],
+    plugins: [
+      UnoCSS(),
+      llms({
+        domain: "https://taskora.dev",
+        description:
+          "Taskora — TypeScript-first distributed task queue for Node.js. Redis-backed, batteries-included.",
+      }),
+    ],
   },
 
   themeConfig: {
@@ -53,6 +92,7 @@ export default defineConfig({
     ],
 
     sidebar: {
+      ...typeDocSidebar,
       "/guide/": [
         {
           text: "Introduction",

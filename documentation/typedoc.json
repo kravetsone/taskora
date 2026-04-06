@@ -1,0 +1,31 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "../dist/index.d.mts",
+    "../dist/redis/index.d.mts",
+    "../dist/memory/index.d.mts",
+    "../dist/test/index.d.mts"
+  ],
+  "entryPointStrategy": "resolve",
+  "tsconfig": "tsconfig.typedoc.json",
+  "plugin": ["typedoc-plugin-markdown", "typedoc-vitepress-theme"],
+  "out": "api",
+  "docsRoot": ".",
+  "name": "Taskora API Reference",
+  "readme": "none",
+  "hideGenerator": true,
+  "skipErrorChecking": true,
+  "treatWarningsAsErrors": false,
+  "outputFileStrategy": "members",
+  "membersWithOwnFile": ["Class", "Interface", "Enum", "TypeAlias"],
+  "parametersFormat": "table",
+  "propertiesFormat": "table",
+  "enumMembersFormat": "table",
+  "typeDeclarationFormat": "table",
+  "sanitizeComments": true,
+  "modulesFileName": "index",
+  "navigationModel": {
+    "excludeGroups": false,
+    "excludeCategories": false
+  }
+}

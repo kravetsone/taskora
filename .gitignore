@@ -175,3 +175,14 @@ dist
 .DS_Store
 
 test.ts
+
+# VitePress
+documentation/.vitepress/cache/
+documentation/.vitepress/dist/
+
+# TypeDoc generated API reference (regenerated on build)
+documentation/api/taskora/
+documentation/api/redis/
+documentation/api/memory/
+documentation/api/test/
+documentation/api/typedoc-sidebar.json
