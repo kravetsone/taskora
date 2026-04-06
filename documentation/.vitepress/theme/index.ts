@@ -3,7 +3,10 @@ import type { Theme } from "vitepress"
 import TwoslashFloatingVue from "@shikijs/vitepress-twoslash/client"
 import "@shikijs/vitepress-twoslash/style.css"
 import "virtual:uno.css"
+import "virtual:group-icons.css"
 import "./style.css"
+import { enhanceAppWithPackageManagers } from "vitepress-plugin-package-managers/client"
+import { icons } from "vitepress-plugin-package-managers/icons"
 
 import Layout from "./Layout.vue"
 import HeroBadges from "../components/HeroBadges.vue"
@@ -20,6 +23,7 @@ export default {
   Layout,
   enhanceApp({ app }) {
     app.use(TwoslashFloatingVue)
+    enhanceAppWithPackageManagers(app, { icons })
     app.component("HeroBadges", HeroBadges)
     app.component("JobLifecycleVisualizer", JobLifecycleVisualizer)
     app.component("RetryBackoffVisualizer", RetryBackoffVisualizer)

@@ -3,6 +3,7 @@ import { transformerTwoslash } from "@shikijs/vitepress-twoslash"
 import UnoCSS from "unocss/vite"
 import llms from "vitepress-plugin-llms"
 import { packageManagersMarkdownPlugin } from "vitepress-plugin-package-managers"
+import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons"
 
 // Load TypeDoc-generated sidebar — may not exist before first `bun run gen:typedoc`
 let typeDocSidebar: Record<string, unknown[]> = {}
@@ -70,6 +71,7 @@ export default defineConfig({
   markdown: {
     codeTransformers: [transformerTwoslash()],
     config: (md) => {
+      md.use(groupIconMdPlugin)
       md.use(packageManagersMarkdownPlugin)
     },
   },
@@ -77,6 +79,7 @@ export default defineConfig({
   vite: {
     plugins: [
       UnoCSS(),
+      groupIconVitePlugin(),
       llms({
         domain: "https://taskora.dev",
         description:
