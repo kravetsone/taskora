@@ -4,24 +4,7 @@ Get your first task queue running in under 5 minutes.
 
 ## Installation
 
-::: code-group
-
-```sh [bun]
-bun add taskora ioredis
-```
-
-```sh [npm]
-npm install taskora ioredis
-```
-
-```sh [pnpm]
-pnpm add taskora ioredis
-```
-
-```sh [yarn]
-yarn add taskora ioredis
-```
-
+::: pm-add taskora ioredis
 :::
 
 ## Create Your App

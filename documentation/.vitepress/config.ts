@@ -2,6 +2,7 @@ import { defineConfig } from "vitepress"
 import { transformerTwoslash } from "@shikijs/vitepress-twoslash"
 import UnoCSS from "unocss/vite"
 import llms from "vitepress-plugin-llms"
+import { packageManagersMarkdownPlugin } from "vitepress-plugin-package-managers"
 
 // Load TypeDoc-generated sidebar — may not exist before first `bun run gen:typedoc`
 let typeDocSidebar: Record<string, unknown[]> = {}
@@ -68,6 +69,9 @@ export default defineConfig({
 
   markdown: {
     codeTransformers: [transformerTwoslash()],
+    config: (md) => {
+      md.use(packageManagersMarkdownPlugin)
+    },
   },
 
   vite: {

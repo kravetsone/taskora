@@ -20,13 +20,7 @@ app.task("cleanup-expired", {
 
 Requires `cron-parser` as a peer dependency:
 
-::: code-group
-```sh [bun]
-bun add cron-parser
-```
-```sh [npm]
-npm install cron-parser
-```
+::: pm-add cron-parser
 :::
 
 ```ts

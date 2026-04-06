@@ -41,24 +41,7 @@ features:
 
 ## Quick Start
 
-::: code-group
-
-```sh [bun]
-bun add taskora ioredis
-```
-
-```sh [npm]
-npm install taskora ioredis
-```
-
-```sh [pnpm]
-pnpm add taskora ioredis
-```
-
-```sh [yarn]
-yarn add taskora ioredis
-```
-
+::: pm-add taskora ioredis
 :::
 
 ```ts
