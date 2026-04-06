@@ -2,7 +2,7 @@
 
 Task queue for Node.js. TypeScript-first, Celery-inspired, batteries-included.
 
-> **Work in progress** — see [API Design](docs/API_DESIGN.md) and [Implementation Plan](docs/IMPLEMENTATION.md) for the full vision.
+> **Work in progress** — see [https://kravetsone.github.io/taskora/](https://kravetsone.github.io/taskora/) for the full vision.
 
 ## Install
 
