@@ -82,7 +82,7 @@ export default defineConfig({
       UnoCSS(),
       groupIconVitePlugin(),
       llms({
-        domain: "https://taskora.dev",
+        domain: process.env.DOCS_DOMAIN ?? "https://kravetsone.github.io/taskora",
         description:
           "Taskora — TypeScript-first distributed task queue for Node.js. Redis-backed, batteries-included.",
       }),
