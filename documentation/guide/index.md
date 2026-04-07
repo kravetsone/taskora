@@ -15,6 +15,7 @@ Taskora is a distributed task queue for Node.js — designed from scratch in Typ
 |---|---|
 | Type-safe end-to-end | Inferred types from handler to dispatch to result |
 | Schema validation | Any Standard Schema library (Zod, Valibot, ArkType) |
+| Workflows | Chain, group, chord — type-safe task pipelines |
 | Koa-style middleware | Onion model — app-level and per-task |
 | Versioning & migrations | Bump version, add migration, deploy without draining |
 | First-class testing | In-memory adapter + virtual time, no Docker needed |

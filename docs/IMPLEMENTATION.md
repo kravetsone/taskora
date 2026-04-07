@@ -677,57 +677,186 @@ trace: HTTP POST /api/orders
 
 ---
 
-### Phase 17: Workflows (Canvas) — Phase 2
+### Phase 17a: Workflows (Canvas) — Core Primitives
 
-**Goal**: Signatures, chain, group, chord. Type-safe composition. Durable steps and wait-for-event as natural extensions of the pipe/graph model.
-
-> Design discussion required before implementation — rethink durable steps and wait-for-event as workflow graph primitives, not separate concepts.
+**Goal**: Signature, chain, group, chord. Type-safe composition with DAG-based execution. Cascade cancellation. Optional workflow TTL.
 
 **Tasks**:
-- [ ] `src/workflow/signature.ts` — `.s()` method on Task, Signature class
-- [ ] `src/workflow/chain.ts` — sequential execution, result flows forward
-- [ ] `src/workflow/group.ts` — parallel execution, collect all results
-- [ ] `src/workflow/chord.ts` — group + callback
-- [ ] `.pipe()` syntax on Signature
-- [ ] `.map()` and `.chunk()` on Task
-- [ ] Workflow state tracking (store DAG in Redis)
-- [ ] Atomic workflow dispatch (all-or-nothing)
-- [ ] Durable steps — memoized step results within workflow graph (rethink as graph nodes)
-- [ ] Wait-for-event — pause node in graph until external signal arrives
-- [ ] Fan-out / fan-in — dynamic parallelism within graph
+- [ ] `src/workflow/signature.ts` — Signature class, `.s()` method on Task
+- [ ] `src/workflow/chain.ts` — `chain()` with type overloads (up to 10 steps)
+- [ ] `src/workflow/group.ts` — `group()` with tuple output inference
+- [ ] `src/workflow/chord.ts` — `chord()` group + callback
+- [ ] `src/workflow/graph.ts` — `flattenToDAG()`: composition tree → flat `WorkflowGraph`
+- [ ] `src/workflow/handle.ts` — `WorkflowHandle` (result waiting, cancel, state)
+- [ ] `src/workflow/index.ts` — re-exports
+- [ ] `.pipe()` on Signature — unlimited type-safe chaining
+- [ ] `.map()` and `.chunk()` on Task — batch sugar
+- [ ] Composability — groups/chords valid as chain steps, nested compositions
+- [ ] Workflow state tracking — DAG stored as Redis hash
+- [ ] Worker integration — advance/fail workflow after job ack/fail
+- [ ] Cascade cancellation — cancel workflow cancels all pending/active steps
+- [ ] Workflow TTL — optional timeout, implemented as delayed cancel
+- [ ] Adapter additions — 6 new methods (createWorkflow, advanceWorkflow, failWorkflow, getWorkflowState, cancelWorkflow, getWorkflowMeta)
+- [ ] Lua scripts — 4 new (createWorkflow, advanceWorkflow, failWorkflow, cancelWorkflow)
+- [ ] Enqueue extension — `_wf`/`_wfNode` optional fields in job hash
+- [ ] MemoryBackend — workflow methods implementation
+- [ ] TestRunner — `runner.steps` tracks workflow step history, processOne advances workflows
+- [ ] Unit tests (signature, chain types, graph flattening, DAG builder)
+- [ ] Integration tests (chain execution, group parallel, chord fan-in, nested, cancel cascade, TTL)
 
- Read CLAUDE.md, docs/IMPLEMENTATION.md (Phase 17: Workflows),                                                                                  
-    and docs/API_DESIGN.md (section 6: Workflows — signatures, chain, group, chord).                                                             
-    Also read src/types.ts, src/task.ts, src/result.ts, src/app.ts, src/worker.ts,                                                               
-    and src/test/index.ts (TestRunner — runner.steps will be used here).                                                                         
-                                                                                                                                                 
-    We're starting Phase 17: Workflows (Canvas).                                                                                                 
-    This is the Celery-inspired composition layer — type-safe task pipelines.                                                                    
-                                                                                                                                                 
-    Key primitives from the API design:                                                                                                          
-    1. **Signature** — `.s()` on Task, serializable snapshot of a task invocation                                                                
-    2. **Chain** — sequential pipeline, output flows as input to next task                                                                       
-    3. **Group** — parallel execution, collect all results                                                                                       
-    4. **Chord** — group + callback (parallel then merge)                                                                                        
-    5. **`.pipe()` syntax** on Signature for fluent chaining                                                                                     
-    6. **`.map()` / `.chunk()`** on Task for batch operations                                                                                    
-    7. **Composability** — chains/groups/chords are themselves signatures                                                                        
-    8. **Workflow state tracking** — DAG stored in Redis                                                                                         
-    9. **Cascade cancellation** — cancel workflow cancels all pending steps                                                                      
-                                                                                                                                                 
-    Existing infrastructure to leverage:                                                                                                         
-    - ResultHandle with push-based awaitJob                                                                                                      
-    - Cancel system (Phase 13) with pub/sub                                                                                                      
-    - MemoryBackend + TestRunner for unit testing workflows                                                                                      
-    - runner.steps placeholder already exists                                                                                                    
-                                                                                                                                                 
-    Discuss approach before coding. Key design questions:                                                                                        
-    - How to store workflow DAG state in Redis (hash? dedicated keys?)                                                                           
-    - How chain passes output → next input (inline in Lua? worker-side?)                                                                         
-    - How group tracks parallel completion (counter? sorted set?)                                                                                
-    - Type-safe chain: how to enforce TOutput of step N = TInput of step N+1                                                                     
-    - Adapter interface additions needed                                                                                                         
-    - Should workflows be a separate entrypoint (taskora/workflow) or part of core?     
+#### Design Decisions
+
+**DAG model** — All compositions (chain, group, chord, nested) flatten to a DAG of task nodes. No virtual join nodes. Each node is a real task invocation with dependency edges:
+
+```
+chain(a, b, c)                    → [a, b, c], edges: a→b, b→c
+group(a, b, c)                    → [a, b, c], all terminal, no edges
+chord([a, b], c)                  → [a, b, c], edges: a→c, b→c
+chord([chain(a,b), chain(c,d)], e) → [a,b,c,d,e], edges: a→b, c→d, b→e, d→e
+chain(a, group(b, c), d)          → [a,b,c,d], edges: a→b, a→c, b→d, c→d
+```
+
+Input resolution: 1 dep → receives that dep's result directly. N deps → receives array of results in dep order. Bound data overrides pipeline input.
+
+**Bound data (full bind vs partial application)** — Chose **full-bind-or-pipe** model over Celery-style partial application.
+
+- `task.s(data)` — data is fixed, pipeline input ignored
+- `task.s()` — no data, receives entire previous output as input
+
+*Tradeoff*: Celery's partial application (`add.s(10)` binds one arg, pipeline fills the other) enables more flexible composition but is fundamentally incompatible with TypeScript's type system. Object inputs lack positional semantics, `Omit<T, keyof Partial>` can't distinguish "provided at runtime" from "optional in type", and merge precedence between pipeline and bound data is ambiguous. The full-bind model gives clean single-constraint type checking (`PrevOutput extends NextInput`) with zero type gymnastics. If shape transformation is needed between steps, a lightweight mapping task is more explicit and testable than magic partial merging.
+
+**Worker-side dispatch (not all-in-Lua)** — `advanceWorkflow` Lua does bookkeeping on the workflow hash (single key, Cluster-safe), returns list of ready nodes. Worker dispatches via standard `adapter.enqueue()`. Reason: workflow nodes target different tasks → different Redis key prefixes → can't cross hash slots in Lua. Crash window between advance and enqueue is ~microseconds; recoverable from graph state if needed later.
+
+**Part of core (not separate entrypoint)** — `.s()` lives on Task, workflow hooks in Worker, types in Taskora namespace. Exported from `taskora` directly, source in `src/workflow/`.
+
+**Groups are composable chain steps** — `chain(a, group(b, c), d)` is valid. Group receives a's output, fans out to all members. d receives `[b.result, c.result]`. Falls naturally from the DAG model.
+
+**Workflow TTL** — Optional. Individual jobs use their task-level TTL as before. Additionally, `dispatch({ ttl })` on a workflow sets a global timeout implemented as a delayed cancel.
+
+#### Redis Layout
+
+Single hash per workflow — all state transitions atomic in one Lua call:
+
+```
+Key: taskora:wf:{workflowId}
+
+Fields:
+  graph       → JSON WorkflowGraph (nodes, terminal indices)
+  state       → "running" | "completed" | "failed" | "cancelled"
+  createdAt   → timestamp
+  result      → serialized final result
+  error       → error message
+  n:0:state   → "pending" | "active" | "completed" | "failed"
+  n:0:result  → serialized result
+  n:1:state   → ...
+```
+
+Job hash extension: `_wf` (workflow ID) + `_wfNode` (node index) stored alongside existing fields.
+
+#### WorkflowGraph Schema
+
+```typescript
+interface WorkflowGraph {
+  nodes: WorkflowNode[];
+  terminal: number[];   // node indices with no successors — define final result
+}
+interface WorkflowNode {
+  taskName: string;
+  data?: string;        // serialized bound data, absent = pipe from predecessor
+  deps: number[];       // predecessor node indices
+  jobId: string;        // pre-generated UUID at dispatch time
+  _v: number;           // task version captured at signature creation
+}
+```
+
+#### Adapter Additions
+
+```typescript
+createWorkflow(workflowId: string, graph: string): Promise<void>;
+advanceWorkflow(workflowId: string, nodeIndex: number, result: string): Promise<WorkflowAdvanceResult>;
+failWorkflow(workflowId: string, nodeIndex: number, error: string): Promise<WorkflowFailResult>;
+getWorkflowState(workflowId: string): Promise<string | null>;
+cancelWorkflow(workflowId: string, reason?: string): Promise<WorkflowCancelResult>;
+getWorkflowMeta(task: string, jobId: string): Promise<{ workflowId: string; nodeIndex: number } | null>;
+```
+
+#### Lua Scripts
+
+| Script | Operates on | Purpose |
+|--------|-------------|---------|
+| `createWorkflow.lua` | `wf:{id}` hash | HMSET graph + per-node initial states |
+| `advanceWorkflow.lua` | `wf:{id}` hash | Mark node done, find ready deps, compute input, return dispatch list |
+| `failWorkflow.lua` | `wf:{id}` hash | Mark node + workflow failed, collect active job IDs for cascade cancel |
+| `cancelWorkflow.lua` | `wf:{id}` hash | Mark pending/active nodes cancelled, return active job IDs |
+
+#### Type System
+
+Chain overloads (up to 10):
+```typescript
+function chain<A, B>(s1: Signature<A, B>): ChainSignature<A, B>;
+function chain<A, B, C>(s1: Signature<A, B>, s2: Signature<B, C>): ChainSignature<A, C>;
+// ...up to 10
+```
+
+Group output as mapped tuple:
+```typescript
+type OutputTuple<T extends Signature<any, any>[]> = {
+  [K in keyof T]: T[K] extends Signature<any, infer O> ? O : never;
+};
+```
+
+Chord connects group tuple to callback:
+```typescript
+function chord<T extends Signature<any, any>[], CO>(
+  header: [...T],
+  callback: Signature<OutputTuple<T>, CO>,
+): ChordSignature<void, CO>;
+```
+
+`.pipe()` — each call is individually type-checked, unlimited depth:
+```typescript
+class Signature<TInput, TOutput> {
+  pipe<TNext>(next: Signature<TOutput, TNext>): ChainSignature<TInput, TNext>;
+}
+```
+
+#### Worker Integration
+
+After ack — check for workflow fields, advance:
+```
+ack(job) → HMGET _wf _wfNode → if present: advanceWorkflow(wfId, node, result)
+  → for each ready node: adapter.enqueue(taskName, jobId, data, { _wf, _wfNode })
+```
+
+After permanent fail — fail workflow, cascade cancel:
+```
+fail(job, no retry) → HMGET _wf _wfNode → if present: failWorkflow(wfId, node, error)
+  → for each active job: adapter.cancel(task, jobId, "workflow failed")
+```
+
+#### WorkflowHandle
+
+Pre-generated job IDs for all nodes → terminal IDs known at dispatch time:
+
+```typescript
+class WorkflowHandle<TOutput> {
+  readonly workflowId: string;
+  get result(): Promise<TOutput>;   // awaitJob on terminal node(s)
+  cancel(opts?: { reason?: string }): Promise<void>;
+  getState(): Promise<WorkflowState>;
+}
+```
+
+Chain/chord: awaits single terminal job. Group: `Promise.all()` over terminal jobs. Piggybacks on existing push-based `awaitJob()`.
+
+### Phase 17b: Workflows — Advanced Primitives (deferred)
+
+**Goal**: Durable steps, wait-for-event, dynamic fan-out/fan-in as graph node types.
+
+- [ ] Durable steps — memoized step results within workflow graph
+- [ ] Wait-for-event — pause node until external signal (new node type in DAG)
+- [ ] Fan-out / fan-in — dynamic parallelism (node spawns N children at runtime)
+- [ ] Workflow inspector — visualize DAG state, step history
 
 ---
 

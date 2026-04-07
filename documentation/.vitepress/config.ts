@@ -137,6 +137,7 @@ export default defineConfig({
         {
           text: "Composition",
           items: [
+            { text: "Workflows", link: "/features/workflows" },
             { text: "Middleware", link: "/features/middleware" },
             { text: "Events", link: "/features/events" },
           ],
