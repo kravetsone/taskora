@@ -5,6 +5,7 @@ import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
 import { buildKeys, buildScheduleKeys } from "./keys.js";
 import * as scripts from "./scripts.js";
+import * as wfScripts from "./workflow-scripts.js";
 
 const SCRIPT_MAP: Record<string, string> = {
   enqueue: scripts.ENQUEUE,
@@ -29,6 +30,10 @@ const SCRIPT_MAP: Record<string, string> = {
   collectPush: scripts.COLLECT_PUSH,
   cancel: scripts.CANCEL,
   finishCancel: scripts.FINISH_CANCEL,
+  createWorkflow: wfScripts.CREATE_WORKFLOW,
+  advanceWorkflow: wfScripts.ADVANCE_WORKFLOW,
+  failWorkflow: wfScripts.FAIL_WORKFLOW,
+  cancelWorkflow: wfScripts.CANCEL_WORKFLOW,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -781,13 +786,27 @@ export class RedisBackend implements Taskora.Adapter {
 
   async trimDLQ(task: string, before: number, maxItems: number): Promise<number> {
     const keys = buildKeys(task, this.prefix);
-    const result = await this.eval("trimDLQ", 1, keys.failed, keys.jobPrefix, String(before), String(maxItems));
+    const result = await this.eval(
+      "trimDLQ",
+      1,
+      keys.failed,
+      keys.jobPrefix,
+      String(before),
+      String(maxItems),
+    );
     return result as number;
   }
 
   async trimCompleted(task: string, before: number, maxItems: number): Promise<number> {
     const keys = buildKeys(task, this.prefix);
-    const result = await this.eval("trimDLQ", 1, keys.completed, keys.jobPrefix, String(before), String(maxItems));
+    const result = await this.eval(
+      "trimDLQ",
+      1,
+      keys.completed,
+      keys.jobPrefix,
+      String(before),
+      String(maxItems),
+    );
     return result as number;
   }
 
@@ -979,7 +998,7 @@ export class RedisBackend implements Taskora.Adapter {
     );
   }
 
-  // ── Workflows (Lua scripts TBD — using inline Redis commands for now) ──
+  // ── Workflows (atomic Lua scripts) ──
 
   private wfKey(workflowId: string): string {
     const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
@@ -987,17 +1006,15 @@ export class RedisBackend implements Taskora.Adapter {
   }
 
   async createWorkflow(workflowId: string, graph: string): Promise<void> {
-    const key = this.wfKey(workflowId);
     const parsed = JSON.parse(graph);
-    const fields: string[] = [
-      "graph", graph,
-      "state", "running",
-      "createdAt", String(Date.now()),
-    ];
-    for (let i = 0; i < parsed.nodes.length; i++) {
-      fields.push(`n:${i}:state`, "pending");
-    }
-    await this.client.hmset(key, ...fields);
+    await this.eval(
+      "createWorkflow",
+      1,
+      this.wfKey(workflowId),
+      graph,
+      String(Date.now()),
+      String(parsed.nodes.length),
+    );
   }
 
   async advanceWorkflow(
@@ -1005,81 +1022,17 @@ export class RedisBackend implements Taskora.Adapter {
     nodeIndex: number,
     result: string,
   ): Promise<Taskora.WorkflowAdvanceResult> {
-    const key = this.wfKey(workflowId);
-    const state = await this.client.hget(key, "state");
-    if (state !== "running") return { toDispatch: [], completed: false };
-
-    // Mark node completed
-    await this.client.hmset(key,
-      `n:${nodeIndex}:state`, "completed",
-      `n:${nodeIndex}:result`, result,
-    );
-
-    const graphStr = await this.client.hget(key, "graph");
-    if (!graphStr) return { toDispatch: [], completed: false };
-    const graph = JSON.parse(graphStr);
-
-    const toDispatch: Taskora.WorkflowAdvanceResult["toDispatch"] = [];
-
-    for (let i = 0; i < graph.nodes.length; i++) {
-      const nodeState = await this.client.hget(key, `n:${i}:state`);
-      if (nodeState !== "pending") continue;
-      const node = graph.nodes[i];
-      if (!node.deps.includes(nodeIndex)) continue;
-
-      let allDepsCompleted = true;
-      for (const d of node.deps) {
-        const ds = await this.client.hget(key, `n:${d}:state`);
-        if (ds !== "completed") { allDepsCompleted = false; break; }
-      }
-      if (!allDepsCompleted) continue;
-
-      let inputData: string;
-      if (node.data !== undefined) {
-        inputData = node.data;
-      } else if (node.deps.length === 1) {
-        inputData = (await this.client.hget(key, `n:${node.deps[0]}:result`))!;
-      } else {
-        const results: string[] = [];
-        for (const d of node.deps) {
-          results.push((await this.client.hget(key, `n:${d}:result`))!);
-        }
-        inputData = `[${results.join(",")}]`;
-      }
-
-      await this.client.hset(key, `n:${i}:state`, "active");
-      toDispatch.push({ nodeIndex: i, taskName: node.taskName, data: inputData, jobId: node.jobId, _v: node._v });
-    }
-
-    const allTerminalDone = (graph.terminal as number[]).every((i: number) => {
-      // We just set nodeIndex to completed, check inline
-      return true; // will verify below
-    });
-
-    // Re-check terminals properly
-    let completed = true;
-    for (const ti of graph.terminal as number[]) {
-      const ts = ti === nodeIndex ? "completed" : await this.client.hget(key, `n:${ti}:state`);
-      if (ts !== "completed") { completed = false; break; }
-    }
-
-    if (completed) {
-      const terminalNodes = graph.terminal as number[];
-      let finalResult: string | undefined;
-      if (terminalNodes.length === 1) {
-        finalResult = terminalNodes[0] === nodeIndex ? result : (await this.client.hget(key, `n:${terminalNodes[0]}:result`)) ?? undefined;
-      } else {
-        const results: string[] = [];
-        for (const ti of terminalNodes) {
-          results.push(ti === nodeIndex ? result : (await this.client.hget(key, `n:${ti}:result`))!);
-        }
-        finalResult = `[${results.join(",")}]`;
-      }
-      await this.client.hmset(key, "state", "completed", "result", finalResult ?? "");
-      return { toDispatch, completed: true, result: finalResult };
-    }
-
-    return { toDispatch, completed: false };
+    const raw = (await this.eval(
+      "advanceWorkflow",
+      1,
+      this.wfKey(workflowId),
+      String(nodeIndex),
+      result,
+    )) as string;
+    const parsed = JSON.parse(raw);
+    // cjson encodes empty Lua tables as {} (object), normalize to []
+    if (!Array.isArray(parsed.toDispatch)) parsed.toDispatch = [];
+    return parsed;
   }
 
   async failWorkflow(
@@ -1087,34 +1040,16 @@ export class RedisBackend implements Taskora.Adapter {
     nodeIndex: number,
     error: string,
   ): Promise<Taskora.WorkflowFailResult> {
-    const key = this.wfKey(workflowId);
-    const state = await this.client.hget(key, "state");
-    if (state !== "running") return { activeJobIds: [] };
-
-    await this.client.hmset(key,
-      `n:${nodeIndex}:state`, "failed",
-      `n:${nodeIndex}:error`, error,
-      "state", "failed",
-      "error", error,
-    );
-
-    const graphStr = await this.client.hget(key, "graph");
-    if (!graphStr) return { activeJobIds: [] };
-    const graph = JSON.parse(graphStr);
-
-    const activeJobIds: Array<{ task: string; jobId: string }> = [];
-    for (let i = 0; i < graph.nodes.length; i++) {
-      if (i === nodeIndex) continue;
-      const ns = await this.client.hget(key, `n:${i}:state`);
-      if (ns === "active") {
-        activeJobIds.push({ task: graph.nodes[i].taskName, jobId: graph.nodes[i].jobId });
-        await this.client.hset(key, `n:${i}:state`, "failed");
-      } else if (ns === "pending") {
-        await this.client.hset(key, `n:${i}:state`, "failed");
-      }
-    }
-
-    return { activeJobIds };
+    const raw = (await this.eval(
+      "failWorkflow",
+      1,
+      this.wfKey(workflowId),
+      String(nodeIndex),
+      error,
+    )) as string;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.activeJobIds)) parsed.activeJobIds = [];
+    return parsed;
   }
 
   async getWorkflowState(workflowId: string): Promise<string | null> {
@@ -1124,32 +1059,16 @@ export class RedisBackend implements Taskora.Adapter {
     return JSON.stringify({ state, result: result ?? undefined, error: error ?? undefined });
   }
 
-  async cancelWorkflow(
-    workflowId: string,
-    reason?: string,
-  ): Promise<Taskora.WorkflowCancelResult> {
-    const key = this.wfKey(workflowId);
-    const state = await this.client.hget(key, "state");
-    if (state !== "running") return { activeJobIds: [] };
-
-    await this.client.hmset(key, "state", "cancelled", "error", reason ?? "");
-
-    const graphStr = await this.client.hget(key, "graph");
-    if (!graphStr) return { activeJobIds: [] };
-    const graph = JSON.parse(graphStr);
-
-    const activeJobIds: Array<{ task: string; jobId: string }> = [];
-    for (let i = 0; i < graph.nodes.length; i++) {
-      const ns = await this.client.hget(key, `n:${i}:state`);
-      if (ns === "active") {
-        activeJobIds.push({ task: graph.nodes[i].taskName, jobId: graph.nodes[i].jobId });
-        await this.client.hset(key, `n:${i}:state`, "cancelled");
-      } else if (ns === "pending") {
-        await this.client.hset(key, `n:${i}:state`, "cancelled");
-      }
-    }
-
-    return { activeJobIds };
+  async cancelWorkflow(workflowId: string, reason?: string): Promise<Taskora.WorkflowCancelResult> {
+    const raw = (await this.eval(
+      "cancelWorkflow",
+      1,
+      this.wfKey(workflowId),
+      reason ?? "",
+    )) as string;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.activeJobIds)) parsed.activeJobIds = [];
+    return parsed;
   }
 
   async getWorkflowMeta(
