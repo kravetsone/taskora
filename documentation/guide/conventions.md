@@ -86,6 +86,131 @@ src/
 └── worker.ts               ← taskora.start()
 ```
 
+### With a Telegram bot (GramIO)
+
+```
+src/
+├── taskora.ts                ← createTaskora + config
+├── bot.ts                    ← GramIO bot instance
+├── tasks/
+│   ├── notifications.ts      ← sendTelegramMessageTask, broadcastTask
+│   ├── moderation.ts         ← checkSpamTask, banUserTask
+│   └── media.ts              ← processPhotoTask, generateThumbnailTask
+├── bot/
+│   ├── commands/
+│   │   ├── start.ts          ← /start — dispatches welcome task
+│   │   └── settings.ts       ← /settings
+│   └── callbacks/
+│       └── subscribe.ts      ← inline button → dispatches task
+├── workflows/
+│   └── onboarding.ts         ← welcome message chain
+└── index.ts                  ← bot.start() + taskora.start()
+```
+
+```ts
+// src/tasks/notifications.ts
+import { taskora } from "../taskora.js"
+
+export const sendTelegramMessageTask = taskora.task("send-telegram-message", {
+  retry: { attempts: 3, backoff: "exponential", delay: 2000 },
+  handler: async (data: { chatId: number; text: string }) => {
+    // Rate-limited — offloaded from bot handler to task queue
+    await bot.api.sendMessage({ chat_id: data.chatId, text: data.text })
+    return { sent: true }
+  },
+})
+
+export const broadcastTask = taskora.task("broadcast", {
+  timeout: 300_000, // 5 min for large broadcasts
+  handler: async (data: { chatIds: number[]; text: string }, ctx) => {
+    let sent = 0
+    for (const chatId of data.chatIds) {
+      if (ctx.signal.aborted) break
+      sendTelegramMessageTask.dispatch({ chatId, text: data.text })
+      sent++
+      ctx.progress(sent / data.chatIds.length)
+    }
+    return { sent }
+  },
+})
+```
+
+```ts
+// src/bot/commands/start.ts — bot handler dispatches task
+import { sendTelegramMessageTask } from "../../tasks/notifications.js"
+
+bot.command("start", async (context) => {
+  // Respond immediately
+  await context.send("Welcome! Setting things up...")
+
+  // Heavy work goes to the queue
+  sendTelegramMessageTask.dispatch({
+    chatId: context.chatId,
+    text: "Your account is ready! Here's what you can do...",
+  })
+})
+```
+
+### With a REST API (Elysia)
+
+```
+src/
+├── taskora.ts                ← createTaskora + config
+├── server.ts                 ← Elysia instance
+├── tasks/
+│   ├── email.ts              ← sendEmailTask, sendInvoiceTask
+│   ├── reports.ts            ← generateReportTask, exportCsvTask
+│   └── webhooks.ts           ← deliverWebhookTask
+├── routes/
+│   ├── orders.ts             ← POST /orders → dispatches tasks
+│   └── reports.ts            ← POST /reports → dispatches task, returns handle
+├── workflows/
+│   └── order-fulfillment.ts  ← chain: validate → charge → ship → notify
+└── index.ts                  ← server.listen() + taskora.start()
+```
+
+```ts
+// src/routes/orders.ts — Elysia route dispatches workflow
+import { Elysia, t } from "elysia"
+import { chain } from "taskora"
+import { validateOrderTask, chargePaymentTask, sendConfirmationTask } from "../tasks/orders.js"
+
+export const orderRoutes = new Elysia({ prefix: "/orders" })
+  .post("/", async ({ body }) => {
+    // Dispatch workflow, return immediately
+    const handle = chain(
+      validateOrderTask.s(body),
+      chargePaymentTask.s(),
+      sendConfirmationTask.s(),
+    ).dispatch()
+
+    await handle // ensure dispatched
+    return { orderId: handle.workflowId, status: "processing" }
+  }, {
+    body: t.Object({
+      items: t.Array(t.Object({ sku: t.String(), qty: t.Number() })),
+      email: t.String(),
+    }),
+  })
+```
+
+```ts
+// src/routes/reports.ts — long-running task with polling
+import { Elysia, t } from "elysia"
+import { generateReportTask } from "../tasks/reports.js"
+
+export const reportRoutes = new Elysia({ prefix: "/reports" })
+  .post("/", async ({ body }) => {
+    const handle = generateReportTask.dispatch(body)
+    const id = await handle
+    return { reportId: id, status: "generating" }
+  })
+  .get("/:id/status", async ({ params }) => {
+    const state = await generateReportTask.inspect(params.id)
+    return { status: state }
+  })
+```
+
 ### taskora.ts — single source
 
 Define `createTaskora` once, export the instance. All task files import from here.
