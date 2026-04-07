@@ -25,7 +25,7 @@ const runner = createTestRunner()
 afterEach(() => runner.clear())
 ```
 
-### From App Mode
+### From Instance Mode
 
 Patch all tasks from an existing instance to use the in-memory backend:
 

@@ -5,7 +5,7 @@ Taskora supports graceful job cancellation with instant notification via Redis p
 ## Cancelling a Job
 
 ```ts
-const handle = longTaskTask.dispatch(data)
+const handle = longRunningTask.dispatch(data)
 
 // Later...
 await handle.cancel({ reason: "User requested cancellation" })

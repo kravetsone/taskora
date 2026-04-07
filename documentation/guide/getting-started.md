@@ -7,7 +7,7 @@ Get your first task queue running in under 5 minutes.
 ::: pm-add taskora ioredis
 :::
 
-## Create Your App
+## Create Your Instance
 
 Every taskora project starts with an instance — the central registry that holds your tasks, adapters, and configuration.
 

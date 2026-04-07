@@ -18,7 +18,7 @@ app.get("/health/queue", async (req, res) => {
 
 ## Metrics Collection
 
-Use app events to feed metrics into Prometheus, Datadog, or any metrics system:
+Use events to feed metrics into Prometheus, Datadog, or any metrics system:
 
 ```ts
 taskora.on("task:completed", ({ task, duration }) => {
