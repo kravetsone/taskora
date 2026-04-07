@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -21,7 +21,7 @@ describe("TTL / expiration", () => {
   it("expired job is not processed (task-level TTL)", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("ttl-task", {
       ttl: { max: 100 },
       handler: async (data: { id: string }) => {
@@ -53,7 +53,7 @@ describe("TTL / expiration", () => {
   it("dispatch-level TTL overrides task default", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("ttl-override", {
       ttl: { max: "10s" }, // long task-level TTL
       handler: async (data: { id: string }) => {
@@ -79,7 +79,7 @@ describe("TTL / expiration", () => {
   it("non-expired job is processed normally", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("ttl-ok", {
       ttl: { max: "10s" },
       handler: async (data: { id: string }) => {
@@ -98,7 +98,7 @@ describe("TTL / expiration", () => {
   });
 
   it("onExpire: discard removes job completely", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("ttl-discard", {
       ttl: { max: 100, onExpire: "discard" },
       handler: async () => {},
@@ -126,7 +126,7 @@ describe("TTL / expiration", () => {
   it("delayed job with TTL — expires before promotion", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("ttl-delayed", {
       ttl: { max: 100 },
       handler: async (data: { id: string }) => {
@@ -152,7 +152,7 @@ describe("TTL / expiration", () => {
   });
 
   it("TTL via inspector — expired jobs appear in stats", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("ttl-stats", {
       ttl: { max: 100 },
       handler: async () => {},
@@ -184,7 +184,7 @@ describe("singleton", () => {
       resolveFirst = r;
     });
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("singleton-test", {
       singleton: true,
       concurrency: 5, // high concurrency — singleton should still limit to 1
@@ -223,7 +223,7 @@ describe("singleton", () => {
     const active: string[] = [];
     let maxConcurrent = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("non-singleton", {
       concurrency: 5,
       handler: async (data: { id: string }) => {
@@ -253,7 +253,7 @@ describe("concurrency per key", () => {
     const order: string[] = [];
     const resolvers = new Map<string, () => void>();
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("conc-key", {
       concurrency: 10,
       concurrencyLimit: 1,
@@ -297,7 +297,7 @@ describe("concurrency per key", () => {
     const active = new Map<string, number>();
     let maxPerKey = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("conc-override", {
       concurrency: 10,
       concurrencyLimit: 1, // task default
@@ -331,7 +331,7 @@ describe("concurrency per key", () => {
   it("concurrency counter released on job failure", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("conc-fail", {
       concurrency: 5,
       concurrencyLimit: 1,
@@ -359,7 +359,7 @@ describe("concurrency per key", () => {
   it("different keys are independent", async () => {
     const startTimes: Record<string, number> = {};
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("conc-independent", {
       concurrency: 10,
       concurrencyLimit: 1,

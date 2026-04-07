@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { JobFailedError, TimeoutError, taskora } from "../../src/index.js";
+import { JobFailedError, TimeoutError, createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -17,7 +17,7 @@ afterEach(async () => {
 
 describe("ctx.progress", () => {
   it("reports numeric progress visible via handle.getProgress()", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("progress-num", {
       handler: async (_data: unknown, ctx) => {
@@ -44,7 +44,7 @@ describe("ctx.progress", () => {
   });
 
   it("reports object progress visible via handle.getProgress()", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("progress-obj", {
       handler: async (_data: unknown, ctx) => {
@@ -67,7 +67,7 @@ describe("ctx.progress", () => {
   });
 
   it("returns null when no progress reported", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("progress-none", {
       handler: async () => "done",
@@ -88,7 +88,7 @@ describe("ctx.progress", () => {
 
 describe("ctx.log", () => {
   it("logs queryable via handle.getLogs()", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("log-test", {
       handler: async (_data: unknown, ctx) => {
@@ -126,7 +126,7 @@ describe("ctx.log", () => {
   });
 
   it("returns empty array when no logs", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("log-empty", {
       handler: async () => "done",
@@ -149,7 +149,7 @@ describe("timeout", () => {
   it("aborts handler and fails job when timeout expires", async () => {
     let signalAborted = false;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("timeout-task", {
       timeout: 200,
@@ -183,7 +183,7 @@ describe("timeout", () => {
   it("timeout errors are not retried by default", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("timeout-no-retry", {
       timeout: 100,
@@ -211,7 +211,7 @@ describe("timeout", () => {
   });
 
   it("handler that finishes before timeout succeeds normally", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("timeout-ok", {
       timeout: 5_000,
@@ -237,7 +237,7 @@ describe("ctx.signal on shutdown", () => {
     let signalAborted = false;
     let handlerStarted = false;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("signal-test", {
       handler: async (_data: unknown, ctx) => {

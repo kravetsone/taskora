@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { JobFailedError, TimeoutError, taskora } from "../../src/index.js";
+import { JobFailedError, TimeoutError, createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { ResultHandle } from "../../src/result.js";
 import { url, waitFor as poll } from "../helpers.js";
@@ -20,7 +20,7 @@ afterEach(async () => {
 
 describe("ResultHandle", () => {
   it("dispatch returns a ResultHandle synchronously", () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("sync-handle", async (data: { x: number }) => data.x * 2);
 
     const handle = task.dispatch({ x: 5 });
@@ -33,7 +33,7 @@ describe("ResultHandle", () => {
   });
 
   it("await handle resolves to job id (ensures enqueued)", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("await-id", async () => "done");
 
     const handle = task.dispatch({});
@@ -50,7 +50,7 @@ describe("ResultHandle", () => {
   });
 
   it("handle.result resolves to handler output", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("get-result", async (data: { n: number }) => ({
       doubled: data.n * 2,
     }));
@@ -74,7 +74,7 @@ describe("ResultHandle", () => {
       finishHandler = r;
     });
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("state-check", async () => {
       resolveHandler();
       await handlerGate;
@@ -103,7 +103,7 @@ describe("ResultHandle", () => {
   });
 
   it("handle.waitFor() throws TimeoutError on timeout", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("timeout-task", async () => {
       await new Promise((r) => setTimeout(r, 10_000));
       return null;
@@ -118,7 +118,7 @@ describe("ResultHandle", () => {
   });
 
   it("handle.result rejects with JobFailedError for failed jobs", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("fail-result", async () => {
       throw new Error("something broke");
     });
@@ -141,7 +141,7 @@ describe("ResultHandle", () => {
   });
 
   it("works with Promise.all for multiple handles", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("promise-all", async (data: { n: number }) => data.n * 10);
 
     const handles = [task.dispatch({ n: 1 }), task.dispatch({ n: 2 }), task.dispatch({ n: 3 })];
@@ -161,7 +161,7 @@ describe("ResultHandle", () => {
   });
 
   it("dispatchMany returns ResultHandle array", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("bulk-handles", async (data: { name: string }) => ({
       greeting: `hi ${data.name}`,
     }));
@@ -184,7 +184,7 @@ describe("ResultHandle", () => {
   });
 
   it("delayed job handle tracks state through promotion", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("delayed-handle", async () => "delayed-done");
 
     const handle = task.dispatch({}, { delay: 300 });
@@ -203,7 +203,7 @@ describe("ResultHandle", () => {
   });
 
   it("getState returns null for non-existent job", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("phantom", async () => null);
 
     const handle = task.dispatch({});

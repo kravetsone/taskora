@@ -1,7 +1,7 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -20,7 +20,7 @@ afterEach(async () => {
 
 describe("version stamping", () => {
   it("dispatch stamps _v = task.version in job hash", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("versioned", {
       version: 3,
@@ -36,7 +36,7 @@ describe("version stamping", () => {
   });
 
   it("unversioned task dispatches with _v = 1", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("no-version", async (data: { x: number }) => data);
 
@@ -76,7 +76,7 @@ describe("migration — old version job processes correctly", () => {
     // Wake marker
     await redis.zadd("taskora:{email}:marker", "0", "0");
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("email", {
       input: z.object({
@@ -135,7 +135,7 @@ describe("migration — old version job processes correctly", () => {
     await redis.lpush("taskora:{sparse}:wait", jobId);
     await redis.zadd("taskora:{sparse}:marker", "0", "0");
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("sparse", {
       version: 4,
@@ -197,7 +197,7 @@ describe("migration — future version nack", () => {
 
     let handlerCalled = false;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("future", {
       version: 3,
@@ -251,7 +251,7 @@ describe("migration — expired version fail", () => {
     await redis.lpush("taskora:{expired}:wait", jobId);
     await redis.zadd("taskora:{expired}:marker", "0", "0");
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("expired", {
       version: 5,
@@ -284,7 +284,7 @@ describe("migration — expired version fail", () => {
 
 describe("inspect().migrations()", () => {
   it("returns version distribution across queue states", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("inspect-test", {
       version: 3,
@@ -367,7 +367,7 @@ describe("inspect().migrations()", () => {
   });
 
   it("throws for unknown task name", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     await app.ensureConnected();
 
     await expect(app.inspect().migrations("nonexistent")).rejects.toThrow(
@@ -378,7 +378,7 @@ describe("inspect().migrations()", () => {
   });
 
   it("empty queue returns task version as canBumpSince", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("empty-queue", {
       version: 5,

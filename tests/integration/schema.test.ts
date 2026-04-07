@@ -2,7 +2,7 @@ import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ValidationError } from "../../src/errors.js";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -19,7 +19,7 @@ afterEach(async () => {
 
 describe("schema validation — dispatch", () => {
   it("rejects invalid input before enqueue", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("validated", {
       input: z.object({ email: z.string().email() }),
@@ -36,7 +36,7 @@ describe("schema validation — dispatch", () => {
   });
 
   it("allows valid input through", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("validated-ok", {
       input: z.object({ email: z.string().email() }),
@@ -52,7 +52,7 @@ describe("schema validation — dispatch", () => {
 
 describe("schema validation — worker output", () => {
   it("fails job when handler returns invalid output", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("bad-output", {
       output: z.object({ id: z.string().uuid() }),
@@ -77,7 +77,7 @@ describe("schema validation — worker output", () => {
   });
 
   it("acks job when handler returns valid output", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("good-output", {
       input: z.object({ name: z.string() }),

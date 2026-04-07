@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import type { Taskora } from "../../src/types.js";
 import { url, waitFor } from "../helpers.js";
@@ -21,7 +21,7 @@ afterEach(async () => {
 describe("stall detection", () => {
   it("recovers a stalled job back to wait", async () => {
     // 1. Dispatch a job and start a worker that hangs forever (simulating a crash)
-    const app1 = taskora({ adapter: redisAdapter(url()) });
+    const app1 = createTaskora({ adapter: redisAdapter(url()) });
     let started = false;
 
     app1.task("stall-test", {
@@ -44,7 +44,7 @@ describe("stall detection", () => {
 
     // Better approach: use adapter directly to simulate crash scenario
     const adapter = redisAdapter(url());
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
 
     let processedCount = 0;
 
@@ -91,7 +91,7 @@ describe("stall detection", () => {
 
   it("fails a job after exceeding maxStalledCount", async () => {
     const adapter = redisAdapter(url());
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
 
     const task = app.task("stall-fail", {
       stall: { interval: 200, maxCount: 1 },
@@ -151,7 +151,7 @@ describe("stall detection", () => {
 
   it("healthy worker with heartbeat is never marked stalled", async () => {
     const adapter = redisAdapter(url());
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
 
     let jobFinished = false;
 
@@ -189,7 +189,7 @@ describe("stall detection", () => {
 
   it("emits stalled event on task and app", async () => {
     const adapter = redisAdapter(url());
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
 
     const stalledEvents: Taskora.StalledEvent[] = [];
     const appStalledEvents: Array<Taskora.StalledEvent & { task: string }> = [];
@@ -255,7 +255,7 @@ describe("stall detection", () => {
     const adapter = redisAdapter(url());
     await adapter.connect();
 
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
     app.task("stall-phase2", async () => null);
 
     // Manually place some IDs in the active list
@@ -281,7 +281,7 @@ describe("stall detection", () => {
     const adapter = redisAdapter(url());
     await adapter.connect();
 
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
     app.task("stall-extend", async () => null);
 
     const jobId = "test-job-id";
@@ -307,7 +307,7 @@ describe("stall detection", () => {
     const adapter = redisAdapter(url());
     await adapter.connect();
 
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
     app.task("stall-idempotent", async () => null);
 
     const jobId = "idem-job";

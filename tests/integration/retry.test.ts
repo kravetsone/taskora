@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { RetryError, taskora } from "../../src/index.js";
+import { RetryError, createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -19,7 +19,7 @@ describe("retries", () => {
   it("job fails then succeeds on retry", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("retry-succeed", {
       retry: { attempts: 3, backoff: "fixed", delay: 100, jitter: false },
@@ -49,7 +49,7 @@ describe("retries", () => {
   it("exhausts all attempts then fails permanently", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("retry-exhaust", {
       retry: { attempts: 3, backoff: "fixed", delay: 100, jitter: false },
@@ -78,7 +78,7 @@ describe("retries", () => {
   it("ctx.retry() overrides backoff delay", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("ctx-retry", {
       retry: { attempts: 3, backoff: "exponential", delay: 10_000, jitter: false },
@@ -107,7 +107,7 @@ describe("retries", () => {
   it("throw new RetryError() works same as ctx.retry()", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("raw-retry-error", {
       retry: { attempts: 3, backoff: "exponential", delay: 10_000, jitter: false },
@@ -141,7 +141,7 @@ describe("retries", () => {
 
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("no-retry-on", {
       retry: { attempts: 5, backoff: "fixed", delay: 100, noRetryOn: [AuthError], jitter: false },
@@ -176,7 +176,7 @@ describe("retries", () => {
 
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("retry-on", {
       retry: {
@@ -211,7 +211,7 @@ describe("retries", () => {
   it("job without retry config fails immediately", async () => {
     let attempts = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("no-retry", async () => {
       attempts++;
@@ -232,7 +232,7 @@ describe("retries", () => {
   });
 
   it("stores maxAttempts in job hash for observability", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("observe-max", {
       retry: { attempts: 5, backoff: "fixed", delay: 100, jitter: false },
@@ -252,7 +252,7 @@ describe("retries", () => {
     let attempts = 0;
     const states: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("state-transitions", {
       retry: { attempts: 2, backoff: "fixed", delay: 200, jitter: false },

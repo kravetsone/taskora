@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -19,7 +19,7 @@ afterEach(async () => {
 
 describe("inspector.stats()", () => {
   it("returns correct counts across states", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const processed: string[] = [];
 
     const task = app.task<string, string>("counter", async (data) => {
@@ -49,7 +49,7 @@ describe("inspector.stats()", () => {
   });
 
   it("stats({ task }) filters to a single task", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const taskA = app.task<string, string>("task-a", async (d) => d);
     const taskB = app.task<string, string>("task-b", async (d) => d);
@@ -79,7 +79,7 @@ describe("inspector.stats()", () => {
 
 describe("inspector list queries", () => {
   it("waiting() returns enqueued jobs", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task<{ n: number }, void>("list-test", async () => {
       // never processes — we don't start()
@@ -102,7 +102,7 @@ describe("inspector list queries", () => {
   });
 
   it("completed() returns finished jobs with results", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const processed: string[] = [];
 
     const t = app.task<string, { echo: string }>("echo", async (d) => {
@@ -129,7 +129,7 @@ describe("inspector list queries", () => {
   });
 
   it("failed() returns permanently failed jobs", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const failCount: number[] = [];
 
     app.task("fail-me", async () => {
@@ -157,7 +157,7 @@ describe("inspector list queries", () => {
   });
 
   it("delayed() returns delayed jobs", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("delayed-task", async (d) => d);
     t.dispatch("later", { delay: 60_000 });
@@ -173,7 +173,7 @@ describe("inspector list queries", () => {
   });
 
   it("list queries respect limit and offset", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<number, void>("limit-test", async () => {});
 
@@ -199,7 +199,7 @@ describe("inspector list queries", () => {
 
 describe("inspector.find()", () => {
   it("find(jobId) returns full job details with timeline", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<{ msg: string }, { ok: boolean }>("find-test", async (data, ctx) => {
       ctx.log.info("processing", { key: "value" });
@@ -240,7 +240,7 @@ describe("inspector.find()", () => {
   });
 
   it("find(task, jobId) returns typed result", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<{ x: number }, { doubled: number }>("typed-find", async (data) => {
       return { doubled: data.x * 2 };
@@ -264,7 +264,7 @@ describe("inspector.find()", () => {
   });
 
   it("find() returns null for non-existent job", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     app.task("noop", async () => {});
 
     const job = await app.inspect().find("non-existent-id");
@@ -278,7 +278,7 @@ describe("inspector.find()", () => {
 
 describe("dead letter queue", () => {
   it("permanently failed job appears in deadLetters.list()", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<null, void>("dlq-fail", async () => {
       throw new Error("kaboom");
@@ -301,7 +301,7 @@ describe("dead letter queue", () => {
 
   it("deadLetters.retry(jobId) re-enqueues a failed job", async () => {
     let attempt = 0;
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<null, string>("dlq-retry", async () => {
       attempt++;
@@ -335,7 +335,7 @@ describe("dead letter queue", () => {
 
   it("deadLetters.retry(jobId) cross-task search", async () => {
     let attempt = 0;
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<null, string>("dlq-cross", async () => {
       attempt++;
@@ -366,7 +366,7 @@ describe("dead letter queue", () => {
   it("deadLetters.retryAll() re-enqueues all failed jobs", async () => {
     let failCount = 0;
     let successCount = 0;
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<number, void>("dlq-retry-all", async (n) => {
       if (failCount < 3) {
@@ -399,7 +399,7 @@ describe("dead letter queue", () => {
   });
 
   it("deadLetters.retry() returns false for non-existent job", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     app.task("dlq-noop", async () => {});
 
     const retried = await app.deadLetters.retry("non-existent");
@@ -414,7 +414,7 @@ describe("dead letter queue", () => {
 describe("DLQ maxAge retention", () => {
   it("trimDLQ removes jobs older than maxAge", async () => {
     const adapter = redisAdapter(url());
-    const app = taskora({ adapter });
+    const app = createTaskora({ adapter });
 
     const t = app.task<null, void>("dlq-trim", async () => {
       throw new Error("fail");

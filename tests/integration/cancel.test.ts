@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CancelledError, taskora } from "../../src/index.js";
+import { CancelledError, createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -17,7 +17,7 @@ afterEach(async () => {
 
 describe("graceful cancellation", () => {
   it("cancel waiting job → state is 'cancelled'", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-wait", {
       handler: async (data) => data,
@@ -47,7 +47,7 @@ describe("graceful cancellation", () => {
   });
 
   it("cancel delayed job → state is 'cancelled'", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-delayed", {
       handler: async (data) => data,
@@ -77,7 +77,7 @@ describe("graceful cancellation", () => {
 
   it("cancel retrying job → state is 'cancelled'", async () => {
     let attempts = 0;
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-retrying", {
       retry: { attempts: 3, delay: 60_000 },
@@ -106,7 +106,7 @@ describe("graceful cancellation", () => {
   });
 
   it("cancel completed job → not cancellable (no-op)", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-completed", {
       handler: async (data) => data,
@@ -138,7 +138,7 @@ describe("graceful cancellation", () => {
       handlerStartResolve = r;
     });
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-active", {
       timeout: 30_000,
@@ -195,7 +195,7 @@ describe("graceful cancellation", () => {
       handlerStartResolve2 = r;
     });
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<{ importId: string }, string>("cancel-hook", {
       timeout: 30_000,
@@ -240,7 +240,7 @@ describe("graceful cancellation", () => {
     const taskEvents: Array<{ id: string; reason?: string }> = [];
     const appEvents: Array<{ id: string; reason?: string; task: string }> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-events", {
       handler: async (data) => data,
@@ -271,7 +271,7 @@ describe("graceful cancellation", () => {
   });
 
   it("inspector.cancelled() lists cancelled jobs", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-inspect", {
       handler: async (data) => data,
@@ -301,7 +301,7 @@ describe("graceful cancellation", () => {
   });
 
   it("waitFor() on cancelled job throws CancelledError", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-wait-for", {
       handler: async (data) => data,
@@ -318,7 +318,7 @@ describe("graceful cancellation", () => {
   });
 
   it("cancel preserves cancelReason in job hash", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const t = app.task<string, string>("cancel-reason", {
       handler: async (data) => data,

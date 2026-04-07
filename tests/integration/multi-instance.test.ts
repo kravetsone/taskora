@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import type { App } from "../../src/app.js";
 import { url, waitFor } from "../helpers.js";
@@ -8,8 +8,8 @@ import { url, waitFor } from "../helpers.js";
 let redis: Redis;
 const apps: App[] = [];
 
-function createApp(opts?: Parameters<typeof taskora>[0]) {
-  const app = taskora({ adapter: redisAdapter(url()), ...opts });
+function createApp(opts?: Parameters<typeof createTaskora>[0]) {
+  const app = createTaskora({ adapter: redisAdapter(url()), ...opts });
   apps.push(app);
   return app;
 }

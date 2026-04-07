@@ -36,6 +36,6 @@ export {
 
 import { App, type TaskoraOptions } from "./app.js";
 
-export function taskora(options: TaskoraOptions) {
+export function createTaskora(options: TaskoraOptions) {
   return new App(options);
 }

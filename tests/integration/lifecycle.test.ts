@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -21,7 +21,7 @@ describe("job lifecycle", () => {
   it("dispatch → process → complete", async () => {
     const processed: Array<{ to: string }> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const sendEmail = app.task("send-email", async (data: { to: string }) => {
       processed.push(data);
@@ -51,7 +51,7 @@ describe("job lifecycle", () => {
   });
 
   it("dispatch → process → fail (error in handler)", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("failing-task", async () => {
       throw new Error("boom");
@@ -80,7 +80,7 @@ describe("job lifecycle", () => {
   it("processes multiple jobs sequentially (concurrency=1)", async () => {
     const order: number[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("sequential", async (data: { n: number }) => {
       order.push(data.n);
@@ -106,7 +106,7 @@ describe("delayed jobs", () => {
   it("promotes and processes after delay", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("delayed-task", async (data: { msg: string }) => {
       processed.push(data.msg);
@@ -143,7 +143,7 @@ describe("concurrency", () => {
     const processedIds = new Set<string>();
     let duplicates = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("concurrent", {
       concurrency: 5,
@@ -180,7 +180,7 @@ describe("graceful shutdown", () => {
     let jobStarted = false;
     let jobFinished = false;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("slow-task", async () => {
       jobStarted = true;
@@ -215,7 +215,7 @@ describe("bulk dispatch", () => {
   it("dispatchMany enqueues all jobs", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const task = app.task("bulk", async (data: { name: string }) => {
       processed.push(data.name);
@@ -244,7 +244,7 @@ describe("bulk dispatch", () => {
 
 describe("connection modes", () => {
   it("accepts a connection URL string", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("url-test", async () => null);
     const handle = task.dispatch({});
     await handle;
@@ -254,7 +254,7 @@ describe("connection modes", () => {
   it("accepts a RedisOptions object", async () => {
     // Parse URL to get host/port
     const u = new URL(url());
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter({
         host: u.hostname,
         port: Number(u.port),
@@ -268,7 +268,7 @@ describe("connection modes", () => {
 
   it("accepts an existing ioredis instance", async () => {
     const client = new Redis(url());
-    const app = taskora({ adapter: redisAdapter(client) });
+    const app = createTaskora({ adapter: redisAdapter(client) });
     const task = app.task("instance-test", async () => null);
     const handle = task.dispatch({});
     await handle;

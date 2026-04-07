@@ -83,6 +83,9 @@ src/
 
 ## Conventions
 
+- Factory: `createTaskora()` — returns `App` instance, named `taskora` by convention
+- Task variables: `*Task` suffix — `sendEmailTask`, `processImageTask`
+- Task string names: kebab-case — `"send-email"`, `"process-image"`
 - All public types live under the `Taskora` namespace — `import type { Taskora } from "taskora"`
 - Adapter interface is the abstraction boundary — core never imports ioredis/pg directly
 - Every multi-step Redis state transition MUST be a Lua script (atomicity)

@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DuplicateJobError, ThrottledError, taskora } from "../../src/index.js";
+import { DuplicateJobError, ThrottledError, createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -21,7 +21,7 @@ describe("debounce", () => {
   it("5 rapid dispatches — only the last one runs", async () => {
     const processed: number[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("debounce-test", async (data: { n: number }) => {
       processed.push(data.n);
     });
@@ -51,7 +51,7 @@ describe("debounce", () => {
   });
 
   it("debounce replaces previous job data", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("debounce-data", async (data: { value: string }) => {
       return data.value;
     });
@@ -82,7 +82,7 @@ describe("debounce", () => {
   it("different debounce keys are independent", async () => {
     const processed: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("debounce-multi", async (data: { key: string }) => {
       processed.push(data.key);
     });
@@ -107,7 +107,7 @@ describe("throttle", () => {
   it("allows up to max dispatches, drops excess", async () => {
     const processed: number[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("throttle-test", async (data: { n: number }) => {
       processed.push(data.n);
     });
@@ -142,7 +142,7 @@ describe("throttle", () => {
   });
 
   it("throttle window resets after expiry", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("throttle-reset", async (data: { n: number }) => {
       return data.n;
     });
@@ -184,7 +184,7 @@ describe("throttle", () => {
   });
 
   it("throwOnReject throws ThrottledError", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("throttle-throw", async () => {});
 
     await task.dispatch(
@@ -208,7 +208,7 @@ describe("throttle", () => {
   });
 
   it("different throttle keys are independent", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("throttle-multi", async () => {});
 
     const h1 = task.dispatch(
@@ -239,7 +239,7 @@ describe("deduplication", () => {
   it("second dispatch returns existing handle", async () => {
     const processed: number[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-test", async (data: { n: number }) => {
       processed.push(data.n);
       return data.n;
@@ -276,7 +276,7 @@ describe("deduplication", () => {
   });
 
   it("dedup handle redirects to existing job for getState/result", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-redirect", async (data: { n: number }) => {
       return data.n * 10;
     });
@@ -310,7 +310,7 @@ describe("deduplication", () => {
   it("dedup key clears after job completes — re-dispatch works", async () => {
     const processed: number[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-clear", async (data: { n: number }) => {
       processed.push(data.n);
       return data.n;
@@ -347,7 +347,7 @@ describe("deduplication", () => {
   });
 
   it("dedup while option — only blocks in specified states", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-while", async (data: { n: number }) => {
       // Slow handler to keep job active
       await new Promise((r) => setTimeout(r, 500));
@@ -385,7 +385,7 @@ describe("deduplication", () => {
   });
 
   it("throwOnReject throws DuplicateJobError", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-throw", async () => {});
 
     await task.dispatch(
@@ -411,7 +411,7 @@ describe("deduplication", () => {
   it("dedup key clears on permanent failure — re-dispatch works", async () => {
     let callCount = 0;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task("dedup-fail-clear", async () => {
       callCount++;
       if (callCount === 1) throw new Error("fail");

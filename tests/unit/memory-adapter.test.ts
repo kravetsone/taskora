@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { memoryAdapter } from "../../src/memory/index.js";
 
 describe("memoryAdapter", () => {
   it("works as a drop-in adapter for App", async () => {
-    const app = taskora({ adapter: memoryAdapter() });
+    const app = createTaskora({ adapter: memoryAdapter() });
     const task = app.task("greet", async (data: { name: string }) => ({
       greeting: `Hello, ${data.name}!`,
     }));

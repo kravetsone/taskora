@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -19,7 +19,7 @@ afterEach(async () => {
 
 describe("task events", () => {
   it("emits 'completed' with typed result", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{
       id: string;
       result: { ok: boolean };
@@ -49,7 +49,7 @@ describe("task events", () => {
   });
 
   it("emits 'failed' on permanent failure", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ id: string; error: string; willRetry: boolean }> = [];
 
     const failing = app.task("failing", async () => {
@@ -72,7 +72,7 @@ describe("task events", () => {
   });
 
   it("emits 'failed' with willRetry=true and 'retrying' on retry", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const failedEvents: Array<{ willRetry: boolean; attempt: number }> = [];
     const retryingEvents: Array<{ attempt: number; nextAttempt: number; error: string }> = [];
 
@@ -109,7 +109,7 @@ describe("task events", () => {
   });
 
   it("emits 'active' when job starts processing", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ id: string; attempt: number }> = [];
 
     const myTask = app.task("active-task", async () => "done");
@@ -130,7 +130,7 @@ describe("task events", () => {
   });
 
   it("emits 'progress' when handler reports progress", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ id: string; progress: number | Record<string, unknown> }> = [];
 
     const myTask = app.task("progress-task", async (_data, ctx) => {
@@ -159,7 +159,7 @@ describe("task events", () => {
 
 describe("app events", () => {
   it("emits 'task:completed' for any task", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ task: string; id: string }> = [];
 
     app.on("task:completed", (event) => {
@@ -182,7 +182,7 @@ describe("app events", () => {
   });
 
   it("emits 'task:failed' for any task failure", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ task: string; error: string }> = [];
 
     app.on("task:failed", (event) => {
@@ -205,7 +205,7 @@ describe("app events", () => {
   });
 
   it("emits 'task:active' when job starts processing", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ task: string; id: string }> = [];
 
     app.on("task:active", (event) => {
@@ -225,7 +225,7 @@ describe("app events", () => {
   });
 
   it("emits 'worker:ready' on start", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     let ready = false;
 
     app.on("worker:ready", () => {
@@ -241,7 +241,7 @@ describe("app events", () => {
   });
 
   it("emits 'worker:closing' on close", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     let closing = false;
 
     app.on("worker:closing", () => {
@@ -260,7 +260,7 @@ describe("app events", () => {
 
 describe("event edge cases", () => {
   it("unsubscribe removes handler", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: string[] = [];
 
     const myTask = app.task<unknown, string>("unsub-task", async () => "done");
@@ -286,7 +286,7 @@ describe("event edge cases", () => {
   });
 
   it("default error logger fires when no failed listener is registered", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const failing = app.task("default-log", async () => {
       throw new Error("unhandled boom");
@@ -312,7 +312,7 @@ describe("event edge cases", () => {
   });
 
   it("default error logger is suppressed when task.on('failed') is registered", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const failedEvents: Array<{ error: string }> = [];
 
     const failing = app.task("suppressed-log", async () => {
@@ -343,7 +343,7 @@ describe("event edge cases", () => {
   });
 
   it("default error logger is suppressed when app.on('task:failed') is registered", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const appFailedEvents: Array<{ error: string }> = [];
 
     const failing = app.task("app-suppressed-log", async () => {
@@ -371,7 +371,7 @@ describe("event edge cases", () => {
   });
 
   it("default error logger shows retry info", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.task("retry-log", {
       retry: { attempts: 3, delay: 50 },
@@ -410,7 +410,7 @@ describe("event edge cases", () => {
   });
 
   it("task.on() called after app.start() still works", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const events: Array<{ id: string }> = [];
 
     const myTask = app.task<unknown, string>("late-sub", async () => "done");

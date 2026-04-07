@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -21,7 +21,7 @@ describe("interval schedules", () => {
   it("fires on interval", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -47,7 +47,7 @@ describe("interval schedules", () => {
   it("inline schedule on task definition", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -74,7 +74,7 @@ describe("cron schedules", () => {
   it("registers and dispatches cron schedule", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -104,7 +104,7 @@ describe("pause and resume", () => {
   it("paused schedule does not fire", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -146,7 +146,7 @@ describe("overlap prevention", () => {
     let dispatchCount = 0;
     let resolveFirst: (() => void) | null = null;
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -193,11 +193,11 @@ describe("leader election", () => {
     const processed1: string[] = [];
     const processed2: string[] = [];
 
-    const app1 = taskora({
+    const app1 = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 200 },
     });
-    const app2 = taskora({
+    const app2 = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 200 },
     });
@@ -239,7 +239,7 @@ describe("missed run catch-up", () => {
   it("catch-up dispatches multiple jobs for missed runs", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -281,7 +281,7 @@ describe("missed run catch-up", () => {
   it("catch-up-limit caps missed dispatches", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -327,7 +327,7 @@ describe("missed run catch-up", () => {
 
 describe("runtime management", () => {
   it("list returns all schedules", async () => {
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -349,7 +349,7 @@ describe("runtime management", () => {
   });
 
   it("update changes schedule config", async () => {
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -370,7 +370,7 @@ describe("runtime management", () => {
   });
 
   it("remove deletes schedule", async () => {
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });
@@ -391,7 +391,7 @@ describe("runtime management", () => {
   it("trigger fires immediately outside schedule", async () => {
     const processed: number[] = [];
 
-    const app = taskora({
+    const app = createTaskora({
       adapter: redisAdapter(url()),
       scheduler: { pollInterval: 100 },
     });

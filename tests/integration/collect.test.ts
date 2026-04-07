@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import { url, waitFor } from "../helpers.js";
 
@@ -21,7 +21,7 @@ describe("collect", () => {
   it("accumulates dispatches and flushes after delay", async () => {
     const batches: Array<Array<{ n: number }>> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task<{ n: number }, void>("collect-basic", {
       collect: {
         key: "all",
@@ -52,7 +52,7 @@ describe("collect", () => {
   it("dynamic key groups items separately", async () => {
     const batches: Array<Array<{ group: string; n: number }>> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task<{ group: string; n: number }, void>("collect-key", {
       collect: {
         key: (d) => d.group,
@@ -87,7 +87,7 @@ describe("collect", () => {
   it("maxSize triggers immediate flush before delay", async () => {
     const batches: Array<Array<{ n: number }>> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task<{ n: number }, void>("collect-maxsize", {
       collect: {
         key: "all",
@@ -118,7 +118,7 @@ describe("collect", () => {
   it("maxWait caps the debounce window", async () => {
     const batches: Array<Array<{ n: number }>> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task<{ n: number }, void>("collect-maxwait", {
       collect: {
         key: "all",
@@ -151,7 +151,7 @@ describe("collect", () => {
     let attempts = 0;
     const batches: Array<Array<{ n: number }>> = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const task = app.task<{ n: number }, void>("collect-retry", {
       collect: {
         key: "all",

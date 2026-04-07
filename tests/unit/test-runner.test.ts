@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { memoryAdapter } from "../../src/memory/index.js";
 import { createTestRunner } from "../../src/test/index.js";
 
@@ -227,7 +227,7 @@ describe("createTestRunner", () => {
 
   it("importTask() copies production task to memory adapter", async () => {
     // Simulate a "production" app with its own adapter
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     const prodTask = prodApp.task("greet", {
       retry: { attempts: 2, backoff: "fixed", delay: 100, jitter: false },
       handler: async (data: { name: string }) => ({
@@ -244,7 +244,7 @@ describe("createTestRunner", () => {
   });
 
   it("importTask() enables dispatch + advanceTime on imported task", async () => {
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     const prodTask = prodApp.task("compute", async (data: { x: number }) => ({
       doubled: data.x * 2,
     }));
@@ -261,7 +261,7 @@ describe("createTestRunner", () => {
   });
 
   it("importTask() preserves retry config", async () => {
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     let attempts = 0;
     const prodTask = prodApp.task("flaky-prod", {
       retry: { attempts: 3, backoff: "fixed", delay: 100, jitter: false },
@@ -281,7 +281,7 @@ describe("createTestRunner", () => {
   });
 
   it("importTask() throws if task name already registered", () => {
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     const prodTask = prodApp.task("dup", async () => null);
 
     const runner = createTestRunner();
@@ -345,7 +345,7 @@ describe("createTestRunner", () => {
   });
 
   it("execute() auto-imports unregistered task", async () => {
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     const prodTask = prodApp.task("auto-import", async (data: { v: number }) => ({
       result: data.v * 3,
     }));
@@ -359,7 +359,7 @@ describe("createTestRunner", () => {
   // ── from: app (full app testing) ───────────────────────────────────
 
   it("from: app — interconnected tasks all run in memory", async () => {
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     const results: string[] = [];
 
     const step1 = prodApp.task("step1", async (data: { msg: string }) => {
@@ -388,7 +388,7 @@ describe("createTestRunner", () => {
 
   it("from: app — dispose restores original adapter", async () => {
     const originalAdapter = memoryAdapter();
-    const prodApp = taskora({ adapter: originalAdapter });
+    const prodApp = createTaskora({ adapter: originalAdapter });
     const task = prodApp.task("restore-test", async () => "ok");
 
     const runner = createTestRunner({ from: prodApp });
@@ -406,7 +406,7 @@ describe("createTestRunner", () => {
   });
 
   it("from: app — three-level task chain", async () => {
-    const prodApp = taskora({ adapter: memoryAdapter() });
+    const prodApp = createTaskora({ adapter: memoryAdapter() });
     const log: string[] = [];
 
     const taskA = prodApp.task("a", async () => {

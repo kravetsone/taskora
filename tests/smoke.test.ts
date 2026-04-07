@@ -2,9 +2,9 @@ import Redis from "ioredis";
 import { describe, expect, it } from "vitest";
 
 describe("smoke", () => {
-  it("imports taskora factory from main entrypoint", async () => {
-    const { taskora } = await import("../src/index.js");
-    expect(typeof taskora).toBe("function");
+  it("imports createTaskora factory from main entrypoint", async () => {
+    const { createTaskora } = await import("../src/index.js");
+    expect(typeof createTaskora).toBe("function");
   });
 
   it("imports redisAdapter from redis entrypoint", async () => {

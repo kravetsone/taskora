@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskora } from "../../src/index.js";
+import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../../src/redis/index.js";
 import type { Taskora } from "../../src/types.js";
 import { url, waitFor } from "../helpers.js";
@@ -20,7 +20,7 @@ describe("middleware", () => {
   it("app-level middleware wraps all tasks", async () => {
     const calls: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.use(async (ctx, next) => {
       calls.push(`mw:${ctx.task.name}:enter`);
@@ -63,7 +63,7 @@ describe("middleware", () => {
       await next();
     };
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     const withMw = app.task("with-mw", {
       middleware: [taskMw],
@@ -96,7 +96,7 @@ describe("middleware", () => {
   it("execution order: app middleware → task middleware → handler", async () => {
     const order: string[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.use(async (_ctx, next) => {
       order.push("app-mw:enter");
@@ -137,7 +137,7 @@ describe("middleware", () => {
   it("middleware can access and modify ctx.data", async () => {
     let handlerData: unknown;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.use(async (ctx, next) => {
       ctx.data = { ...(ctx.data as Record<string, unknown>), enriched: true };
@@ -162,7 +162,7 @@ describe("middleware", () => {
   it("middleware can read ctx.result after next()", async () => {
     let capturedResult: unknown;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.use(async (ctx, next) => {
       await next();
@@ -184,7 +184,7 @@ describe("middleware", () => {
   });
 
   it("middleware can modify ctx.result (transform output)", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const results: unknown[] = [];
 
     app.use(async (ctx, next) => {
@@ -212,7 +212,7 @@ describe("middleware", () => {
   });
 
   it("middleware error propagates and fails the job", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     const errors: string[] = [];
 
     app.use(async () => {
@@ -240,7 +240,7 @@ describe("middleware", () => {
   it("middleware has access to ctx.id, ctx.attempt, ctx.task.name", async () => {
     let captured: { id: string; attempt: number; taskName: string } | undefined;
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.use(async (ctx, next) => {
       captured = {
@@ -267,7 +267,7 @@ describe("middleware", () => {
   });
 
   it("cannot add middleware after app.start()", async () => {
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
     app.task("dummy", async () => "ok");
 
     await app.start();
@@ -282,7 +282,7 @@ describe("middleware", () => {
   it("multiple app middleware execute in registration order", async () => {
     const order: number[] = [];
 
-    const app = taskora({ adapter: redisAdapter(url()) });
+    const app = createTaskora({ adapter: redisAdapter(url()) });
 
     app.use(async (_ctx, next) => {
       order.push(1);
