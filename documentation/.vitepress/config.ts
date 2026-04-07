@@ -121,6 +121,7 @@ export default defineConfig({
             { text: "Adapters", link: "/guide/adapters" },
             { text: "Serializers", link: "/guide/serializers" },
             { text: "Error Handling", link: "/guide/error-handling" },
+            { text: "Conventions", link: "/guide/conventions" },
           ],
         },
       ],
