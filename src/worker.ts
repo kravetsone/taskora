@@ -318,6 +318,12 @@ export class Worker {
           await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
         } catch {
           // fail() itself failed (e.g. lock expired)
+          return;
+        }
+
+        // Fail workflow if permanent failure (no retry)
+        if (!retryInfo) {
+          await this.failWorkflow(raw.id, errorMsg);
         }
         return;
       }
@@ -329,12 +335,16 @@ export class Worker {
       }
 
       // Handler succeeded — ack the job
+      const serializedResult = this.serializer.serialize(handlerResult);
       try {
-        const serializedResult = this.serializer.serialize(handlerResult);
         await this.adapter.ack(this.task.name, raw.id, token, serializedResult);
       } catch {
         // ack failed (e.g. lock expired) — job may be retried by stall detection
+        return;
       }
+
+      // Advance workflow if this job is part of one
+      await this.advanceWorkflow(raw.id, serializedResult);
     })();
 
     const tracked = promise.finally(() => {
@@ -386,6 +396,53 @@ export class Worker {
       await this.adapter.finishCancel(this.task.name, jobId, token);
     } catch {
       // finishCancel failed — stall check will handle it
+    }
+  }
+
+  private async advanceWorkflow(jobId: string, result: string): Promise<void> {
+    try {
+      const meta = await this.adapter.getWorkflowMeta(this.task.name, jobId);
+      if (!meta) return;
+
+      const { toDispatch } = await this.adapter.advanceWorkflow(
+        meta.workflowId,
+        meta.nodeIndex,
+        result,
+      );
+
+      for (const node of toDispatch) {
+        await this.adapter.enqueue(node.taskName, node.jobId, node.data, {
+          _v: node._v,
+          _wf: meta.workflowId,
+          _wfNode: node.nodeIndex,
+        });
+      }
+    } catch {
+      // Workflow advance failed — individual jobs still completed
+    }
+  }
+
+  private async failWorkflow(jobId: string, error: string): Promise<void> {
+    try {
+      const meta = await this.adapter.getWorkflowMeta(this.task.name, jobId);
+      if (!meta) return;
+
+      const { activeJobIds } = await this.adapter.failWorkflow(
+        meta.workflowId,
+        meta.nodeIndex,
+        error,
+      );
+
+      // Cascade cancel active jobs
+      for (const { task, jobId: jid } of activeJobIds) {
+        try {
+          await this.adapter.cancel(task, jid, "workflow failed");
+        } catch {
+          // Job may have already finished
+        }
+      }
+    } catch {
+      // Workflow fail notification failed
     }
   }
 

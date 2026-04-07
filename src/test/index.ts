@@ -38,6 +38,7 @@ export class TestRunner {
   private readonly serializer: Taskora.Serializer;
   private readonly restoreFns: Array<() => void> = [];
   private timeOffset = 0;
+  private workflowSteps: Array<{ workflowId: string; nodeIndex: number; taskName: string; state: string }> = [];
 
   constructor(options?: TestRunnerOptions) {
     this.backend = new MemoryBackend({
@@ -301,15 +302,16 @@ export class TestRunner {
     return this.backend.getAllJobs();
   }
 
-  /** Placeholder for future workflow steps. */
-  get steps(): unknown[] {
-    return [];
+  /** Workflow step execution history. */
+  get steps(): Array<{ workflowId: string; nodeIndex: number; taskName: string; state: string }> {
+    return [...this.workflowSteps];
   }
 
   /** Reset all in-memory state between tests. */
   clear(): void {
     this.backend.clear();
     this.timeOffset = 0;
+    this.workflowSteps = [];
   }
 
   /** Restore original adapters when using `from` mode. Call in afterEach. */
@@ -320,6 +322,76 @@ export class TestRunner {
     this.restoreFns.length = 0;
     this.backend.clear();
     this.timeOffset = 0;
+    this.workflowSteps = [];
+  }
+
+  // ── Workflow helpers ──
+
+  private async advanceWorkflowStep(
+    taskName: string,
+    jobId: string,
+    result: string,
+    state: string,
+  ): Promise<void> {
+    try {
+      const meta = await this.backend.getWorkflowMeta(taskName, jobId);
+      if (!meta) return;
+
+      this.workflowSteps.push({
+        workflowId: meta.workflowId,
+        nodeIndex: meta.nodeIndex,
+        taskName,
+        state,
+      });
+
+      const { toDispatch } = await this.backend.advanceWorkflow(
+        meta.workflowId,
+        meta.nodeIndex,
+        result,
+      );
+
+      for (const node of toDispatch) {
+        await this.backend.enqueue(node.taskName, node.jobId, node.data, {
+          _v: node._v,
+          _wf: meta.workflowId,
+          _wfNode: node.nodeIndex,
+        });
+      }
+    } catch {
+      // Workflow advance failed
+    }
+  }
+
+  private async failWorkflowStep(
+    taskName: string,
+    jobId: string,
+    error: string,
+  ): Promise<void> {
+    try {
+      const meta = await this.backend.getWorkflowMeta(taskName, jobId);
+      if (!meta) return;
+
+      this.workflowSteps.push({
+        workflowId: meta.workflowId,
+        nodeIndex: meta.nodeIndex,
+        taskName,
+        state: "failed",
+      });
+
+      const { activeJobIds } = await this.backend.failWorkflow(
+        meta.workflowId,
+        meta.nodeIndex,
+        error,
+      );
+
+      for (const { task, jobId: jid } of activeJobIds) {
+        try {
+          await this.backend.cancel(task, jid, "workflow failed");
+        } catch {}
+      }
+    } catch {
+      // Workflow fail notification failed
+    }
   }
 
   // ── Internal ──
@@ -453,6 +525,9 @@ export class TestRunner {
 
       const serializedResult = this.serializer.serialize(handlerResult);
       await this.backend.ack(task.name, raw.id, token, serializedResult);
+
+      // Advance workflow if part of one
+      await this.advanceWorkflowStep(task.name, raw.id, serializedResult, "completed");
     } catch (err) {
       if (controller.signal.aborted && controller.signal.reason === "cancelled") {
         if (task.config.onCancel && ctx) {
@@ -486,6 +561,11 @@ export class TestRunner {
       }
 
       await this.backend.fail(task.name, raw.id, token, errorMsg, retryInfo);
+
+      // Fail workflow on permanent failure
+      if (!retryInfo) {
+        await this.failWorkflowStep(task.name, raw.id, errorMsg);
+      }
     } finally {
       if (cancelUnsub) cancelUnsub();
     }
