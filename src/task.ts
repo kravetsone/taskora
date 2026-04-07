@@ -7,6 +7,10 @@ import { ResultHandle } from "./result.js";
 import { parseDuration } from "./scheduler/duration.js";
 import { validateSchema } from "./schema.js";
 import type { Taskora } from "./types.js";
+import { Signature, type AnySignature } from "./workflow/signature.js";
+import { chain as chainFn } from "./workflow/chain.js";
+import { group as groupFn } from "./workflow/group.js";
+import type { WorkflowHandle } from "./workflow/handle.js";
 
 type MigrationFn = (data: unknown) => unknown;
 
@@ -81,6 +85,34 @@ export class Task<TInput, TOutput> {
     this.since = resolved.since;
     this.migrations = normalizeMigrations(migrationConfig?.migrate, resolved.since);
     this.middleware = middleware ?? [];
+  }
+
+  /** @internal — used by workflow dispatch to extract adapter/serializer */
+  _getDeps(): TaskDeps {
+    return this.deps;
+  }
+
+  /** Create a Signature — a composable snapshot of this task invocation. */
+  s(data?: TInput): Signature<TInput, TOutput> {
+    return new Signature(this, data);
+  }
+
+  /** Dispatch one job per item in parallel. Sugar for group(...items.map(i => task.s(i))). */
+  map(items: TInput[]): WorkflowHandle<TOutput[]> {
+    const sigs = items.map((item) => this.s(item));
+    return groupFn(...sigs).dispatch() as WorkflowHandle<TOutput[]>;
+  }
+
+  /** Split items into chunks, process each chunk as a parallel group, chunks run sequentially. */
+  chunk(items: TInput[], options: { size: number }): WorkflowHandle<TOutput[]> {
+    const chunks: AnySignature[] = [];
+    for (let i = 0; i < items.length; i += options.size) {
+      const slice = items.slice(i, i + options.size);
+      const sigs = slice.map((item) => this.s(item));
+      chunks.push(groupFn(...sigs));
+    }
+    if (chunks.length === 1) return chunks[0].dispatch() as WorkflowHandle<TOutput[]>;
+    return chainFn(...chunks).dispatch() as WorkflowHandle<TOutput[]>;
   }
 
   /** @internal — used by TestRunner to swap adapter for testing */

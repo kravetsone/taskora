@@ -20,6 +20,19 @@ export { DeadLetterManager } from "./dlq.js";
 export { into } from "./migration.js";
 export { compose } from "./middleware.js";
 export { parseDuration, type Duration } from "./scheduler/duration.js";
+export {
+  Signature,
+  ChainSignature,
+  GroupSignature,
+  ChordSignature,
+  WorkflowHandle,
+  chain,
+  group,
+  chord,
+  type WorkflowDispatchOptions,
+  type WorkflowGraph,
+  type WorkflowNode,
+} from "./workflow/index.js";
 
 import { App, type TaskoraOptions } from "./app.js";
 

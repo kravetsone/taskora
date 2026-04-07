@@ -223,6 +223,8 @@ export namespace Taskora {
         expireAt?: number;
         concurrencyKey?: string;
         concurrencyLimit?: number;
+        _wf?: string;
+        _wfNode?: number;
       } & DispatchOptions,
     ): Promise<void>;
     debounceEnqueue(
@@ -371,6 +373,28 @@ export namespace Taskora {
     resumeSchedule(name: string, nextRun: number): Promise<void>;
     acquireSchedulerLock(token: string, ttl: number): Promise<boolean>;
     renewSchedulerLock(token: string, ttl: number): Promise<boolean>;
+
+    // Workflows
+    createWorkflow(workflowId: string, graph: string): Promise<void>;
+    advanceWorkflow(
+      workflowId: string,
+      nodeIndex: number,
+      result: string,
+    ): Promise<WorkflowAdvanceResult>;
+    failWorkflow(
+      workflowId: string,
+      nodeIndex: number,
+      error: string,
+    ): Promise<WorkflowFailResult>;
+    getWorkflowState(workflowId: string): Promise<string | null>;
+    cancelWorkflow(
+      workflowId: string,
+      reason?: string,
+    ): Promise<WorkflowCancelResult>;
+    getWorkflowMeta(
+      task: string,
+      jobId: string,
+    ): Promise<{ workflowId: string; nodeIndex: number } | null>;
   }
 
   export interface AwaitJobResult {
@@ -482,5 +506,29 @@ export namespace Taskora {
     name: string;
     config: string;
     nextRun: number | null;
+  }
+
+  // ── Workflows ────────────────────────────────────────────────────
+
+  export type WorkflowState = "running" | "completed" | "failed" | "cancelled";
+
+  export interface WorkflowAdvanceResult {
+    toDispatch: Array<{
+      nodeIndex: number;
+      taskName: string;
+      data: string;
+      jobId: string;
+      _v: number;
+    }>;
+    completed: boolean;
+    result?: string;
+  }
+
+  export interface WorkflowFailResult {
+    activeJobIds: Array<{ task: string; jobId: string }>;
+  }
+
+  export interface WorkflowCancelResult {
+    activeJobIds: Array<{ task: string; jobId: string }>;
   }
 }
