@@ -45,22 +45,22 @@ features:
 :::
 
 ```ts
-import { taskora } from "taskora"
+import { createTaskora } from "taskora"
 import { redisAdapter } from "taskora/redis"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
 })
 
-const sendEmail = app.task("send-email", async (data: { to: string; subject: string }) => {
+const sendEmailTask = taskora.task("send-email", async (data: { to: string; subject: string }) => {
   // your email logic here
   return { messageId: "abc-123" }
 })
 
 // Dispatch returns immediately — type-safe input and output
-const handle = sendEmail.dispatch({ to: "user@example.com", subject: "Hello" })
+const handle = sendEmailTask.dispatch({ to: "user@example.com", subject: "Hello" })
 const result = await handle.result // { messageId: "abc-123" }
 
 // Start processing
-await app.start()
+await taskora.start()
 ```

@@ -5,37 +5,37 @@ Taskora provides a typed event system for real-time job monitoring. Events are e
 ## Task Events
 
 ```ts
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   handler: async (data, ctx) => { /* ... */ },
 })
 
-sendEmail.on("completed", ({ id, result, duration, attempt }) => {
+sendEmailTask.on("completed", ({ id, result, duration, attempt }) => {
   console.log(`Email sent in ${duration}ms (attempt ${attempt})`)
 })
 
-sendEmail.on("failed", ({ id, error, attempt, willRetry }) => {
+sendEmailTask.on("failed", ({ id, error, attempt, willRetry }) => {
   if (!willRetry) {
     alertOncall(`Email ${id} permanently failed: ${error}`)
   }
 })
 
-sendEmail.on("retrying", ({ id, attempt, nextAttempt, error }) => {
+sendEmailTask.on("retrying", ({ id, attempt, nextAttempt, error }) => {
   console.log(`Retrying ${id}: attempt ${attempt} → ${nextAttempt}`)
 })
 
-sendEmail.on("progress", ({ id, progress }) => {
+sendEmailTask.on("progress", ({ id, progress }) => {
   console.log(`Job ${id} progress: ${JSON.stringify(progress)}`)
 })
 
-sendEmail.on("active", ({ id, attempt }) => {
+sendEmailTask.on("active", ({ id, attempt }) => {
   console.log(`Job ${id} started processing (attempt ${attempt})`)
 })
 
-sendEmail.on("stalled", ({ id, count, action }) => {
+sendEmailTask.on("stalled", ({ id, count, action }) => {
   console.log(`Job ${id} stalled (${action}: count ${count})`)
 })
 
-sendEmail.on("cancelled", ({ id, reason }) => {
+sendEmailTask.on("cancelled", ({ id, reason }) => {
   console.log(`Job ${id} cancelled: ${reason}`)
 })
 ```
@@ -45,26 +45,26 @@ sendEmail.on("cancelled", ({ id, reason }) => {
 App events include the task name in the payload, useful for cross-cutting monitoring.
 
 ```ts
-app.on("task:completed", ({ task, id, result, duration, attempt }) => {
+taskora.on("task:completed", ({ task, id, result, duration, attempt }) => {
   metrics.increment("jobs.completed", { task })
   metrics.histogram("jobs.duration", duration, { task })
 })
 
-app.on("task:failed", ({ task, id, error, attempt, willRetry }) => {
+taskora.on("task:failed", ({ task, id, error, attempt, willRetry }) => {
   if (!willRetry) {
     metrics.increment("jobs.failed", { task })
   }
 })
 
-app.on("task:active", ({ task, id, attempt }) => {
+taskora.on("task:active", ({ task, id, attempt }) => {
   metrics.increment("jobs.active", { task })
 })
 
-app.on("task:stalled", ({ task, id, count, action }) => {
+taskora.on("task:stalled", ({ task, id, count, action }) => {
   metrics.increment("jobs.stalled", { task, action })
 })
 
-app.on("task:cancelled", ({ task, id, reason }) => {
+taskora.on("task:cancelled", ({ task, id, reason }) => {
   metrics.increment("jobs.cancelled", { task })
 })
 ```
@@ -72,15 +72,15 @@ app.on("task:cancelled", ({ task, id, reason }) => {
 ### Worker Events
 
 ```ts
-app.on("worker:ready", () => {
+taskora.on("worker:ready", () => {
   console.log("Workers started, processing jobs")
 })
 
-app.on("worker:error", (error) => {
+taskora.on("worker:error", (error) => {
   console.error("Worker error:", error)
 })
 
-app.on("worker:closing", () => {
+taskora.on("worker:closing", () => {
   console.log("Workers shutting down...")
 })
 ```

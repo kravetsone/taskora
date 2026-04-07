@@ -7,7 +7,7 @@ Compose tasks into pipelines — sequential chains, parallel groups, and fan-in 
 A **Signature** is a snapshot of a task invocation — serializable and composable.
 
 ```ts
-const sig = sendEmail.s({ to: "a@b.com", subject: "Welcome" })
+const sig = sendEmailTask.s({ to: "a@b.com", subject: "Welcome" })
 // Type: Signature<{ to: string; subject: string }, { messageId: string }>
 ```
 
@@ -26,11 +26,11 @@ Sequential pipeline. Each step's output flows as input to the next. TypeScript c
 import { chain } from "taskora"
 
 const onboarding = chain(
-  createUser.s({ name: "John", email: "john@example.com" }),
+  createUserTask.s({ name: "John", email: "john@example.com" }),
   // ^ returns { id: string }
-  sendWelcomeEmail.s(),
+  sendWelcomeEmailTask.s(),
   // ^ receives { id: string }, returns { messageId: string }
-  notifySlack.s(),
+  notifySlackTask.s(),
   // ^ receives { messageId: string }
 )
 
@@ -43,10 +43,10 @@ const result = await handle.result
 Fluent alternative with unlimited type-safe chaining:
 
 ```ts
-const result = await createUser
+const result = await createUserTask
   .s({ name: "John", email: "john@example.com" })
-  .pipe(sendWelcomeEmail.s())
-  .pipe(notifySlack.s())
+  .pipe(sendWelcomeEmailTask.s())
+  .pipe(notifySlackTask.s())
   .dispatch()
   .result
 ```
@@ -61,9 +61,9 @@ Parallel execution. All signatures run concurrently, result is a typed tuple.
 import { group } from "taskora"
 
 const handle = group(
-  processImage.s({ url: "img1.jpg", width: 800 }),
-  processImage.s({ url: "img2.jpg", width: 800 }),
-  processImage.s({ url: "img3.jpg", width: 800 }),
+  processImageTask.s({ url: "img1.jpg", width: 800 }),
+  processImageTask.s({ url: "img2.jpg", width: 800 }),
+  processImageTask.s({ url: "img3.jpg", width: 800 }),
 ).dispatch()
 
 const result = await handle.result
@@ -79,11 +79,11 @@ import { chord } from "taskora"
 
 const handle = chord(
   [
-    fetchPrice.s({ symbol: "AAPL" }),
-    fetchPrice.s({ symbol: "GOOG" }),
-    fetchPrice.s({ symbol: "MSFT" }),
+    fetchPriceTask.s({ symbol: "AAPL" }),
+    fetchPriceTask.s({ symbol: "GOOG" }),
+    fetchPriceTask.s({ symbol: "MSFT" }),
   ],
-  calculatePortfolio.s(),
+  calculatePortfolioTask.s(),
   // ^ receives [PriceResult, PriceResult, PriceResult]
 ).dispatch()
 ```
@@ -95,10 +95,10 @@ Compositions are themselves valid inputs to other compositions:
 ```ts
 const handle = chord(
   [
-    chain(fetchData.s({ source: "api" }), transform.s()),
-    chain(fetchData.s({ source: "db" }), transform.s()),
+    chain(fetchDataTask.s({ source: "api" }), transformTask.s()),
+    chain(fetchDataTask.s({ source: "db" }), transformTask.s()),
   ],
-  merge.s(),
+  mergeTask.s(),
 ).dispatch()
 ```
 
@@ -106,10 +106,10 @@ Groups work as chain steps too:
 
 ```ts
 const handle = chain(
-  fetchConfig.s({ env: "prod" }),
-  group(buildFrontend.s(), buildBackend.s()),
+  fetchConfigTask.s({ env: "prod" }),
+  group(buildFrontendTask.s(), buildBackendTask.s()),
   // ^ fans out config to both, collects results
-  deploy.s(),
+  deployTask.s(),
   // ^ receives [FrontendResult, BackendResult]
 ).dispatch()
 ```
@@ -123,7 +123,7 @@ Batch operations on a single task.
 Dispatch one job per item, all in parallel:
 
 ```ts
-const handle = processImage.map([
+const handle = processImageTask.map([
   { url: "img1.jpg", width: 800 },
   { url: "img2.jpg", width: 800 },
   { url: "img3.jpg", width: 800 },
@@ -139,7 +139,7 @@ Equivalent to `group(task.s(item1), task.s(item2), ...).dispatch()`.
 Split into batches, process each batch as a parallel group, batches run sequentially:
 
 ```ts
-const handle = processImage.chunk(largeImageList, { size: 50 })
+const handle = processImageTask.chunk(largeImageList, { size: 50 })
 // Processes 50 at a time, then next 50, etc.
 ```
 
@@ -211,10 +211,10 @@ import { createTestRunner } from "taskora/test"
 import { chain } from "taskora"
 
 const runner = createTestRunner()
-const add = runner.app.task("add", async (data: { x: number; y: number }) => data.x + data.y)
-const double = runner.app.task("double", async (n: number) => n * 2)
+const addTask = runner.app.task("add", async (data: { x: number; y: number }) => data.x + data.y)
+const doubleTask = runner.app.task("double", async (n: number) => n * 2)
 
-const handle = chain(add.s({ x: 3, y: 4 }), double.s()).dispatch()
+const handle = chain(addTask.s({ x: 3, y: 4 }), doubleTask.s()).dispatch()
 await handle
 
 // Process all workflow steps

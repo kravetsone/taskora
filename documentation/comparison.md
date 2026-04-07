@@ -60,11 +60,11 @@ pg-boss runs on PostgreSQL — useful if you don't want to add Redis:
 
 | BullMQ | Taskora |
 |---|---|
-| `new Queue(name)` + `new Worker(name, fn)` | `taskora({ adapter })` + `app.task(name, fn)` |
+| `new Queue(name)` + `new Worker(name, fn)` | `createTaskora({ adapter })` + `taskora.task(name, fn)` |
 | `queue.add(name, data)` | `task.dispatch(data)` |
 | `job.waitUntilFinished(events)` | `await handle.result` |
 | `worker.on("completed", fn)` | `task.on("completed", fn)` |
-| `worker.concurrency` option | `app.task(name, { concurrency })` |
+| `worker.concurrency` option | `taskora.task(name, { concurrency })` |
 | `job.progress(value)` | `ctx.progress(value)` |
 | `job.log(msg)` | `ctx.log.info(msg)` |
 | `new FlowProducer()` | Coming in Phase 17 |
@@ -72,11 +72,11 @@ pg-boss runs on PostgreSQL — useful if you don't want to add Redis:
 
 ### Steps
 
-1. Create an `App` with `taskora({ adapter: redisAdapter(...) })`
-2. Define tasks with `app.task(name, { handler, ... })`
+1. Create an instance with `createTaskora({ adapter: redisAdapter(...) })`
+2. Define tasks with `taskora.task(name, { handler, ... })`
 3. Replace `queue.add()` with `task.dispatch(data)`
-4. Replace event listeners with `task.on()` or `app.on()`
+4. Replace event listeners with `task.on()` or `taskora.on()`
 5. Replace result polling with `await handle.result`
 6. Move retry, concurrency, timeout config into task options
-7. Add `await app.start()` / `await app.close()`
+7. Add `await taskora.start()` / `await taskora.close()`
 8. Write tests using `createTestRunner()` — no Redis needed

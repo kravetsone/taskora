@@ -7,7 +7,7 @@ Taskora provides flexible retry strategies with configurable backoff, jitter, an
 ## Configuration
 
 ```ts
-app.task("send-webhook", {
+taskora.task("send-webhook", {
   retry: {
     attempts: 5,           // total attempts (1 original + 4 retries)
     backoff: "exponential", // "fixed" | "exponential" | "linear" | function
@@ -126,7 +126,7 @@ retry: {
 Use `ctx.retry()` inside the handler for programmatic retry control.
 
 ```ts
-app.task("call-api", async (data, ctx) => {
+taskora.task("call-api", async (data, ctx) => {
   const res = await fetch(data.url)
 
   if (res.status === 429) {

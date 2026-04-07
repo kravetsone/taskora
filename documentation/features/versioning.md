@@ -13,7 +13,7 @@ When you change a task's input shape, jobs already in the queue have the old for
 If the change is additive (new optional field), just bump the version and use schema `.default()`:
 
 ```ts
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   version: 2,
   input: z.object({
     to: z.string(),
@@ -31,7 +31,7 @@ Existing v1 jobs are validated — `.default("normal")` fills in the missing fie
 For breaking changes, add migration functions:
 
 ```ts
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   version: 3,
   since: 1,    // oldest supported version
   migrate: {
@@ -51,7 +51,7 @@ Strictest form — version is derived from `since + migrations.length`:
 ```ts
 import { into } from "taskora"
 
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   since: 1,
   migrate: [
     into(v2Schema, (data) => ({ ...data, priority: "normal" })),
@@ -92,7 +92,7 @@ The `into(schema, fn)` helper locks the return type to match the schema, catchin
 Use the inspector to check what versions are in your queues before bumping `since`:
 
 ```ts
-const status = await app.inspect().migrations("send-email")
+const status = await taskora.inspect().migrations("send-email")
 console.log(status)
 // {
 //   version: 3, since: 1, migrations: 2,

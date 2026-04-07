@@ -7,7 +7,7 @@ Taskora uses a `Serializer` to convert job data and results to/from strings for 
 ```ts
 import { json } from "taskora"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   serializer: json(), // this is the default — you don't need to specify it
 })
@@ -38,7 +38,7 @@ const msgpack: Taskora.Serializer = {
   },
 }
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   serializer: msgpack,
 })
@@ -49,7 +49,7 @@ const app = taskora({
 ```ts
 import superjson from "superjson"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   serializer: {
     serialize: (value) => superjson.stringify(value),

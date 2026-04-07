@@ -9,21 +9,21 @@ Taskora uses a Koa-style **onion model** for middleware. Middleware wraps your h
 Applied to **all tasks** in the app.
 
 ```ts
-app.use(async (ctx, next) => {
+taskora.use(async (ctx, next) => {
   const start = Date.now()
   await next()
   console.log(`${ctx.task.name} took ${Date.now() - start}ms`)
 })
 ```
 
-Multiple `app.use()` calls chain in order. Must be called **before** `app.start()`.
+Multiple `taskora.use()` calls chain in order. Must be called **before** `taskora.start()`.
 
 ## Per-Task Middleware
 
 Applied to a specific task only.
 
 ```ts
-app.task("process-payment", {
+taskora.task("process-payment", {
   middleware: [authMiddleware, validateMiddleware],
   handler: async (data, ctx) => { /* ... */ },
 })
@@ -32,7 +32,7 @@ app.task("process-payment", {
 ## Execution Order
 
 ```
-app.use(mw1)  ──→  app.use(mw2)  ──→  task middleware  ──→  handler
+taskora.use(mw1)  ──→  taskora.use(mw2)  ──→  task middleware  ──→  handler
      │                   │                    │                 │
      │  before next()    │  before next()     │  before next()  │  runs
      │                   │                    │                 │
@@ -55,7 +55,7 @@ interface MiddlewareContext extends Context {
 ### Mutating Data
 
 ```ts
-app.use(async (ctx, next) => {
+taskora.use(async (ctx, next) => {
   // Transform input before handler
   ctx.data = { ...ctx.data, processedAt: Date.now() }
   await next()
@@ -65,7 +65,7 @@ app.use(async (ctx, next) => {
 ### Reading/Modifying Results
 
 ```ts
-app.use(async (ctx, next) => {
+taskora.use(async (ctx, next) => {
   await next()
   // Wrap result after handler
   ctx.result = { data: ctx.result, meta: { processedBy: "v2" } }
@@ -75,7 +75,7 @@ app.use(async (ctx, next) => {
 ### Error Handling
 
 ```ts
-app.use(async (ctx, next) => {
+taskora.use(async (ctx, next) => {
   try {
     await next()
   } catch (err) {
@@ -90,7 +90,7 @@ app.use(async (ctx, next) => {
 ### Logging Middleware
 
 ```ts
-app.use(async (ctx, next) => {
+taskora.use(async (ctx, next) => {
   ctx.log.info(`Starting ${ctx.task.name}`, { attempt: ctx.attempt })
   const start = Date.now()
   try {
@@ -106,7 +106,7 @@ app.use(async (ctx, next) => {
 ### Metrics Middleware
 
 ```ts
-app.use(async (ctx, next) => {
+taskora.use(async (ctx, next) => {
   const timer = metrics.startTimer({ task: ctx.task.name })
   try {
     await next()

@@ -9,13 +9,13 @@ Get your first task queue running in under 5 minutes.
 
 ## Create Your App
 
-Every taskora project starts with an `App` — the central registry that holds your tasks, adapters, and configuration.
+Every taskora project starts with an instance — the central registry that holds your tasks, adapters, and configuration.
 
 ```ts
-import { taskora } from "taskora"
+import { createTaskora } from "taskora"
 import { redisAdapter } from "taskora/redis"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
 })
 ```
@@ -27,7 +27,7 @@ The adapter can accept a Redis URL string, an `ioredis` options object, or an ex
 A task is a named function that processes data. Taskora infers the input and output types from your handler.
 
 ```ts
-const sendEmail = app.task(
+const sendEmailTask = taskora.task(
   "send-email",
   async (data: { to: string; subject: string; body: string }) => {
     // Your email sending logic
@@ -42,7 +42,7 @@ const sendEmail = app.task(
 Call `dispatch()` to enqueue a job. It returns a `ResultHandle` immediately — no `await` needed to enqueue.
 
 ```ts
-const handle = sendEmail.dispatch({
+const handle = sendEmailTask.dispatch({
   to: "user@example.com",
   subject: "Welcome!",
   body: "Thanks for signing up.",
@@ -57,17 +57,17 @@ const result = await handle.result // { messageId: "..." }
 
 ## Start the Worker
 
-Call `app.start()` to begin processing jobs. Workers automatically pick up jobs from Redis using blocking dequeue (BZPOPMIN) — no polling overhead.
+Call `taskora.start()` to begin processing jobs. Workers automatically pick up jobs from Redis using blocking dequeue (BZPOPMIN) — no polling overhead.
 
 ```ts
-await app.start()
+await taskora.start()
 ```
 
 ## Graceful Shutdown
 
 ```ts
 process.on("SIGTERM", async () => {
-  await app.close() // waits for active jobs to finish
+  await taskora.close() // waits for active jobs to finish
 })
 ```
 
@@ -76,7 +76,7 @@ process.on("SIGTERM", async () => {
 Tasks can be configured with retry policies for automatic error recovery.
 
 ```ts
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   retry: {
     attempts: 3,
     backoff: "exponential",
@@ -93,10 +93,10 @@ const sendEmail = app.task("send-email", {
 Here's a complete working example:
 
 ```ts
-import { taskora } from "taskora"
+import { createTaskora } from "taskora"
 import { redisAdapter } from "taskora/redis"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   defaults: {
     retry: { attempts: 3, backoff: "exponential", delay: 1000 },
@@ -105,7 +105,7 @@ const app = taskora({
   },
 })
 
-const processImage = app.task("process-image", {
+const processImageTask = taskora.task("process-image", {
   timeout: 60_000,
   concurrency: 2,
   handler: async (data: { url: string; width: number }, ctx) => {
@@ -123,7 +123,7 @@ const processImage = app.task("process-image", {
 })
 
 // Dispatch
-const handle = processImage.dispatch({ url: "https://example.com/photo.jpg", width: 800 })
+const handle = processImageTask.dispatch({ url: "https://example.com/photo.jpg", width: 800 })
 
 // Monitor progress
 handle.on?.("progress", (p) => console.log(`Progress: ${p}%`))
@@ -133,7 +133,7 @@ const result = await handle.result
 console.log("Done:", result.path)
 
 // Start workers
-await app.start()
+await taskora.start()
 ```
 
 ## Next Steps

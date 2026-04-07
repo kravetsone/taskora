@@ -6,7 +6,7 @@ Patterns for monitoring taskora in production.
 
 ```ts
 app.get("/health/queue", async (req, res) => {
-  const stats = await app.inspect().stats()
+  const stats = await taskora.inspect().stats()
 
   const healthy =
     stats.failed < 100 &&
@@ -21,12 +21,12 @@ app.get("/health/queue", async (req, res) => {
 Use app events to feed metrics into Prometheus, Datadog, or any metrics system:
 
 ```ts
-app.on("task:completed", ({ task, duration }) => {
+taskora.on("task:completed", ({ task, duration }) => {
   metrics.histogram("taskora.job.duration_ms", duration, { task })
   metrics.increment("taskora.job.completed", { task })
 })
 
-app.on("task:failed", ({ task, willRetry }) => {
+taskora.on("task:failed", ({ task, willRetry }) => {
   if (willRetry) {
     metrics.increment("taskora.job.retried", { task })
   } else {
@@ -34,7 +34,7 @@ app.on("task:failed", ({ task, willRetry }) => {
   }
 })
 
-app.on("task:stalled", ({ task, action }) => {
+taskora.on("task:stalled", ({ task, action }) => {
   metrics.increment("taskora.job.stalled", { task, action })
 })
 ```
@@ -43,7 +43,7 @@ app.on("task:stalled", ({ task, action }) => {
 
 ```ts
 setInterval(async () => {
-  const stats = await app.inspect().stats()
+  const stats = await taskora.inspect().stats()
   metrics.gauge("taskora.queue.waiting", stats.waiting)
   metrics.gauge("taskora.queue.active", stats.active)
   metrics.gauge("taskora.queue.delayed", stats.delayed)
@@ -74,7 +74,7 @@ Example queries for a Grafana/Prometheus dashboard:
 ## Inspecting Individual Jobs
 
 ```ts
-const job = await app.inspect().find(jobId)
+const job = await taskora.inspect().find(jobId)
 if (job) {
   console.log(`State: ${job.state}`)
   console.log(`Attempt: ${job.attempt}`)

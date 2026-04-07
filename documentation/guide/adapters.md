@@ -47,7 +47,7 @@ Zero-dependency in-memory adapter. Ideal for development, testing, and single-pr
 ```ts
 import { memoryAdapter } from "taskora/memory"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: memoryAdapter(),
 })
 ```

@@ -3,7 +3,7 @@
 Long-running image resize pipeline with progress tracking and heartbeat.
 
 ```ts
-const processImage = app.task("process-image", {
+const processImageTask = taskora.task("process-image", {
   concurrency: 2,
   timeout: 120_000,
   retry: { attempts: 2, backoff: "fixed", delay: 5000 },
@@ -37,7 +37,7 @@ const processImage = app.task("process-image", {
 })
 
 // Dispatch
-const handle = processImage.dispatch({
+const handle = processImageTask.dispatch({
   url: "https://example.com/photo.jpg",
   sizes: [64, 128, 256, 512, 1024],
 })

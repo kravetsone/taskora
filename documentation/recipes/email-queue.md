@@ -3,15 +3,15 @@
 A complete email sending queue with validation, retry, and error handling.
 
 ```ts
-import { taskora } from "taskora"
+import { createTaskora } from "taskora"
 import { redisAdapter } from "taskora/redis"
 import { z } from "zod"
 
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
 })
 
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   input: z.object({
     to: z.string().email(),
     subject: z.string().min(1).max(200),
@@ -40,7 +40,7 @@ const sendEmail = app.task("send-email", {
 })
 
 // Usage
-const handle = sendEmail.dispatch({
+const handle = sendEmailTask.dispatch({
   to: "user@example.com",
   subject: "Welcome to our platform!",
   body: "<h1>Welcome!</h1><p>Thanks for signing up.</p>",
@@ -50,13 +50,13 @@ const result = await handle.result
 console.log("Sent:", result.messageId)
 
 // Monitor failures
-sendEmail.on("failed", ({ id, error, willRetry }) => {
+sendEmailTask.on("failed", ({ id, error, willRetry }) => {
   if (!willRetry) {
     alertOncall(`Email permanently failed: ${error}`)
   }
 })
 
-await app.start()
+await taskora.start()
 ```
 
 ## Testing
@@ -64,10 +64,10 @@ await app.start()
 ```ts
 import { createTestRunner } from "taskora/test"
 
-const runner = createTestRunner({ from: app })
+const runner = createTestRunner({ from: taskora })
 
 it("sends email successfully", async () => {
-  const result = await runner.execute(sendEmail, {
+  const result = await runner.execute(sendEmailTask, {
     to: "test@example.com",
     subject: "Test",
     body: "Hello",
@@ -76,7 +76,7 @@ it("sends email successfully", async () => {
 })
 
 it("rejects invalid email", async () => {
-  const result = await runner.execute(sendEmail, {
+  const result = await runner.execute(sendEmailTask, {
     to: "not-an-email",
     subject: "Test",
     body: "Hello",

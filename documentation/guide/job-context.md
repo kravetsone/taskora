@@ -3,7 +3,7 @@
 Every task handler receives a `ctx` object as its second argument. The context provides tools for communication, control flow, and observability during job execution.
 
 ```ts
-app.task("process", async (data: Input, ctx) => {
+taskora.task("process", async (data: Input, ctx) => {
   // ctx is Taskora.Context
 })
 ```
@@ -31,7 +31,7 @@ An `AbortSignal` that fires when:
 Use it with any API that accepts AbortSignal:
 
 ```ts
-app.task("fetch-data", {
+taskora.task("fetch-data", {
   timeout: 10_000,
   handler: async (data: { url: string }, ctx) => {
     const res = await fetch(data.url, { signal: ctx.signal })
@@ -47,7 +47,7 @@ app.task("fetch-data", {
 Extend the job's lock TTL. Call this in long-running jobs to prevent stall detection from reclaiming them.
 
 ```ts
-app.task("long-job", async (data, ctx) => {
+taskora.task("long-job", async (data, ctx) => {
   for (const chunk of chunks) {
     await processChunk(chunk)
     ctx.heartbeat() // "I'm still alive"
@@ -60,7 +60,7 @@ app.task("long-job", async (data, ctx) => {
 Report progress as a number or object. Fire-and-forget — does not block the handler.
 
 ```ts
-app.task("upload", async (data, ctx) => {
+taskora.task("upload", async (data, ctx) => {
   ctx.progress(0)
   await step1()
   ctx.progress(33)
@@ -78,7 +78,7 @@ Progress is stored in Redis and queryable via `handle.getProgress()`.
 Request a manual retry. Returns a `RetryError` — throw it to trigger the retry.
 
 ```ts
-app.task("flaky-api", async (data, ctx) => {
+taskora.task("flaky-api", async (data, ctx) => {
   const res = await fetch(data.url)
 
   if (res.status === 429) {
@@ -97,7 +97,7 @@ app.task("flaky-api", async (data, ctx) => {
 Structured logging attached to the job. Queryable via `handle.getLogs()`.
 
 ```ts
-app.task("import", async (data, ctx) => {
+taskora.task("import", async (data, ctx) => {
   ctx.log.info("Starting import", { source: data.source })
   ctx.log.warn("Skipping invalid row", { row: 42, reason: "missing field" })
   ctx.log.error("Failed to parse", { raw: data.raw })

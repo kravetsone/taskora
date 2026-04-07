@@ -5,7 +5,7 @@ The Inspector provides read-only access to queue state — query jobs, check sta
 ## Getting the Inspector
 
 ```ts
-const inspector = app.inspect()
+const inspector = taskora.inspect()
 ```
 
 ## Listing Jobs by State
@@ -29,7 +29,7 @@ Each returns an array of `JobInfo` objects.
 const job = await inspector.find("550e8400-e29b-41d4-a716-446655440000")
 
 // Typed search (pass a Task object for typed data/result)
-const job = await inspector.find(sendEmail, "550e8400...")
+const job = await inspector.find(sendEmailTask, "550e8400...")
 // job.data is typed as { to: string, subject: string }
 // job.result is typed as the handler's return type
 ```

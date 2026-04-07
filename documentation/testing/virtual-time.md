@@ -10,7 +10,7 @@ Fast-forward time to process delayed jobs and retries.
 const runner = createTestRunner()
 
 // Dispatch a delayed job
-await runner.dispatch(sendEmail, data, { delay: 5000 })
+await runner.dispatch(sendEmailTask, data, { delay: 5000 })
 
 // Nothing processed yet
 expect(runner.jobs.filter((j) => j.state === "waiting")).toHaveLength(0)
@@ -71,10 +71,10 @@ afterEach(() => {
 
 ## `runner.dispose()`
 
-Required when using `from: app` mode. Restores the original adapters on the app's tasks.
+Required when using `from: taskora` mode. Restores the original adapters on the instance's tasks.
 
 ```ts
-const runner = createTestRunner({ from: app })
+const runner = createTestRunner({ from: taskora })
 
 afterEach(() => {
   runner.dispose()

@@ -14,7 +14,7 @@ Between phases, healthy workers call `extendLock()` which removes their jobs fro
 ## Configuration
 
 ```ts
-app.task("process-data", {
+taskora.task("process-data", {
   stall: {
     interval: 30_000, // check every 30 seconds (default)
     maxCount: 1,       // max stalled count before failing (default: 1)
@@ -36,7 +36,7 @@ The `stalledCount` is tracked in the job hash (`HINCRBY`).
 ## App-Level Defaults
 
 ```ts
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   defaults: {
     stall: { interval: 15_000, maxCount: 2 },
@@ -53,7 +53,7 @@ task.on("stalled", ({ id, count, action }) => {
   // action: "failed" — maxStalledCount exceeded, moved to failed
 })
 
-app.on("task:stalled", ({ task, id, count, action }) => {
+taskora.on("task:stalled", ({ task, id, count, action }) => {
   metrics.increment("jobs.stalled", { task, action })
 })
 ```
@@ -63,7 +63,7 @@ app.on("task:stalled", ({ task, id, count, action }) => {
 For long-running jobs, call `ctx.heartbeat()` to extend the lock and prevent stall detection:
 
 ```ts
-app.task("long-export", {
+taskora.task("long-export", {
   stall: { interval: 30_000 },
   handler: async (data, ctx) => {
     for (const batch of batches) {

@@ -5,7 +5,7 @@ Every task has a `dispatch()` method that enqueues a job and returns a `ResultHa
 ## Basic Dispatch
 
 ```ts
-const handle = sendEmail.dispatch({
+const handle = sendEmailTask.dispatch({
   to: "user@example.com",
   subject: "Welcome!",
 })
@@ -18,7 +18,7 @@ const handle = sendEmail.dispatch({
 The `ResultHandle<TOutput>` is the primary way to interact with a dispatched job.
 
 ```ts
-const handle = sendEmail.dispatch(data)
+const handle = sendEmailTask.dispatch(data)
 
 // Get the job ID (thenable — resolves when enqueued)
 const jobId = await handle // UUID string
@@ -49,7 +49,7 @@ await handle.cancel({ reason: "User requested cancellation" })
 ## Dispatch Options
 
 ```ts
-sendEmail.dispatch(data, {
+sendEmailTask.dispatch(data, {
   delay: 5000,              // delay processing by 5 seconds
   priority: 10,             // higher priority = processed first
   ttl: "1h",                // expire if not processed within 1 hour
@@ -65,7 +65,7 @@ sendEmail.dispatch(data, {
 Replace the previous pending job for the same key. Only the last dispatch within the delay window is processed.
 
 ```ts
-searchIndex.dispatch(data, {
+searchIndexTask.dispatch(data, {
   debounce: { key: `index:${docId}`, delay: "2s" },
 })
 ```
@@ -75,7 +75,7 @@ searchIndex.dispatch(data, {
 Rate-limit dispatches per key. Excess dispatches are rejected.
 
 ```ts
-const handle = apiCall.dispatch(data, {
+const handle = apiCallTask.dispatch(data, {
   throttle: { key: "external-api", max: 10, window: "1m" },
 })
 
@@ -87,7 +87,7 @@ console.log(handle.enqueued) // true | false
 Skip dispatch if a job with the same key already exists in a matching state.
 
 ```ts
-const handle = generateReport.dispatch(data, {
+const handle = generateReportTask.dispatch(data, {
   deduplicate: { key: `report:${userId}`, while: ["waiting", "active"] },
 })
 
@@ -101,7 +101,7 @@ if (!handle.enqueued) {
 By default, throttle and dedup silently reject (set `handle.enqueued = false`). To throw instead:
 
 ```ts
-sendEmail.dispatch(data, {
+sendEmailTask.dispatch(data, {
   throttle: { key: "emails", max: 100, window: "1h" },
   throwOnReject: true, // throws ThrottledError or DuplicateJobError
 })
@@ -110,7 +110,7 @@ sendEmail.dispatch(data, {
 ## Bulk Dispatch
 
 ```ts
-const handles = sendEmail.dispatchMany([
+const handles = sendEmailTask.dispatchMany([
   { data: { to: "alice@example.com", subject: "Hi" } },
   { data: { to: "bob@example.com", subject: "Hello" }, options: { delay: 5000 } },
 ])

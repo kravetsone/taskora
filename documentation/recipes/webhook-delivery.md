@@ -9,7 +9,7 @@ class Http4xxError extends Error {
   }
 }
 
-const deliverWebhook = app.task("deliver-webhook", {
+const deliverWebhookTask = taskora.task("deliver-webhook", {
   retry: {
     attempts: 8,
     backoff: "exponential",
@@ -47,14 +47,14 @@ const deliverWebhook = app.task("deliver-webhook", {
 })
 
 // Dispatch
-deliverWebhook.dispatch({
+deliverWebhookTask.dispatch({
   url: "https://api.partner.com/webhooks",
   payload: { event: "order.created", data: { id: "123" } },
   secret: process.env.WEBHOOK_SECRET,
 })
 
 // Monitor DLQ for permanently failed deliveries
-const failures = await app.deadLetters.list({ task: "deliver-webhook" })
+const failures = await taskora.deadLetters.list({ task: "deliver-webhook" })
 ```
 
 **Retry schedule** with exponential backoff: 1s → 2s → 4s → 8s → 16s → 32s → 64s → capped at 1h. Total window: ~2 minutes before giving up.

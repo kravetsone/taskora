@@ -7,7 +7,7 @@ Collect tasks accumulate individual items into batches before processing. The ha
 ## Configuration
 
 ```ts
-const batchInsert = app.task("batch-insert", {
+const batchInsertTask = taskora.task("batch-insert", {
   collect: {
     key: "db-inserts",
     delay: "2s",          // debounce: flush 2s after last item
@@ -27,9 +27,9 @@ const batchInsert = app.task("batch-insert", {
 Dispatch individual items as usual — they accumulate automatically:
 
 ```ts
-batchInsert.dispatch({ table: "events", row: { type: "click", ts: Date.now() } })
-batchInsert.dispatch({ table: "events", row: { type: "view", ts: Date.now() } })
-batchInsert.dispatch({ table: "events", row: { type: "scroll", ts: Date.now() } })
+batchInsertTask.dispatch({ table: "events", row: { type: "click", ts: Date.now() } })
+batchInsertTask.dispatch({ table: "events", row: { type: "view", ts: Date.now() } })
+batchInsertTask.dispatch({ table: "events", row: { type: "scroll", ts: Date.now() } })
 // → handler receives all 3 items as an array (or more, depending on timing)
 ```
 
@@ -60,7 +60,7 @@ Hard deadline since the first item arrived after the last flush. Guarantees a ma
 The `key` can be a function for per-item routing:
 
 ```ts
-const batchByRegion = app.task("batch-by-region", {
+const batchByRegionTask = taskora.task("batch-by-region", {
   collect: {
     key: (data: { region: string }) => `region:${data.region}`,
     delay: "5s",

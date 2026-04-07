@@ -9,7 +9,7 @@ Taskora provides three flow control strategies — debounce, throttle, and dedup
 Replace the previous pending job for the same key. Only the **last** dispatch within the delay window is processed.
 
 ```ts
-searchIndex.dispatch(data, {
+searchIndexTask.dispatch(data, {
   debounce: {
     key: `reindex:${documentId}`,
     delay: "2s",
@@ -30,7 +30,7 @@ searchIndex.dispatch(data, {
 Rate-limit dispatches per key. Excess dispatches are **rejected**.
 
 ```ts
-const handle = callExternalApi.dispatch(data, {
+const handle = callExternalApiTask.dispatch(data, {
   throttle: {
     key: "stripe-api",
     max: 100,        // max 100 dispatches
@@ -57,7 +57,7 @@ if (!handle.enqueued) {
 Skip dispatch if a job with the same key already exists in a matching state.
 
 ```ts
-const handle = generateReport.dispatch(data, {
+const handle = generateReportTask.dispatch(data, {
   deduplicate: {
     key: `report:${userId}`,
     while: ["waiting", "active"], // default: ["waiting", "delayed", "active"]
@@ -84,7 +84,7 @@ By default, throttle and dedup silently reject. Use `throwOnReject` for explicit
 
 ```ts
 try {
-  sendEmail.dispatch(data, {
+  sendEmailTask.dispatch(data, {
     throttle: { key: "emails", max: 100, window: "1h" },
     throwOnReject: true,
   })

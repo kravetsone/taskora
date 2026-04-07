@@ -27,7 +27,7 @@ Understanding the building blocks of taskora.
 
 ### App
 
-The `App` is the central registry. It holds your adapter, serializer, tasks, middleware, schedules, and configuration defaults. You create one per process.
+The taskora instance is the central registry. It holds your adapter, serializer, tasks, middleware, schedules, and configuration defaults. You create one per process.
 
 ### Task
 
@@ -35,7 +35,7 @@ A `Task` is a named handler with configuration. It defines what happens when a j
 
 ### Worker
 
-When you call `app.start()`, a `Worker` is created for each registered task. Workers use blocking dequeue (BZPOPMIN) to efficiently pull jobs from their task's queue — no polling.
+When you call `taskora.start()`, a `Worker` is created for each registered task. Workers use blocking dequeue (BZPOPMIN) to efficiently pull jobs from their task's queue — no polling.
 
 ### Adapter
 
@@ -77,16 +77,16 @@ dispatch() ──→ waiting ──→ active ──→ completed
 ## Connection Lifecycle
 
 ```ts
-const app = taskora({ adapter: redisAdapter("redis://localhost:6379") })
+const taskora = createTaskora({ adapter: redisAdapter("redis://localhost:6379") })
 
 // Adapter connects lazily on first dispatch
-sendEmail.dispatch({ to: "user@example.com", subject: "Hi" })
+sendEmailTask.dispatch({ to: "user@example.com", subject: "Hi" })
 
 // Or start workers (connects + starts processing)
-await app.start()
+await taskora.start()
 
 // Graceful shutdown — finishes active jobs, disconnects
-await app.close()
+await taskora.close()
 ```
 
 <WorkerConcurrencyVisualizer />

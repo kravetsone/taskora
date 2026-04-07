@@ -5,7 +5,7 @@ Taskora supports graceful job cancellation with instant notification via Redis p
 ## Cancelling a Job
 
 ```ts
-const handle = longTask.dispatch(data)
+const handle = longTaskTask.dispatch(data)
 
 // Later...
 await handle.cancel({ reason: "User requested cancellation" })
@@ -39,7 +39,7 @@ Fallback: if the pub/sub message is missed, `extendLock()` detects the flag and 
 The simplest approach — pass the signal to APIs that support it:
 
 ```ts
-app.task("download-file", async (data: { url: string }, ctx) => {
+taskora.task("download-file", async (data: { url: string }, ctx) => {
   const res = await fetch(data.url, { signal: ctx.signal })
   return await res.arrayBuffer()
 })
@@ -50,7 +50,7 @@ app.task("download-file", async (data: { url: string }, ctx) => {
 For custom cleanup logic, define an `onCancel` hook:
 
 ```ts
-app.task("transcode-video", {
+taskora.task("transcode-video", {
   onCancel: async (data, ctx) => {
     // Clean up temporary files
     await fs.unlink(`/tmp/${ctx.id}.mp4`)
@@ -89,7 +89,7 @@ task.on("cancelled", ({ id, reason }) => {
 })
 
 // App-wide
-app.on("task:cancelled", ({ id, task, reason }) => {
+taskora.on("task:cancelled", ({ id, task, reason }) => {
   console.log(`${task}:${id} cancelled`)
 })
 ```

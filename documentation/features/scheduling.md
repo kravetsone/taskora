@@ -8,7 +8,7 @@ Taskora includes a built-in distributed scheduler with leader election, interval
 
 ```ts
 // Inline on task definition
-app.task("cleanup-expired", {
+taskora.task("cleanup-expired", {
   schedule: { every: "1h" },
   handler: async (data, ctx) => {
     await db.deleteExpired()
@@ -24,7 +24,7 @@ Requires `cron-parser` as a peer dependency:
 :::
 
 ```ts
-app.task("daily-report", {
+taskora.task("daily-report", {
   schedule: {
     cron: "0 9 * * 1-5",    // 9 AM weekdays
     timezone: "America/New_York",
@@ -40,13 +40,13 @@ app.task("daily-report", {
 Register schedules separately from task definitions:
 
 ```ts
-app.schedule("nightly-cleanup", {
+taskora.schedule("nightly-cleanup", {
   task: "cleanup-expired",
   every: "6h",
   data: { olderThan: "30d" },
 })
 
-app.schedule("weekly-digest", {
+taskora.schedule("weekly-digest", {
   task: "send-digest",
   cron: "0 8 * * 1",
   timezone: "UTC",
@@ -72,7 +72,7 @@ In a multi-worker deployment, only **one instance** runs the scheduler at a time
 - If the leader dies, another instance takes over automatically
 
 ```ts
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   scheduler: {
     pollInterval: 1000,  // check for due schedules every 1s (default)
@@ -86,7 +86,7 @@ const app = taskora({
 By default, `overlap: false` — a new scheduled run won't dispatch if the previous run's job is still active.
 
 ```ts
-app.task("sync-data", {
+taskora.task("sync-data", {
   schedule: {
     every: "5m",
     overlap: false, // default — skip if previous still running
@@ -108,7 +108,7 @@ When the scheduler is temporarily down (deployment, crash, etc.), runs may be mi
 | `"catch-up-limit:N"` | Execute at most N missed runs |
 
 ```ts
-app.schedule("important-sync", {
+taskora.schedule("important-sync", {
   task: "sync-data",
   every: "1h",
   onMissed: "catch-up-limit:3",
@@ -119,20 +119,20 @@ app.schedule("important-sync", {
 
 ```ts
 // List all schedules
-const schedules = await app.schedules.list()
+const schedules = await taskora.schedules.list()
 
 // Pause a schedule
-await app.schedules.pause("nightly-cleanup")
+await taskora.schedules.pause("nightly-cleanup")
 
 // Resume
-await app.schedules.resume("nightly-cleanup")
+await taskora.schedules.resume("nightly-cleanup")
 
 // Update configuration
-await app.schedules.update("nightly-cleanup", { every: "2h" })
+await taskora.schedules.update("nightly-cleanup", { every: "2h" })
 
 // Remove
-await app.schedules.remove("nightly-cleanup")
+await taskora.schedules.remove("nightly-cleanup")
 
 // Trigger immediately (bypasses schedule timing)
-const handle = await app.schedules.trigger("nightly-cleanup")
+const handle = await taskora.schedules.trigger("nightly-cleanup")
 ```

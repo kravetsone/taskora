@@ -7,7 +7,7 @@ The test runner offers two execution modes with different trade-offs.
 **Direct handler execution** — calls the handler function directly with a mock context, including an inline retry loop.
 
 ```ts
-const result = await runner.run(sendEmail, { to: "user@example.com", subject: "Hi" })
+const result = await runner.run(sendEmailTask, { to: "user@example.com", subject: "Hi" })
 ```
 
 ### Characteristics
@@ -31,7 +31,7 @@ const result = await runner.run(sendEmail, { to: "user@example.com", subject: "H
 **Full pipeline execution** — dispatches through the memory adapter, processes the job, auto-advances time for retries.
 
 ```ts
-const execution = await runner.execute(sendEmail, {
+const execution = await runner.execute(sendEmailTask, {
   to: "user@example.com",
   subject: "Hi",
 })

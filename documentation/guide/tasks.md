@@ -7,12 +7,12 @@ A task is a named function with configuration. Taskora provides three ways to de
 Pass a name and a handler. Types are inferred automatically.
 
 ```ts
-const greet = app.task("greet", async (data: { name: string }) => {
+const greetTask = taskora.task("greet", async (data: { name: string }) => {
   return `Hello, ${data.name}!`
 })
 
 // TypeScript knows: dispatch expects { name: string }, result is string
-const handle = greet.dispatch({ name: "Alice" })
+const handle = greetTask.dispatch({ name: "Alice" })
 const result = await handle.result // "Hello, Alice!"
 ```
 
@@ -21,7 +21,7 @@ const result = await handle.result // "Hello, Alice!"
 Pass an options object for retry, timeout, concurrency, and more.
 
 ```ts
-const sendEmail = app.task("send-email", {
+const sendEmailTask = taskora.task("send-email", {
   concurrency: 5,
   timeout: 30_000,
   retry: {
@@ -43,7 +43,7 @@ Use any [Standard Schema](https://github.com/standard-schema/standard-schema) co
 ```ts
 import { z } from "zod"
 
-const processOrder = app.task("process-order", {
+const processOrderTask = taskora.task("process-order", {
   input: z.object({
     orderId: z.string().uuid(),
     items: z.array(z.object({
@@ -91,7 +91,7 @@ Schema validation runs **after** migrations (if versioned) and provides clear `V
 Collect tasks accumulate items into batches before processing. The handler receives an array.
 
 ```ts
-const batchInsert = app.task("batch-insert", {
+const batchInsertTask = taskora.task("batch-insert", {
   collect: {
     key: "db-inserts",
     delay: "2s",        // flush 2s after last item
@@ -106,8 +106,8 @@ const batchInsert = app.task("batch-insert", {
 })
 
 // Dispatch individual items — they accumulate automatically
-batchInsert.dispatch({ table: "users", row: { name: "Alice" } })
-batchInsert.dispatch({ table: "users", row: { name: "Bob" } })
+batchInsertTask.dispatch({ table: "users", row: { name: "Alice" } })
+batchInsertTask.dispatch({ table: "users", row: { name: "Bob" } })
 ```
 
 Three flush triggers (whichever fires first):

@@ -12,7 +12,7 @@ Taskora automatically trims both completed and failed jobs to prevent unbounded 
 Override if needed:
 
 ```ts
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   retention: {
     completed: { maxAge: "24h", maxItems: 1_000 },
@@ -26,7 +26,7 @@ Trim runs piggyback on the stall check interval — no extra timers. It removes 
 ## Accessing the DLQ
 
 ```ts
-const dlq = app.deadLetters
+const dlq = taskora.deadLetters
 ```
 
 The DLQ operates as a view over the existing `:failed` sorted set — no separate storage.
@@ -47,7 +47,7 @@ const emailJobs = await dlq.list({ task: "send-email", limit: 50, offset: 0 })
 await dlq.retry(jobId)
 
 // Retry with typed task reference
-await dlq.retry(sendEmail, jobId)
+await dlq.retry(sendEmailTask, jobId)
 ```
 
 The job is atomically removed from the failed set, reset to `waiting`, and re-queued.
@@ -68,15 +68,15 @@ Batched internally (100 per Lua call) for safety.
 
 ```ts
 // 1. Check for accumulated failures
-const stats = await app.inspect().stats()
+const stats = await taskora.inspect().stats()
 console.log(`Failed jobs: ${stats.failed}`)
 
 // 2. List recent failures
-const failures = await app.deadLetters.list({ limit: 10 })
+const failures = await taskora.deadLetters.list({ limit: 10 })
 for (const job of failures) {
   console.log(`${job.id}: ${job.error} (attempt ${job.attempt})`)
 }
 
 // 3. Fix the underlying issue, then retry all
-await app.deadLetters.retryAll()
+await taskora.deadLetters.retryAll()
 ```

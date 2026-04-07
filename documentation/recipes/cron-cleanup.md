@@ -3,12 +3,12 @@
 A periodic cleanup task using built-in scheduling and dead letter queue monitoring.
 
 ```ts
-import { taskora } from "taskora"
+import { createTaskora } from "taskora"
 import { redisAdapter } from "taskora/redis"
 
 // Retention is ON by default (completed: 1h/100, failed: 7d/300)
 // Override if needed:
-const app = taskora({
+const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
   retention: {
     failed: { maxAge: "14d", maxItems: 1_000 },
@@ -16,7 +16,7 @@ const app = taskora({
 })
 
 // Cleanup task
-const cleanupExpired = app.task("cleanup-expired", {
+const cleanupExpiredTask = taskora.task("cleanup-expired", {
   schedule: {
     every: "6h",
     onMissed: "skip", // if scheduler was down, just skip missed runs
@@ -47,10 +47,10 @@ const cleanupExpired = app.task("cleanup-expired", {
 })
 
 // Health monitoring — check DLQ size periodically
-const healthCheck = app.task("health-check", {
+const healthCheckTask = taskora.task("health-check", {
   schedule: { every: "5m" },
   handler: async (data, ctx) => {
-    const stats = await app.inspect().stats()
+    const stats = await taskora.inspect().stats()
 
     if (stats.failed > 100) {
       ctx.log.error("High failure count", { failed: stats.failed })
@@ -67,28 +67,28 @@ const healthCheck = app.task("health-check", {
 
 // Manual DLQ management
 async function retryAllFailedJobs() {
-  const count = await app.deadLetters.retryAll()
+  const count = await taskora.deadLetters.retryAll()
   console.log(`Retried ${count} failed jobs`)
 }
 
-await app.start()
+await taskora.start()
 ```
 
 ## Schedule Management at Runtime
 
 ```ts
 // Pause cleanup during maintenance
-await app.schedules.pause("cleanup-expired")
+await taskora.schedules.pause("cleanup-expired")
 
 // Resume
-await app.schedules.resume("cleanup-expired")
+await taskora.schedules.resume("cleanup-expired")
 
 // Run immediately
-const handle = await app.schedules.trigger("cleanup-expired")
+const handle = await taskora.schedules.trigger("cleanup-expired")
 const result = await handle.result
 
 // Check schedule status
-const schedules = await app.schedules.list()
+const schedules = await taskora.schedules.list()
 for (const s of schedules) {
   console.log(`${s.name}: next=${s.nextRun}, paused=${s.paused}`)
 }

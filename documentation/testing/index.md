@@ -27,13 +27,13 @@ afterEach(() => runner.clear())
 
 ### From App Mode
 
-Patch all tasks from an existing app to use the in-memory backend:
+Patch all tasks from an existing instance to use the in-memory backend:
 
 ```ts
 import { createTestRunner } from "taskora/test"
-import { app, sendEmail, processImage } from "../src/tasks"
+import { taskora, sendEmailTask, processImageTask } from "../src/tasks"
 
-const runner = createTestRunner({ from: app })
+const runner = createTestRunner({ from: taskora })
 
 afterEach(() => runner.dispose()) // restores original adapters
 ```
@@ -47,7 +47,7 @@ This mode is powerful — multi-task chains and inter-task dispatches work in-me
 Calls the handler directly with an inline retry loop. No queue involved.
 
 ```ts
-const result = await runner.run(sendEmail, {
+const result = await runner.run(sendEmailTask, {
   to: "test@example.com",
   subject: "Test",
 })
@@ -61,7 +61,7 @@ Best for: **unit testing** handler logic in isolation.
 Dispatches through the queue, processes, auto-advances retries, and returns a detailed result.
 
 ```ts
-const execution = await runner.execute(sendEmail, {
+const execution = await runner.execute(sendEmailTask, {
   to: "test@example.com",
   subject: "Test",
 })

@@ -9,7 +9,7 @@ Set a maximum lifetime for jobs. If a job isn't processed before its TTL expires
 ### Task-Level TTL
 
 ```ts
-app.task("time-sensitive", {
+taskora.task("time-sensitive", {
   ttl: {
     max: "1h",          // expire after 1 hour
     onExpire: "fail",    // "fail" (default) or "discard"
@@ -23,7 +23,7 @@ app.task("time-sensitive", {
 Override TTL at dispatch time:
 
 ```ts
-timeSensitive.dispatch(data, {
+timeSensitiveTask.dispatch(data, {
   ttl: "30m", // this specific job expires in 30 minutes
 })
 ```
@@ -42,7 +42,7 @@ TTL is checked during dequeue (`moveToActive.lua`). Jobs that expire while `wait
 Ensure only **one job per task** is active at a time.
 
 ```ts
-app.task("global-sync", {
+taskora.task("global-sync", {
   singleton: true,
   handler: async (data, ctx) => {
     await syncAllData() // only one instance runs at a time
@@ -57,7 +57,7 @@ When a worker tries to dequeue and another job is already active, the dequeue is
 Limit concurrent active jobs for a specific key:
 
 ```ts
-processUserData.dispatch(data, {
+processUserDataTask.dispatch(data, {
   concurrencyKey: `user:${userId}`,
   concurrencyLimit: 2,  // max 2 concurrent jobs for this user
 })
@@ -72,7 +72,7 @@ This uses an atomic counter in Redis (`INCR` on claim, `DECR` on ack/fail/nack/s
 - Rate-limit by tenant in a multi-tenant system
 
 ```ts
-app.task("sync-account", {
+taskora.task("sync-account", {
   concurrencyLimit: 1, // task-level default
   handler: async (data: { accountId: string }, ctx) => {
     await syncAccount(data.accountId)
@@ -80,7 +80,7 @@ app.task("sync-account", {
 })
 
 // Per-dispatch override
-syncAccount.dispatch(data, {
+syncAccountTask.dispatch(data, {
   concurrencyKey: `account:${data.accountId}`,
   concurrencyLimit: 1, // one sync per account at a time
 })

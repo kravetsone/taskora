@@ -3,7 +3,7 @@
 Call external APIs while respecting rate limits using throttle and concurrency controls.
 
 ```ts
-const callStripeApi = app.task("stripe-api-call", {
+const callStripeApiTask = taskora.task("stripe-api-call", {
   concurrency: 5, // max 5 parallel API calls
   timeout: 30_000,
   retry: {
@@ -31,13 +31,13 @@ const callStripeApi = app.task("stripe-api-call", {
 })
 
 // Dispatch with throttle — max 25 requests per second
-callStripeApi.dispatch(
+callStripeApiTask.dispatch(
   { method: "customers", params: { email: "user@example.com" } },
   { throttle: { key: "stripe", max: 25, window: "1s" } },
 )
 
 // Per-customer concurrency limit
-callStripeApi.dispatch(
+callStripeApiTask.dispatch(
   { method: "charges", params: { customer: "cus_123", amount: "1000" } },
   {
     concurrencyKey: `stripe:cus_123`,
