@@ -80,9 +80,8 @@ src/
 ├── tasks/
 │   ├── email.ts            ← sendEmailTask, sendWelcomeEmailTask
 │   ├── billing.ts          ← chargeCardTask, generateInvoiceTask
-│   └── notifications.ts   ← notifySlackTask, sendPushTask
-├── workflows/
-│   └── onboarding.ts       ← onboarding chain
+│   ├── notifications.ts   ← notifySlackTask, sendPushTask
+│   └── onboarding.ts       ← onboarding workflow (chain of tasks above)
 └── worker.ts               ← taskora.start()
 ```
 
@@ -95,15 +94,14 @@ src/
 ├── tasks/
 │   ├── notifications.ts      ← sendTelegramMessageTask, broadcastTask
 │   ├── moderation.ts         ← checkSpamTask, banUserTask
-│   └── media.ts              ← processPhotoTask, generateThumbnailTask
+│   ├── media.ts              ← processPhotoTask, generateThumbnailTask
+│   └── onboarding.ts         ← welcome message chain
 ├── bot/
 │   ├── commands/
 │   │   ├── start.ts          ← /start — dispatches welcome task
 │   │   └── settings.ts       ← /settings
 │   └── callbacks/
 │       └── subscribe.ts      ← inline button → dispatches task
-├── workflows/
-│   └── onboarding.ts         ← welcome message chain
 └── index.ts                  ← bot.start() + taskora.start()
 ```
 
@@ -160,12 +158,11 @@ src/
 ├── tasks/
 │   ├── email.ts              ← sendEmailTask, sendInvoiceTask
 │   ├── reports.ts            ← generateReportTask, exportCsvTask
-│   └── webhooks.ts           ← deliverWebhookTask
+│   ├── webhooks.ts           ← deliverWebhookTask
+│   └── order-fulfillment.ts  ← chain: validate → charge → ship → notify
 ├── routes/
 │   ├── orders.ts             ← POST /orders → dispatches tasks
 │   └── reports.ts            ← POST /reports → dispatches task, returns handle
-├── workflows/
-│   └── order-fulfillment.ts  ← chain: validate → charge → ship → notify
 └── index.ts                  ← server.listen() + taskora.start()
 ```
 
