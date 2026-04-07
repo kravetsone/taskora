@@ -24,6 +24,8 @@
 // ARGV[8] = expireAt (0 = no TTL)
 // ARGV[9] = concurrencyKey ("" = none)
 // ARGV[10] = concurrencyLimit ("0" = none)
+// ARGV[11] = _wf ("" = none)
+// ARGV[12] = _wfNode ("" = none)
 // Returns: 1
 export const ENQUEUE = `
 local jobKey = ARGV[1] .. ARGV[2]
@@ -42,6 +44,9 @@ if tonumber(ARGV[8]) > 0 then
 end
 if ARGV[9] ~= '' then
   redis.call('HSET', jobKey, 'concurrencyKey', ARGV[9], 'concurrencyLimit', ARGV[10])
+end
+if ARGV[11] ~= '' then
+  redis.call('HSET', jobKey, '_wf', ARGV[11], '_wfNode', ARGV[12])
 end
 
 redis.call('SET', dataKey, ARGV[3])

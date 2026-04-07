@@ -137,6 +137,8 @@ export class RedisBackend implements Taskora.Adapter {
       expireAt,
       concurrencyKey,
       concurrencyLimit,
+      (options as { _wf?: string })._wf ?? "",
+      String((options as { _wfNode?: number })._wfNode ?? ""),
     );
   }
 
@@ -975,6 +977,190 @@ export class RedisBackend implements Taskora.Adapter {
       token,
       String(Date.now()),
     );
+  }
+
+  // ── Workflows (Lua scripts TBD — using inline Redis commands for now) ──
+
+  private wfKey(workflowId: string): string {
+    const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
+    return `${base}:wf:{${workflowId}}`;
+  }
+
+  async createWorkflow(workflowId: string, graph: string): Promise<void> {
+    const key = this.wfKey(workflowId);
+    const parsed = JSON.parse(graph);
+    const fields: string[] = [
+      "graph", graph,
+      "state", "running",
+      "createdAt", String(Date.now()),
+    ];
+    for (let i = 0; i < parsed.nodes.length; i++) {
+      fields.push(`n:${i}:state`, "pending");
+    }
+    await this.client.hmset(key, ...fields);
+  }
+
+  async advanceWorkflow(
+    workflowId: string,
+    nodeIndex: number,
+    result: string,
+  ): Promise<Taskora.WorkflowAdvanceResult> {
+    const key = this.wfKey(workflowId);
+    const state = await this.client.hget(key, "state");
+    if (state !== "running") return { toDispatch: [], completed: false };
+
+    // Mark node completed
+    await this.client.hmset(key,
+      `n:${nodeIndex}:state`, "completed",
+      `n:${nodeIndex}:result`, result,
+    );
+
+    const graphStr = await this.client.hget(key, "graph");
+    if (!graphStr) return { toDispatch: [], completed: false };
+    const graph = JSON.parse(graphStr);
+
+    const toDispatch: Taskora.WorkflowAdvanceResult["toDispatch"] = [];
+
+    for (let i = 0; i < graph.nodes.length; i++) {
+      const nodeState = await this.client.hget(key, `n:${i}:state`);
+      if (nodeState !== "pending") continue;
+      const node = graph.nodes[i];
+      if (!node.deps.includes(nodeIndex)) continue;
+
+      let allDepsCompleted = true;
+      for (const d of node.deps) {
+        const ds = await this.client.hget(key, `n:${d}:state`);
+        if (ds !== "completed") { allDepsCompleted = false; break; }
+      }
+      if (!allDepsCompleted) continue;
+
+      let inputData: string;
+      if (node.data !== undefined) {
+        inputData = node.data;
+      } else if (node.deps.length === 1) {
+        inputData = (await this.client.hget(key, `n:${node.deps[0]}:result`))!;
+      } else {
+        const results: string[] = [];
+        for (const d of node.deps) {
+          results.push((await this.client.hget(key, `n:${d}:result`))!);
+        }
+        inputData = `[${results.join(",")}]`;
+      }
+
+      await this.client.hset(key, `n:${i}:state`, "active");
+      toDispatch.push({ nodeIndex: i, taskName: node.taskName, data: inputData, jobId: node.jobId, _v: node._v });
+    }
+
+    const allTerminalDone = (graph.terminal as number[]).every((i: number) => {
+      // We just set nodeIndex to completed, check inline
+      return true; // will verify below
+    });
+
+    // Re-check terminals properly
+    let completed = true;
+    for (const ti of graph.terminal as number[]) {
+      const ts = ti === nodeIndex ? "completed" : await this.client.hget(key, `n:${ti}:state`);
+      if (ts !== "completed") { completed = false; break; }
+    }
+
+    if (completed) {
+      const terminalNodes = graph.terminal as number[];
+      let finalResult: string | undefined;
+      if (terminalNodes.length === 1) {
+        finalResult = terminalNodes[0] === nodeIndex ? result : (await this.client.hget(key, `n:${terminalNodes[0]}:result`)) ?? undefined;
+      } else {
+        const results: string[] = [];
+        for (const ti of terminalNodes) {
+          results.push(ti === nodeIndex ? result : (await this.client.hget(key, `n:${ti}:result`))!);
+        }
+        finalResult = `[${results.join(",")}]`;
+      }
+      await this.client.hmset(key, "state", "completed", "result", finalResult ?? "");
+      return { toDispatch, completed: true, result: finalResult };
+    }
+
+    return { toDispatch, completed: false };
+  }
+
+  async failWorkflow(
+    workflowId: string,
+    nodeIndex: number,
+    error: string,
+  ): Promise<Taskora.WorkflowFailResult> {
+    const key = this.wfKey(workflowId);
+    const state = await this.client.hget(key, "state");
+    if (state !== "running") return { activeJobIds: [] };
+
+    await this.client.hmset(key,
+      `n:${nodeIndex}:state`, "failed",
+      `n:${nodeIndex}:error`, error,
+      "state", "failed",
+      "error", error,
+    );
+
+    const graphStr = await this.client.hget(key, "graph");
+    if (!graphStr) return { activeJobIds: [] };
+    const graph = JSON.parse(graphStr);
+
+    const activeJobIds: Array<{ task: string; jobId: string }> = [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      if (i === nodeIndex) continue;
+      const ns = await this.client.hget(key, `n:${i}:state`);
+      if (ns === "active") {
+        activeJobIds.push({ task: graph.nodes[i].taskName, jobId: graph.nodes[i].jobId });
+        await this.client.hset(key, `n:${i}:state`, "failed");
+      } else if (ns === "pending") {
+        await this.client.hset(key, `n:${i}:state`, "failed");
+      }
+    }
+
+    return { activeJobIds };
+  }
+
+  async getWorkflowState(workflowId: string): Promise<string | null> {
+    const key = this.wfKey(workflowId);
+    const [state, result, error] = await this.client.hmget(key, "state", "result", "error");
+    if (!state) return null;
+    return JSON.stringify({ state, result: result ?? undefined, error: error ?? undefined });
+  }
+
+  async cancelWorkflow(
+    workflowId: string,
+    reason?: string,
+  ): Promise<Taskora.WorkflowCancelResult> {
+    const key = this.wfKey(workflowId);
+    const state = await this.client.hget(key, "state");
+    if (state !== "running") return { activeJobIds: [] };
+
+    await this.client.hmset(key, "state", "cancelled", "error", reason ?? "");
+
+    const graphStr = await this.client.hget(key, "graph");
+    if (!graphStr) return { activeJobIds: [] };
+    const graph = JSON.parse(graphStr);
+
+    const activeJobIds: Array<{ task: string; jobId: string }> = [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      const ns = await this.client.hget(key, `n:${i}:state`);
+      if (ns === "active") {
+        activeJobIds.push({ task: graph.nodes[i].taskName, jobId: graph.nodes[i].jobId });
+        await this.client.hset(key, `n:${i}:state`, "cancelled");
+      } else if (ns === "pending") {
+        await this.client.hset(key, `n:${i}:state`, "cancelled");
+      }
+    }
+
+    return { activeJobIds };
+  }
+
+  async getWorkflowMeta(
+    task: string,
+    jobId: string,
+  ): Promise<{ workflowId: string; nodeIndex: number } | null> {
+    const keys = buildKeys(task, this.prefix);
+    const jobKey = keys.jobPrefix + jobId;
+    const [wf, wfNode] = await this.client.hmget(jobKey, "_wf", "_wfNode");
+    if (!wf) return null;
+    return { workflowId: wf, nodeIndex: Number(wfNode ?? 0) };
   }
 
   private async loadScripts(): Promise<void> {

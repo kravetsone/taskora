@@ -91,6 +91,9 @@ export class MemoryBackend implements Taskora.Adapter {
   private scheduleNextRuns: ZEntry[] = [];
   private schedulerLock: { token: string; expiresAt: number } | null = null;
 
+  // ── Workflows ──
+  private workflows = new Map<string, { graph: string; state: string; createdAt: number; result?: string; error?: string; nodeStates: Map<number, string>; nodeResults: Map<number, string>; nodeErrors: Map<number, string> }>();
+
   // ── Events ──
   private streamHandlers: Array<(event: Taskora.StreamEvent) => void> = [];
   private cancelHandlers = new Map<string, Set<(jobId: string) => void>>();
@@ -294,6 +297,7 @@ export class MemoryBackend implements Taskora.Adapter {
     this.scheduleConfigs.clear();
     this.scheduleNextRuns = [];
     this.schedulerLock = null;
+    this.workflows.clear();
     this.streamHandlers = [];
     this.cancelHandlers.clear();
     for (const waiters of this.jobWaiters.values()) {
@@ -342,6 +346,8 @@ export class MemoryBackend implements Taskora.Adapter {
       expireAt?: number;
       concurrencyKey?: string;
       concurrencyLimit?: number;
+      _wf?: string;
+      _wfNode?: number;
     } & Taskora.DispatchOptions,
   ): Promise<void> {
     const tq = this.q(task);
@@ -360,6 +366,10 @@ export class MemoryBackend implements Taskora.Adapter {
       concurrencyLimit: String(options.concurrencyLimit ?? 0),
       state: "waiting",
     };
+    if (options._wf) {
+      job.fields._wf = options._wf;
+      job.fields._wfNode = String(options._wfNode ?? 0);
+    }
     this.jobTask.set(jobId, task);
 
     if (options.delay && options.delay > 0) {
@@ -1226,5 +1236,179 @@ export class MemoryBackend implements Taskora.Adapter {
     if (!this.schedulerLock || this.schedulerLock.token !== token) return false;
     this.schedulerLock.expiresAt = this.now() + ttl;
     return true;
+  }
+
+  // ── Workflows ──
+
+  async createWorkflow(workflowId: string, graph: string): Promise<void> {
+    const parsed = JSON.parse(graph);
+    const nodeStates = new Map<number, string>();
+    for (let i = 0; i < parsed.nodes.length; i++) {
+      nodeStates.set(i, "pending");
+    }
+    this.workflows.set(workflowId, {
+      graph,
+      state: "running",
+      createdAt: this.now(),
+      nodeStates,
+      nodeResults: new Map(),
+      nodeErrors: new Map(),
+    });
+  }
+
+  async advanceWorkflow(
+    workflowId: string,
+    nodeIndex: number,
+    result: string,
+  ): Promise<Taskora.WorkflowAdvanceResult> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf || wf.state !== "running") {
+      return { toDispatch: [], completed: false };
+    }
+
+    // Mark node completed
+    wf.nodeStates.set(nodeIndex, "completed");
+    wf.nodeResults.set(nodeIndex, result);
+
+    const graph = JSON.parse(wf.graph);
+    const toDispatch: Taskora.WorkflowAdvanceResult["toDispatch"] = [];
+
+    // Find nodes whose deps are now all satisfied
+    for (let i = 0; i < graph.nodes.length; i++) {
+      if (wf.nodeStates.get(i) !== "pending") continue;
+      const node = graph.nodes[i];
+      if (!node.deps.includes(nodeIndex)) continue;
+
+      const allDepsCompleted = node.deps.every(
+        (d: number) => wf.nodeStates.get(d) === "completed",
+      );
+      if (!allDepsCompleted) continue;
+
+      // Compute input data
+      let inputData: string;
+      if (node.data !== undefined) {
+        inputData = node.data;
+      } else if (node.deps.length === 1) {
+        inputData = wf.nodeResults.get(node.deps[0])!;
+      } else {
+        const results = node.deps.map((d: number) => wf.nodeResults.get(d)!);
+        inputData = `[${results.join(",")}]`;
+      }
+
+      wf.nodeStates.set(i, "active");
+      toDispatch.push({
+        nodeIndex: i,
+        taskName: node.taskName,
+        data: inputData,
+        jobId: node.jobId,
+        _v: node._v,
+      });
+    }
+
+    // Check if workflow is completed
+    const allTerminalDone = (graph.terminal as number[]).every(
+      (i: number) => wf.nodeStates.get(i) === "completed",
+    );
+    if (allTerminalDone) {
+      wf.state = "completed";
+      // Build final result
+      const terminalNodes = graph.terminal as number[];
+      if (terminalNodes.length === 1) {
+        wf.result = wf.nodeResults.get(terminalNodes[0]);
+      } else {
+        const results = terminalNodes.map((i: number) => wf.nodeResults.get(i)!);
+        wf.result = `[${results.join(",")}]`;
+      }
+      return { toDispatch, completed: true, result: wf.result };
+    }
+
+    return { toDispatch, completed: false };
+  }
+
+  async failWorkflow(
+    workflowId: string,
+    nodeIndex: number,
+    error: string,
+  ): Promise<Taskora.WorkflowFailResult> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf || wf.state !== "running") {
+      return { activeJobIds: [] };
+    }
+
+    wf.nodeStates.set(nodeIndex, "failed");
+    wf.nodeErrors.set(nodeIndex, error);
+    wf.state = "failed";
+    wf.error = error;
+
+    // Collect active job IDs for cascade cancel
+    const graph = JSON.parse(wf.graph);
+    const activeJobIds: Array<{ task: string; jobId: string }> = [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      if (i === nodeIndex) continue;
+      const state = wf.nodeStates.get(i);
+      if (state === "active") {
+        activeJobIds.push({
+          task: graph.nodes[i].taskName,
+          jobId: graph.nodes[i].jobId,
+        });
+        wf.nodeStates.set(i, "failed");
+      } else if (state === "pending") {
+        wf.nodeStates.set(i, "failed");
+      }
+    }
+
+    return { activeJobIds };
+  }
+
+  async getWorkflowState(workflowId: string): Promise<string | null> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return null;
+    return JSON.stringify({
+      state: wf.state,
+      result: wf.result,
+      error: wf.error,
+    });
+  }
+
+  async cancelWorkflow(
+    workflowId: string,
+    reason?: string,
+  ): Promise<Taskora.WorkflowCancelResult> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf || wf.state !== "running") {
+      return { activeJobIds: [] };
+    }
+
+    wf.state = "cancelled";
+    wf.error = reason;
+
+    const graph = JSON.parse(wf.graph);
+    const activeJobIds: Array<{ task: string; jobId: string }> = [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      const state = wf.nodeStates.get(i);
+      if (state === "active") {
+        activeJobIds.push({
+          task: graph.nodes[i].taskName,
+          jobId: graph.nodes[i].jobId,
+        });
+        wf.nodeStates.set(i, "cancelled");
+      } else if (state === "pending") {
+        wf.nodeStates.set(i, "cancelled");
+      }
+    }
+
+    return { activeJobIds };
+  }
+
+  async getWorkflowMeta(
+    _task: string,
+    jobId: string,
+  ): Promise<{ workflowId: string; nodeIndex: number } | null> {
+    const job = this.jobStore.get(jobId);
+    if (!job || !job.fields._wf) return null;
+    return {
+      workflowId: job.fields._wf,
+      nodeIndex: Number(job.fields._wfNode ?? 0),
+    };
   }
 }
