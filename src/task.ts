@@ -60,14 +60,20 @@ export interface TaskDeps {
 
 export class Task<TInput, TOutput> {
   readonly name: string;
-  readonly handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
-  readonly config: TaskConfig;
-  readonly inputSchema?: StandardSchemaV1<unknown, TInput>;
-  readonly outputSchema?: StandardSchemaV1<unknown, TOutput>;
-  readonly version: number;
-  readonly since: number;
-  readonly migrations: Map<number, MigrationFn>;
-  readonly middleware: Taskora.Middleware[];
+  /**
+   * Fields below are conceptually readonly for external consumers but are
+   * mutable internally so that {@link Task._mergeImplementation} can upgrade
+   * a contract-only registration with a real handler and worker-side config.
+   * Do not mutate these from outside the class.
+   */
+  handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+  config: TaskConfig;
+  inputSchema?: StandardSchemaV1<unknown, TInput>;
+  outputSchema?: StandardSchemaV1<unknown, TOutput>;
+  version: number;
+  since: number;
+  migrations: Map<number, MigrationFn>;
+  middleware: Taskora.Middleware[];
   /**
    * `true` if a real handler is attached and this process should run a worker
    * loop for this task. `false` for contract-only registrations (`app.register`)
@@ -108,6 +114,35 @@ export class Task<TInput, TOutput> {
   /** @internal — used by workflow dispatch to extract adapter/serializer */
   _getDeps(): TaskDeps {
     return this.deps;
+  }
+
+  /**
+   * @internal — called by {@link App.implement} to upgrade a contract-only
+   * registration (`register()` result) with a real handler and worker-side
+   * configuration. Merges only the fields that make sense to override
+   * post-registration; leaves `name` and existing schemas intact unless
+   * explicitly replaced.
+   */
+  _mergeImplementation(opts: {
+    handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+    config?: Partial<TaskConfig>;
+    middleware?: Taskora.Middleware[];
+    migrationConfig?: TaskMigrationConfig;
+  }): void {
+    this.handler = opts.handler;
+    if (opts.config) {
+      this.config = { ...this.config, ...opts.config };
+    }
+    if (opts.middleware !== undefined) {
+      this.middleware = opts.middleware;
+    }
+    if (opts.migrationConfig) {
+      const resolved: ResolvedVersion = resolveVersion(opts.migrationConfig);
+      this.version = resolved.version;
+      this.since = resolved.since;
+      this.migrations = normalizeMigrations(opts.migrationConfig.migrate, resolved.since);
+    }
+    this.hasHandler = true;
   }
 
   /** Create a Signature — a composable snapshot of this task invocation. */

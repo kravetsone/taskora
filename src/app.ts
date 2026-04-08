@@ -8,7 +8,7 @@ import type { Duration } from "./scheduler/duration.js";
 import { parseDuration } from "./scheduler/duration.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { json } from "./serializer.js";
-import { Task } from "./task.js";
+import { Task, type TaskConfig, type TaskMigrationConfig } from "./task.js";
 import type { Taskora } from "./types.js";
 import { Worker } from "./worker.js";
 
@@ -77,6 +77,44 @@ interface CollectTaskOptions<TInput, TOutput> extends TaskOptionsBase {
   };
   input?: StandardSchemaV1<unknown, TInput>;
   output?: StandardSchemaV1<unknown, TOutput>;
+  handler: (items: TInput[], ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+}
+
+/**
+ * Worker-side configuration accepted by {@link App.implement}. Schemas live
+ * on the {@link TaskContract}, not here — `implement()` only attaches the
+ * handler and execution config (concurrency, middleware, migrations, etc).
+ *
+ * Fields that overlap with the contract (`retry`, `timeout`, `stall`,
+ * `version`) act as worker-side overrides when set.
+ */
+export interface ImplementOptions {
+  concurrency?: number;
+  timeout?: number;
+  retry?: Taskora.RetryConfig;
+  stall?: Taskora.StallConfig;
+  singleton?: boolean;
+  concurrencyLimit?: number;
+  ttl?: Taskora.TtlConfig;
+  middleware?: Taskora.Middleware[];
+  onCancel?: (data: unknown, ctx: Taskora.Context) => Promise<void> | void;
+  version?: number;
+  since?: number;
+  migrate?: readonly MigrationFn[] | Record<number, MigrationFn>;
+}
+
+interface ImplementOptionsWithHandler<TInput, TOutput> extends ImplementOptions {
+  handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput;
+  collect?: never;
+}
+
+interface ImplementCollectOptions<TInput, TOutput> extends ImplementOptions {
+  collect: {
+    key: ((data: TInput) => string) | string;
+    delay: Duration;
+    maxSize?: number;
+    maxWait?: Duration;
+  };
   handler: (items: TInput[], ctx: Taskora.Context) => Promise<TOutput> | TOutput;
 }
 
@@ -341,6 +379,166 @@ export class App {
     task.hasHandler = false;
     this.tasks.set(contract.name, task as Task<unknown, unknown>);
     return new BoundTask(task);
+  }
+
+  /**
+   * Attach a handler to a task contract. Returns a {@link BoundTask} ready
+   * to dispatch and to run inside this process's worker loop.
+   *
+   * Three call forms, pick whichever fits:
+   * ```ts
+   * // 1. Bare handler (most common)
+   * taskora.implement(sendEmail, async (data, ctx) => {
+   *   return { messageId: await mailer.send(data) }
+   * })
+   *
+   * // 2. Handler + worker-side options
+   * taskora.implement(
+   *   processImage,
+   *   async (data, ctx) => { ... },
+   *   { concurrency: 4, middleware: [withTracing()] },
+   * )
+   *
+   * // 3. Object form — required for collect tasks and preferred when
+   * //    onCancel is heavy or you want all config in one place
+   * taskora.implement(batchEmail, {
+   *   collect: { key: "user-emails", delay: "5s" },
+   *   handler: async (items, ctx) => { ... },
+   * })
+   * ```
+   *
+   * Throws if the same contract is implemented twice in the same process.
+   * If {@link register} was called first, the contract's existing
+   * `BoundTask` is reused and its handler is upgraded in place — existing
+   * `BoundTask` references continue to work.
+   */
+  implement<TInput, TOutput>(
+    contract: TaskContract<TInput, TOutput>,
+    handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput,
+  ): BoundTask<TInput, TOutput>;
+  implement<TInput, TOutput>(
+    contract: TaskContract<TInput, TOutput>,
+    handler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput,
+    options: ImplementOptions,
+  ): BoundTask<TInput, TOutput>;
+  implement<TInput, TOutput>(
+    contract: TaskContract<TInput, TOutput>,
+    options:
+      | ImplementOptionsWithHandler<TInput, TOutput>
+      | ImplementCollectOptions<TInput, TOutput>,
+  ): BoundTask<TInput, TOutput>;
+  implement<TInput, TOutput>(
+    contract: TaskContract<TInput, TOutput>,
+    handlerOrOptions:
+      | ((data: TInput, ctx: Taskora.Context) => Promise<TOutput> | TOutput)
+      | ImplementOptionsWithHandler<TInput, TOutput>
+      | ImplementCollectOptions<TInput, TOutput>,
+    maybeOptions?: ImplementOptions,
+  ): BoundTask<TInput, TOutput> {
+    const isFunction = typeof handlerOrOptions === "function";
+    const handler = (isFunction ? handlerOrOptions : handlerOrOptions.handler) as Task<
+      TInput,
+      TOutput
+    >["handler"];
+    const options: ImplementOptions & {
+      collect?: ImplementCollectOptions<TInput, TOutput>["collect"];
+    } = isFunction ? (maybeOptions ?? {}) : handlerOrOptions;
+
+    const existing = this.tasks.get(contract.name) as Task<TInput, TOutput> | undefined;
+    if (existing?.hasHandler) {
+      throw new Error(
+        `Task "${contract.name}" is already implemented. Call taskora.implement() at most once per task in a given process.`,
+      );
+    }
+
+    // Resolve config — options override contract, contract overrides app defaults.
+    const retry = options.retry ?? contract.retry ?? this.defaults.retry;
+    const timeout =
+      options.timeout ??
+      (contract.timeout ? parseDuration(contract.timeout) : undefined) ??
+      this.defaults.timeout ??
+      30_000;
+    const stall = options.stall ?? contract.stall ?? this.defaults.stall;
+    const concurrency = options.concurrency ?? this.defaults.concurrency ?? 1;
+
+    const ttl = options.ttl
+      ? {
+          maxMs: parseDuration(options.ttl.max),
+          onExpire: (options.ttl.onExpire ?? "fail") as "fail" | "discard",
+        }
+      : undefined;
+
+    const collect = options.collect
+      ? {
+          key: options.collect.key as ((data: unknown) => string) | string,
+          delayMs: parseDuration(options.collect.delay),
+          maxSize: options.collect.maxSize ?? 0,
+          maxWaitMs: options.collect.maxWait ? parseDuration(options.collect.maxWait) : 0,
+        }
+      : undefined;
+
+    const config: TaskConfig = {
+      concurrency,
+      timeout,
+      retry,
+      stall,
+      singleton: options.singleton,
+      concurrencyLimit: options.concurrencyLimit,
+      ttl,
+      collect,
+      onCancel: options.onCancel,
+    };
+
+    const migrationConfig: TaskMigrationConfig | undefined =
+      options.version !== undefined || options.since !== undefined || options.migrate !== undefined
+        ? { version: options.version, since: options.since, migrate: options.migrate }
+        : contract.version !== undefined
+          ? { version: contract.version }
+          : undefined;
+
+    const middleware = options.middleware ?? [];
+
+    if (existing) {
+      // register() was called first — upgrade in place so existing BoundTask
+      // references remain valid.
+      existing._mergeImplementation({ handler, config, middleware, migrationConfig });
+      return new BoundTask(existing);
+    }
+
+    const task = new Task<TInput, TOutput>(
+      this.buildTaskDeps(),
+      contract.name,
+      handler,
+      config,
+      contract.input || contract.output
+        ? { input: contract.input, output: contract.output }
+        : undefined,
+      migrationConfig,
+      middleware,
+    );
+
+    this.tasks.set(contract.name, task as Task<unknown, unknown>);
+    return new BoundTask(task);
+  }
+
+  /** @internal — build the TaskDeps bag shared by `task()`, `register()`, and `implement()`. */
+  private buildTaskDeps(): Parameters<typeof Task>[0] {
+    return {
+      adapter: this.adapter,
+      serializer: this.serializer,
+      ensureConnected: () => this.ensureConnected(),
+      onEventSubscribe: (taskName) => {
+        this.tasksNeedingEvents.add(taskName);
+        if (this.started) {
+          this.ensureSubscription().catch((err) => {
+            this.appEmitter.emit(
+              "worker:error",
+              err instanceof Error ? err : new Error(String(err)),
+            );
+          });
+        }
+      },
+    };
   }
 
   schedule(name: string, config: Taskora.ScheduleConfig): void {

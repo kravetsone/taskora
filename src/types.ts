@@ -1,3 +1,4 @@
+import type { TaskContract as TaskContractImpl } from "./contract.js";
 import type { RetryError } from "./errors.js";
 import type { Duration as DurationType } from "./scheduler/duration.js";
 
@@ -11,9 +12,7 @@ export namespace Taskora {
    * Created via `defineTask()` or `staticContract()`. See the
    * `TaskContract` export from `taskora` for the full documentation.
    */
-  export type TaskContract<TInput = unknown, TOutput = unknown> = import(
-    "./contract.js",
-  ).TaskContract<TInput, TOutput>;
+  export type TaskContract<TInput = unknown, TOutput = unknown> = TaskContractImpl<TInput, TOutput>;
 
   // ── Event payloads ──────────────────────────────────────────────────
 
