@@ -20,18 +20,28 @@ features:
   - title: Type-Safe End-to-End
     details: "Inferred input and output types from handler signature all the way to handle.result. Standard Schema validation on the way in. Zero casts, zero magic strings."
     icon: "\U0001F512"
+    link: /guide/tasks
+    linkText: Define a task
   - title: Retry & Backoff
     details: "Fixed, exponential, linear, or user-supplied backoff. Jitter, maxDelay, selective retryOn / noRetryOn. Per-task or per-dispatch override."
     icon: "\U0001F504"
+    link: /features/retry-backoff
+    linkText: Configure retries
   - title: Built-in Scheduling
     details: "Cron and intervals with distributed leader election across pods. Missed-run policies — skip, catch-up, catch-up-limit. Pause, resume, trigger, list at runtime."
     icon: "\u23F0"
+    link: /features/scheduling
+    linkText: Schedule tasks
   - title: Flow Control
     details: "Debounce, throttle, deduplicate, collect — all atomic via Lua scripts. Concurrency per key. Singleton tasks. Graceful pub/sub cancellation."
     icon: "\U0001F6A6"
+    link: /features/flow-control
+    linkText: Shape the flow
   - title: First-Class Testing
     details: "taskora/test with virtual time and an in-memory adapter. runner.run() for handler unit tests, runner.execute() for the full pipeline. No Redis, no Docker."
     icon: "\U0001F9EA"
+    link: /testing/
+    linkText: Test your tasks
   - title: Batteries-Included Admin UI
     details: "taskora/board — live dashboard with workflow DAG, schedules, DLQ, migrations, throughput. Mount on any framework. No build step."
     icon: "\U0001F4CA"
