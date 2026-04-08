@@ -394,8 +394,12 @@ export namespace Taskora {
     getServerInfo(): Promise<{
       version: string;
       usedMemory: string;
+      usedMemoryBytes?: number;
+      peakMemory?: string;
       uptime: number;
       connected: boolean;
+      dbSize?: number;
+      connectedClients?: number;
     }>;
     listWorkflows(
       state?: WorkflowState,

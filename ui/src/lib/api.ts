@@ -51,7 +51,16 @@ export interface TaskInfo {
 export interface OverviewResponse {
   tasks: TaskInfo[];
   totals: QueueStats;
-  redis: { version: string; usedMemory: string; uptime: number; connected: boolean };
+  redis: {
+    version: string;
+    usedMemory: string;
+    usedMemoryBytes?: number;
+    peakMemory?: string;
+    uptime: number;
+    connected: boolean;
+    dbSize?: number;
+    connectedClients?: number;
+  };
   uptime: number;
 }
 

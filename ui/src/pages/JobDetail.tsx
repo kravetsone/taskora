@@ -186,18 +186,49 @@ export function JobDetailPage() {
           </div>
         )}
         {tab === "timeline" && (
-          <div className="space-y-2">
-            {job.timeline.map((entry, i) => (
-              <div key={i} className="flex items-center gap-3 text-xs">
-                <Badge state={entry.state} />
-                <span className="text-board-muted">{new Date(entry.at).toLocaleString()}</span>
-                {i > 0 && (
-                  <span className="text-board-muted">
-                    (+{formatDuration(entry.at - job.timeline[i - 1].at)})
-                  </span>
-                )}
-              </div>
-            ))}
+          <div className="relative pl-6">
+            {/* Vertical line */}
+            <div className="absolute left-[9px] top-2 bottom-2 w-px bg-board-border" />
+            {job.timeline.map((entry, i) => {
+              const isRetry = entry.state === "retrying";
+              const isFailAfterRetry = entry.state === "failed" && job.timeline.some((e) => e.state === "retrying");
+              const wasRetried = entry.state === "completed" && job.attempt > 1;
+              const dotColor = isRetry
+                ? "bg-orange-400"
+                : entry.state === "completed"
+                  ? wasRetried ? "bg-amber-400" : "bg-emerald-400"
+                  : entry.state === "failed"
+                    ? "bg-red-400"
+                    : entry.state === "active"
+                      ? "bg-cyan-400"
+                      : "bg-board-muted";
+
+              return (
+                <div key={i} className="relative flex items-start gap-3 pb-4 text-xs">
+                  {/* Dot */}
+                  <div className={cn("absolute -left-6 top-1 w-[10px] h-[10px] rounded-full border-2 border-board-bg", dotColor)} />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <Badge state={entry.state} />
+                      {wasRetried && entry.state === "completed" && (
+                        <span className="text-[10px] text-amber-400 font-medium">after {job.attempt - 1} retry</span>
+                      )}
+                      {isRetry && (
+                        <span className="text-[10px] text-orange-400 font-medium">attempt failed, scheduling retry</span>
+                      )}
+                    </div>
+                    <div className="text-board-muted mt-0.5">
+                      {new Date(entry.at).toLocaleString()}
+                      {i > 0 && (
+                        <span className="ml-2 text-board-text/40">
+                          +{formatDuration(entry.at - job.timeline[i - 1].at)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

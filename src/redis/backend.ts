@@ -437,6 +437,8 @@ export class RedisBackend implements Taskora.Adapter {
       result,
       String(Date.now()),
     );
+    // Throughput counter — outside Lua to avoid hash tag issues
+    this.incrMetric(task, "completed");
   }
 
   async fail(
@@ -462,6 +464,15 @@ export class RedisBackend implements Taskora.Adapter {
       String(Date.now()),
       String(retry ? retry.delay : -1),
     );
+    // Only count permanent failures, not retries
+    if (!retry) this.incrMetric(task, "failed");
+  }
+
+  private incrMetric(task: string, type: string): void {
+    const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
+    const bucket = Math.floor(Date.now() / 60000) * 60000;
+    const key = `${base}:metrics:${task}:${type}:${bucket}`;
+    this.client.incr(key).then(() => this.client.expire(key, 86400)).catch(() => {});
   }
 
   async nack(task: string, jobId: string, token: string): Promise<void> {
@@ -1115,21 +1126,34 @@ export class RedisBackend implements Taskora.Adapter {
   async getServerInfo(): Promise<{
     version: string;
     usedMemory: string;
+    usedMemoryBytes: number;
+    peakMemory: string;
     uptime: number;
     connected: boolean;
+    dbSize: number;
+    connectedClients: number;
   }> {
-    const info = await this.client.info("server");
-    const memInfo = await this.client.info("memory");
+    const [serverInfo, memInfo, clientInfo, dbSize] = await Promise.all([
+      this.client.info("server"),
+      this.client.info("memory"),
+      this.client.info("clients"),
+      this.client.dbsize(),
+    ]);
 
-    const versionMatch = info.match(/redis_version:(.+)/);
-    const uptimeMatch = info.match(/uptime_in_seconds:(\d+)/);
-    const memMatch = memInfo.match(/used_memory_human:(.+)/);
+    const match = (text: string, key: string) => {
+      const m = text.match(new RegExp(`${key}:(.+)`));
+      return m?.[1]?.trim() ?? "";
+    };
 
     return {
-      version: versionMatch?.[1]?.trim() ?? "unknown",
-      usedMemory: memMatch?.[1]?.trim() ?? "0B",
-      uptime: Number(uptimeMatch?.[1] ?? 0),
+      version: match(serverInfo, "redis_version") || "unknown",
+      usedMemory: match(memInfo, "used_memory_human") || "0B",
+      usedMemoryBytes: Number(match(memInfo, "used_memory")) || 0,
+      peakMemory: match(memInfo, "used_memory_peak_human") || "0B",
+      uptime: Number(match(serverInfo, "uptime_in_seconds")) || 0,
       connected: this.client.status === "ready",
+      dbSize,
+      connectedClients: Number(match(clientInfo, "connected_clients")) || 0,
     };
   }
 
@@ -1252,41 +1276,68 @@ export class RedisBackend implements Taskora.Adapter {
     bucketSize: number,
     count: number,
   ): Promise<Array<{ timestamp: number; completed: number; failed: number }>> {
-    const base = task
-      ? this.prefix
-        ? `taskora:${this.prefix}:{${task}}:`
-        : `taskora:{${task}}:`
-      : this.prefix
-        ? `taskora:${this.prefix}:{`
-        : "taskora:{";
-
-    // For simplicity, use the global prefix (non-task-specific) metric keys
-    const metricBase = this.prefix ? `taskora:${this.prefix}:` : "taskora:";
+    const metricBase = this.prefix ? `taskora:${this.prefix}` : "taskora";
     const now = Date.now();
-    const bucketMs = bucketSize;
-    const currentBucket = Math.floor(now / bucketMs) * bucketMs;
-
-    const pipe = this.client.pipeline();
+    const currentBucket = Math.floor(now / bucketSize) * bucketSize;
     const timestamps: number[] = [];
 
     for (let i = count - 1; i >= 0; i--) {
-      const ts = currentBucket - i * bucketMs;
-      timestamps.push(ts);
-      // Metric keys use per-minute buckets stored in ack/fail Lua
-      pipe.get(`${metricBase}metrics:completed:${ts}`);
-      pipe.get(`${metricBase}metrics:failed:${ts}`);
+      timestamps.push(currentBucket - i * bucketSize);
     }
 
-    const results = (await pipe.exec()) as [Error | null, string | null][];
-    const throughput: Array<{ timestamp: number; completed: number; failed: number }> = [];
-
-    for (let i = 0; i < timestamps.length; i++) {
-      throughput.push({
-        timestamp: timestamps[i],
+    if (task) {
+      // Per-task: read directly
+      const pipe = this.client.pipeline();
+      for (const ts of timestamps) {
+        pipe.get(`${metricBase}:metrics:${task}:completed:${ts}`);
+        pipe.get(`${metricBase}:metrics:${task}:failed:${ts}`);
+      }
+      const results = (await pipe.exec()) as [Error | null, string | null][];
+      return timestamps.map((ts, i) => ({
+        timestamp: ts,
         completed: Number(results[i * 2][1] ?? 0),
         failed: Number(results[i * 2 + 1][1] ?? 0),
-      });
+      }));
     }
+
+    // Aggregate across all tasks: scan for metric keys in the first bucket to discover task names
+    const taskNames = new Set<string>();
+    let cursor = "0";
+    do {
+      const [next, keys] = await this.client.scan(cursor, "MATCH", `${metricBase}:metrics:*:completed:*`, "COUNT", 200);
+      cursor = next;
+      for (const key of keys) {
+        // key format: taskora:metrics:TASK:completed:BUCKET
+        const match = key.match(/metrics:(.+):completed:\d+$/);
+        if (match) taskNames.add(match[1]);
+      }
+    } while (cursor !== "0");
+
+    if (taskNames.size === 0) {
+      return timestamps.map((ts) => ({ timestamp: ts, completed: 0, failed: 0 }));
+    }
+
+    // Pipeline all reads
+    const pipe = this.client.pipeline();
+    const tasks = [...taskNames];
+    for (const ts of timestamps) {
+      for (const t of tasks) {
+        pipe.get(`${metricBase}:metrics:${t}:completed:${ts}`);
+        pipe.get(`${metricBase}:metrics:${t}:failed:${ts}`);
+      }
+    }
+    const results = (await pipe.exec()) as [Error | null, string | null][];
+
+    let idx = 0;
+    return timestamps.map((ts) => {
+      let completed = 0;
+      let failed = 0;
+      for (const _ of tasks) {
+        completed += Number(results[idx++][1] ?? 0);
+        failed += Number(results[idx++][1] ?? 0);
+      }
+      return { timestamp: ts, completed, failed };
+    });
 
     return throughput;
   }

@@ -127,9 +127,16 @@ export function TaskDetail() {
                   </td>
                   <td className="px-3 py-2.5">
                     <Badge state={job.state} />
+                    {job.state === "completed" && job.attempt > 1 && (
+                      <span className="ml-1 text-[10px] text-amber-400">retried</span>
+                    )}
                   </td>
                   <td className="text-right px-3 py-2.5 tabular-nums text-board-muted">
-                    {job.attempt}
+                    {job.attempt > 1 ? (
+                      <span className="text-amber-400">{job.attempt}</span>
+                    ) : (
+                      job.attempt
+                    )}
                   </td>
                   <td className="text-right px-3 py-2.5 text-board-muted text-xs">
                     {relativeTime(job.timestamps.created)}

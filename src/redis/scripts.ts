@@ -326,15 +326,6 @@ end
 redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
   'event', 'completed', 'jobId', jobId)
 
--- Throughput counter: INCR per-minute bucket, TTL 24h
-local task = redis.call('HGET', jobKey, 'task') or ''
-local bucket = math.floor(tonumber(now) / 60000) * 60000
-local metricKey = prefix .. 'metrics:completed:' .. tostring(bucket)
-redis.call('INCR', metricKey)
-if redis.call('TTL', metricKey) == -1 then
-  redis.call('EXPIRE', metricKey, 86400)
-end
-
 return 1
 `;
 
@@ -399,14 +390,6 @@ else
   local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
   if dedupKey then
     redis.call('DEL', dedupKey)
-  end
-
-  -- Throughput counter: INCR per-minute bucket, TTL 24h
-  local bucket = math.floor(tonumber(now) / 60000) * 60000
-  local metricKey = prefix .. 'metrics:failed:' .. tostring(bucket)
-  redis.call('INCR', metricKey)
-  if redis.call('TTL', metricKey) == -1 then
-    redis.call('EXPIRE', metricKey, 86400)
   end
 
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
