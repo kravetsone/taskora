@@ -1,4 +1,16 @@
-const BASE = import.meta.env.DEV ? "/board" : ".";
+// Derive base path from the current page URL so API calls always hit /board/api/...
+// In dev mode, Vite proxy handles /board/api → backend
+// In production, SPA is served under /board/ so we strip to get the mount point
+function getBase(): string {
+  if (import.meta.env.DEV) return "/board";
+  // window.location.pathname might be /board/jobs/abc — we need /board
+  const path = window.location.pathname;
+  const segments = path.split("/").filter(Boolean);
+  // The first segment is the basePath (e.g. "board")
+  return segments.length > 0 ? `/${segments[0]}` : "";
+}
+
+const BASE = getBase();
 
 async function fetchApi<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
