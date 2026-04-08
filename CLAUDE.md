@@ -110,7 +110,12 @@ src/
 - Every multi-step Redis state transition MUST be a Lua script (atomicity)
 - Split storage: job metadata hash (ziplist) + separate `:data` and `:result` string keys
 - All keys for one job share a `{hash tag}` for Redis Cluster compatibility
-- **Documentation sync**: when changing public API, behavior, or adding features — update `documentation/` (VitePress site) alongside `docs/` design docs. The VitePress site is the user-facing reference; `docs/` is internal design notes.
+- **Documentation sync**: when changing public API, behavior, or adding features — update ALL THREE in the same change:
+  1. `docs/` — internal design notes (API_DESIGN.md, IMPLEMENTATION.md)
+  2. `documentation/` — VitePress site (user-facing reference)
+  3. `documentation/skills/using-taskora/SKILL.md` — the public `/taskora` Agent Skill consumed by Claude Code, Cursor, Windsurf, Cline, and 40+ other AI agents. Also bump `version` in `documentation/skills/metadata.json` + the `metadata.version` field in SKILL.md frontmatter when making user-visible changes.
+
+  The skill is a curated quick reference — not auto-generated. If it gets out of sync with the real API, every AI agent using it will produce broken code. Treat it as a first-class artifact, not an afterthought.
 
 ## Commands
 
