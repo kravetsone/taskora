@@ -59,8 +59,10 @@ export class RedisBackend implements Taskora.Adapter {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    // Blocking clients are stuck in BZPOPMIN — must force-disconnect, NOT
+    // graceful close, or shutdown hangs up to the full block timeout.
     for (const client of this.blockingClients.values()) {
-      await client.close();
+      await client.disconnect();
     }
     this.blockingClients.clear();
     if (this.jobWaiter) {
@@ -113,7 +115,6 @@ export class RedisBackend implements Taskora.Adapter {
       return;
     }
 
-    const __t0 = Date.now();
     await this.eval(
       "enqueue",
       3,
@@ -133,7 +134,6 @@ export class RedisBackend implements Taskora.Adapter {
       (options as { _wf?: string })._wf ?? "",
       String((options as { _wfNode?: number })._wfNode ?? ""),
     );
-    console.log(`[DBG] enqueue ${task} ${jobId.slice(0, 8)} took ${Date.now() - __t0}ms @ ${Date.now()}`);
   }
 
   async debounceEnqueue(
@@ -355,7 +355,7 @@ export class RedisBackend implements Taskora.Adapter {
 
     // Fast path: try non-blocking moveToActive first
     const quick = await this.dequeue(task, lockTtl, token, options);
-    if (quick) { console.log(`[DBG] blockingDequeue ${task} fast-path HIT ${quick.id.slice(0,8)} @ ${Date.now()}`); return quick; }
+    if (quick) return quick;
 
     const blockClient = await this.getBlockingClient(task);
     const deadline = Date.now() + timeoutMs;
@@ -367,13 +367,11 @@ export class RedisBackend implements Taskora.Adapter {
       const blockSec = Math.min(remaining, 2000) / 1000;
       let popped: [string, string, string] | null = null;
 
-      const __tb = Date.now();
       try {
         popped = await blockClient.blockingZPopMin(keys.marker, blockSec);
       } catch {
         return null; // connection interrupted (shutdown)
       }
-      console.log(`[DBG] blockingDequeue ${task} BZPOPMIN blockSec=${blockSec} took ${Date.now() - __tb}ms popped=${popped ? "yes" : "null"} @ ${Date.now()}`);
 
       if (popped) {
         const score = Number(popped[2]);
@@ -556,8 +554,10 @@ export class RedisBackend implements Taskora.Adapter {
 
     return async () => {
       await reader.stop();
+      // Force-disconnect: the reader may be mid-XREAD-BLOCK, and a graceful
+      // close() would wait for it to time out.
       try {
-        await subDriver.close();
+        await subDriver.disconnect();
       } catch {
         // Already disconnected by reader.stop()
       }
@@ -995,8 +995,10 @@ export class RedisBackend implements Taskora.Adapter {
     });
     return () => {
       // Fire-and-forget cleanup — callers don't await this and it's safe to detach.
+      // Force-disconnect: in ioredis, once a client enters subscriber mode, `quit()`
+      // sometimes hangs; `disconnect(false)` is reliable.
       unsubscribe()
-        .then(() => subDriver.close())
+        .then(() => subDriver.disconnect())
         .catch(() => {});
     };
   }

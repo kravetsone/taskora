@@ -223,6 +223,18 @@ export class BunDriver implements RedisDriver {
       // Already closed; fall through.
     }
   }
+
+  async disconnect(): Promise<void> {
+    // Bun.RedisClient has no separate graceful-vs-forceful close — `close()`
+    // drops the socket immediately. Same behavior we want for blocking
+    // clients; no distinction needed at the Bun layer.
+    this.connected = false;
+    try {
+      await this.client.close();
+    } catch {
+      // Already closed; fall through.
+    }
+  }
 }
 
 // ─── Pipeline emulation ───────────────────────────────────────────────────────

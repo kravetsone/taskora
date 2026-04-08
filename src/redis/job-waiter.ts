@@ -78,7 +78,9 @@ export class JobWaiter {
     }
     this.pending.clear();
     if (this.subDriver) {
-      await this.subDriver.close();
+      // Sub driver is mid-XREAD-BLOCK (up to 2s). Force-disconnect rather
+      // than graceful close so shutdown doesn't wait for the block to time out.
+      await this.subDriver.disconnect();
       this.subDriver = null;
     }
     this.streams.clear();
@@ -207,7 +209,9 @@ export class JobWaiter {
   private cleanupIfEmpty(): void {
     if (this.pending.size > 0) return;
     if (this.subDriver) {
-      this.subDriver.close().catch(() => {});
+      // Force-disconnect — same reasoning as shutdown(), the sub driver may
+      // still be inside an XREAD BLOCK that hasn't noticed `running = false`.
+      this.subDriver.disconnect().catch(() => {});
       this.subDriver = null;
     }
     this.streams.clear();

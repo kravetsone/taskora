@@ -156,6 +156,13 @@ export class IoredisDriver implements RedisDriver {
       // Already closed; fall through.
     }
   }
+
+  async disconnect(): Promise<void> {
+    // Immediate, non-graceful socket close. Interrupts any pending blocking
+    // command (BZPOPMIN, XREAD BLOCK, SUBSCRIBE) without waiting for it to
+    // return — critical for clean shutdown of worker/event-reader/job-waiter.
+    this.client.disconnect(false);
+  }
 }
 
 class IoredisPipelineBuilder implements PipelineBuilder {

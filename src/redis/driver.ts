@@ -200,4 +200,20 @@ export interface RedisDriver {
    * calls `close()`.
    */
   close(): Promise<void>;
+
+  /**
+   * Force-close the underlying connection immediately, WITHOUT waiting for
+   * pending commands. This is required for clients stuck in blocking commands
+   * (`BZPOPMIN`, `XREAD BLOCK`, `SUBSCRIBE`) — a graceful `close()` would wait
+   * for the blocking command to return naturally, adding up to its full timeout
+   * to shutdown latency.
+   *
+   * Usage: the backend calls this on blocking-dequeue clients, subscribe
+   * clients, and the job-waiter's XREAD client during shutdown. The main
+   * client still uses `close()` for a clean QUIT.
+   *
+   * ioredis: `client.disconnect(false)` — closes socket immediately.
+   * Bun: `client.close()` — Bun's close is already non-graceful.
+   */
+  disconnect(): Promise<void>;
 }
