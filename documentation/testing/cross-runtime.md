@@ -10,14 +10,15 @@ This page documents what is tested, how, and why the matrix exists.
 
 ## The matrix
 
-Four cells, all mandatory, all gating merges and releases:
+Five cells, all mandatory, all gating merges and releases:
 
 | # | Runtime | Driver entry point | Purpose |
 |---|---|---|---|
-| 1 | **Node 20** | `taskora/redis` → `taskora/redis/ioredis` | Golden baseline. Node LTS is the reference platform most users will run. |
-| 2 | **Bun 1.3+** | `taskora/redis` → `taskora/redis/ioredis` | Proves ioredis works under Bun's Node-compatibility layer. Use this if you are already running Bun and have other ioredis-using code in your project. |
-| 3 | **Bun 1.3+** | `taskora/redis/bun` → native `Bun.RedisClient` | Zero-peer-dependency path for Bun-only deployments. Goes straight through Bun's built-in Redis client and drops the ioredis peer dep entirely. |
-| 4 | **Deno 2.x** | `taskora/redis` → `taskora/redis/ioredis` | ioredis imported via Deno's `npm:` specifier and `--node-modules-dir=auto`. Lets you use Taskora from Deno projects without maintaining a separate Deno-native Redis adapter. |
+| 1 | **Node 24** | `taskora/redis` → `taskora/redis/ioredis` | Current Active LTS line (since October 2025). The primary Node baseline going forward. |
+| 2 | **Node 20** | `taskora/redis` → `taskora/redis/ioredis` | Maintenance-LTS line — kept in the matrix until Node 20 hits end-of-life in April 2026, after which this cell gets dropped. |
+| 3 | **Bun 1.3+** | `taskora/redis` → `taskora/redis/ioredis` | Proves ioredis works under Bun's Node-compatibility layer. Use this if you are already running Bun and have other ioredis-using code in your project. |
+| 4 | **Bun 1.3+** | `taskora/redis/bun` → native `Bun.RedisClient` | Zero-peer-dependency path for Bun-only deployments. Goes straight through Bun's built-in Redis client and drops the ioredis peer dep entirely. |
+| 5 | **Deno 2.x** | `taskora/redis` → `taskora/redis/ioredis` | ioredis imported via Deno's `npm:` specifier and `--node-modules-dir=auto`. Lets you use Taskora from Deno projects without maintaining a separate Deno-native Redis adapter. |
 
 Not on the matrix: **Deno + `Bun.RedisClient`**. Bun's native Redis client is a Bun-runtime global — it is unavailable under Deno by definition.
 
@@ -69,7 +70,7 @@ Two details matter:
 
 ## Redis provisioning
 
-CI uses a GitHub Actions `services: redis:7-alpine` sidecar and sets `REDIS_URL=redis://localhost:6379` for every cell. The test `globalSetup` honors a pre-existing `REDIS_URL` and skips its own testcontainers spin-up — so there is no Docker-in-Docker, no test-container lifecycle management per cell, and all four runtimes talk to the same shared Redis instance.
+CI uses a GitHub Actions `services: redis:7-alpine` sidecar and sets `REDIS_URL=redis://localhost:6379` for every cell. The test `globalSetup` honors a pre-existing `REDIS_URL` and skips its own testcontainers spin-up — so there is no Docker-in-Docker, no test-container lifecycle management per cell, and all five cells talk to the same shared Redis instance.
 
 Locally, if you already have Redis running on `localhost:6379` the same skip applies: tests will use it instead of spawning a new container. If you do not, the `@testcontainers/redis` package will automatically pull `redis:7-alpine` and start a fresh container for you.
 
@@ -88,17 +89,18 @@ on:
 
 jobs:
   lint-build:
-    # Biome + pkgroll, once, on Node 20 — runtime-agnostic.
+    # Biome + pkgroll, once, on Node 24 — runtime-agnostic.
 
   test:
     strategy:
       fail-fast: false           # never hide divergence by cancelling peers
       matrix:
         include:
-          - { runtime: node, driver: ioredis }
-          - { runtime: bun,  driver: ioredis }
-          - { runtime: bun,  driver: bun }
-          - { runtime: deno, driver: ioredis }
+          - { runtime: node, driver: ioredis, nodeVersion: 24, name: "Node 24 + ioredis" }
+          - { runtime: node, driver: ioredis, nodeVersion: 20, name: "Node 20 + ioredis" }
+          - { runtime: bun,  driver: ioredis, nodeVersion: 24, name: "Bun + ioredis" }
+          - { runtime: bun,  driver: bun,     nodeVersion: 24, name: "Bun + Bun.RedisClient" }
+          - { runtime: deno, driver: ioredis, nodeVersion: 24, name: "Deno + ioredis" }
     services:
       redis:                     # shared sidecar for every cell
         image: redis:7-alpine
@@ -133,7 +135,7 @@ Every cell is reproducible on your machine. Start a Redis on `localhost:6399` (t
 docker run --rm -d --name taskora-test-redis -p 6399:6379 redis:7-alpine
 export REDIS_URL=redis://localhost:6399
 
-# Matrix cells
+# Matrix cells (each uses whatever Node your shell points to)
 bun run test:node          # Node   + ioredis
 bun run test:bun:ioredis   # Bun    + ioredis  (bunx --bun vitest run)
 bun run test:bun           # Bun    + Bun.RedisClient  (TASKORA_TEST_DRIVER=bun)
@@ -143,7 +145,7 @@ bun run test:deno          # Deno   + ioredis  (npm: specifier via --node-module
 bun run test:all
 ```
 
-All four scripts live in `package.json` and correspond exactly to what CI runs. Cleanup when done:
+The scripts drive the same Vitest invocation CI uses. To reproduce the Node 20 and Node 24 cells specifically, switch your Node version via your version manager (`fnm`, `nvm`, `volta`, `mise`) and re-run `bun run test:node`. Cleanup when done:
 
 ```bash
 docker stop taskora-test-redis

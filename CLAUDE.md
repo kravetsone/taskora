@@ -127,6 +127,7 @@ src/
   ```
 
   Available: `pm-add`, `pm-install`, `pm-run`, etc. Existing usage: `guide/getting-started.md`, `index.md`, `features/scheduling.md`. The plugin auto-generates tabs for all four managers with site-wide tab-sync — manual code-groups break the sync and drift out of date.
+- **Landing-page hero feature cards** (`documentation/index.md` `features:` frontmatter array): the VitePress home grid renders 3-up on desktop, 2-up on tablet. **Aim for a grid-friendly count — 3, 6, or 9**. A count of 7 or 8 produces an orphan row on desktop that looks half-finished. **Never drop or add a feature card unilaterally** — ask the user first, even if the current count is already non-friendly. When adding a card, also ask which existing card (if any) should be removed to keep the grid clean. Style convention: each `details` string follows the "Batteries-Included Admin UI" template — a concrete anchor noun (module name or primary concept) followed by comma-separated concrete capabilities, then one or two short punchy declarations. Avoid abstract value-prop clichés ("If it compiles, it works", "just works", "blazing fast") — list the actual features.
 
 ## Commands
 

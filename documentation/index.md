@@ -18,22 +18,19 @@ hero:
 
 features:
   - title: Type-Safe End-to-End
-    details: Inferred types from handler to dispatch to result. No magic strings. If it compiles, it works.
+    details: "Inferred input and output types from handler signature all the way to handle.result. Standard Schema validation on the way in. Zero casts, zero magic strings."
     icon: "\U0001F512"
   - title: Retry & Backoff
-    details: Fixed, exponential, linear, or custom strategies. Jitter, maxDelay, selective retryOn/noRetryOn.
+    details: "Fixed, exponential, linear, or user-supplied backoff. Jitter, maxDelay, selective retryOn / noRetryOn. Per-task or per-dispatch override."
     icon: "\U0001F504"
-  - title: Koa-Style Middleware
-    details: Onion model composition. App-level and per-task. Mutate data on the way in, inspect results on the way out.
-    icon: "\U0001F9C5"
   - title: Built-in Scheduling
-    details: Cron + intervals with distributed leader election. Missed run policies. Runtime management API.
+    details: "Cron and intervals with distributed leader election across pods. Missed-run policies — skip, catch-up, catch-up-limit. Pause, resume, trigger, list at runtime."
     icon: "\u23F0"
   - title: Flow Control
-    details: Debounce, throttle, deduplicate — all atomic via Lua scripts. Plus batch collect with multi-trigger flush.
+    details: "Debounce, throttle, deduplicate, collect — all atomic via Lua scripts. Concurrency per key. Singleton tasks. Graceful pub/sub cancellation."
     icon: "\U0001F6A6"
   - title: First-Class Testing
-    details: "taskora/test with virtual time, in-memory adapter, run() for unit and execute() for integration."
+    details: "taskora/test with virtual time and an in-memory adapter. runner.run() for handler unit tests, runner.execute() for the full pipeline. No Redis, no Docker."
     icon: "\U0001F9EA"
   - title: Batteries-Included Admin UI
     details: "taskora/board — live dashboard with workflow DAG, schedules, DLQ, migrations, throughput. Mount on any framework. No build step."
@@ -78,7 +75,7 @@ Taskora is new, but it is not untested. Every commit and every pull request runs
 
 <TestingMatrix />
 
-That is **1,200 real integration test runs against a live Redis on every push** — spanning Lua scripts, blocking dequeues, stream subscribers, pub/sub cancellation, distributed leader election, workflow DAG execution, schedulers, debounce / throttle / dedup flow control, and retention-aware DLQ management. See [Cross-runtime CI](/testing/cross-runtime) for the full matrix and how to reproduce any cell locally.
+That is **1,500 real integration test runs against a live Redis on every push** — spanning Lua scripts, blocking dequeues, stream subscribers, pub/sub cancellation, distributed leader election, workflow DAG execution, schedulers, debounce / throttle / dedup flow control, and retention-aware DLQ management. See [Cross-runtime CI](/testing/cross-runtime) for the full matrix and how to reproduce any cell locally.
 
 **What this means for you:**
 

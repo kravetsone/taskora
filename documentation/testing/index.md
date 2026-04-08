@@ -3,7 +3,7 @@
 Taskora ships with first-class testing utilities via `taskora/test` — no Redis, no Docker, no flaky tests.
 
 ::: tip Looking for how Taskora itself is tested?
-See [Cross-runtime CI](/testing/cross-runtime). The library runs its complete 300-test integration suite against **Node 20, Bun 1.3+ (with both ioredis and native `Bun.RedisClient`), and Deno 2.x** on every push. That is **1,200 live-Redis test runs per commit** — and the publish workflow is gated on every matrix cell being green, so no release can ship with a red runtime.
+See [Cross-runtime CI](/testing/cross-runtime). The library runs its complete 300-test integration suite against **Node 24, Node 20, Bun 1.3+ (with both ioredis and native `Bun.RedisClient`), and Deno 2.x** on every push. That is **1,500 live-Redis test runs per commit** — and the publish workflow is gated on every matrix cell being green, so no release can ship with a red runtime.
 :::
 
 ## Installation

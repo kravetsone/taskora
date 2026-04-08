@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   lint-build:
-    name: Lint + build (Node 20)
+    name: Lint + build (Node 24)
     runs-on: ubuntu-latest
     # Skip duplicate runs: for same-repo PRs the `push` trigger already covers
     # this commit. Only run the pull_request event for PRs originating from
@@ -26,7 +26,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
       - run: bun install --frozen-lockfile
       - name: Lint
         run: bunx biome check .
@@ -34,7 +34,7 @@ jobs:
         run: bunx pkgroll
 
   test:
-    name: ${{ matrix.runtime }} + ${{ matrix.driver }}
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     if: >-
       github.event_name != 'pull_request' ||
@@ -43,10 +43,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runtime: node, driver: ioredis }
-          - { runtime: bun, driver: ioredis }
-          - { runtime: bun, driver: bun }
-          - { runtime: deno, driver: ioredis }
+          # Node: both the current Active LTS (24, since Oct 2025) and the
+          # prior line (20). Node 20 hits end-of-life in Apr 2026 — keep it
+          # covered until then to give maintenance-LTS users explicit signal,
+          # then drop this cell.
+          - { runtime: node, driver: ioredis, nodeVersion: 24, name: "Node 24 + ioredis" }
+          - { runtime: node, driver: ioredis, nodeVersion: 20, name: "Node 20 + ioredis" }
+          - { runtime: bun, driver: ioredis, nodeVersion: 24, name: "Bun + ioredis" }
+          - { runtime: bun, driver: bun, nodeVersion: 24, name: "Bun + Bun.RedisClient" }
+          - { runtime: deno, driver: ioredis, nodeVersion: 24, name: "Deno + ioredis" }
           # Skipped: deno + bun — Bun.RedisClient is a Bun-runtime global,
           # not available under Deno.
     services:
@@ -69,7 +74,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.nodeVersion }}
       - if: matrix.runtime == 'deno'
         uses: denoland/setup-deno@v2
         with:
