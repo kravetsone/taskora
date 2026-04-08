@@ -153,6 +153,12 @@ export namespace Taskora {
     throttle?: ThrottleConfig;
     deduplicate?: DeduplicateConfig;
     throwOnReject?: boolean;
+    /**
+     * Skip Standard Schema validation of `data` on this dispatch only.
+     * Overrides `TaskoraOptions.validateOnDispatch` (which is `true` by
+     * default). Worker-side validation still runs before the handler.
+     */
+    skipValidation?: boolean;
   }
 
   export interface DequeueOptions {

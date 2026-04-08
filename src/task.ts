@@ -56,6 +56,12 @@ export interface TaskDeps {
   serializer: Taskora.Serializer;
   ensureConnected: () => Promise<void>;
   onEventSubscribe?: (taskName: string) => void;
+  /**
+   * App-level default for whether `dispatch()` validates input via the task's
+   * Standard Schema before enqueueing. Per-call `dispatchOptions.skipValidation`
+   * overrides this. Default `true`.
+   */
+  validateOnDispatch: boolean;
 }
 
 export class Task<TInput, TOutput> {
@@ -211,6 +217,10 @@ export class Task<TInput, TOutput> {
     const dispatchTs = Date.now();
     const dispatchSeq = ++_dispatchSeq;
 
+    // Validation is enabled globally (TaskoraOptions.validateOnDispatch, default
+    // true) and can be disabled per-call via options.skipValidation.
+    const shouldValidate = this.deps.validateOnDispatch && options?.skipValidation !== true;
+
     // Collect tasks use a simplified dispatch path
     if (this.config.collect) {
       const collect = this.config.collect;
@@ -221,7 +231,7 @@ export class Task<TInput, TOutput> {
         this.deps.serializer,
         (async () => {
           await this.deps.ensureConnected();
-          if (this.inputSchema) {
+          if (shouldValidate && this.inputSchema) {
             await validateSchema(this.inputSchema, data);
           }
           const serialized = this.deps.serializer.serialize(data);
@@ -247,7 +257,7 @@ export class Task<TInput, TOutput> {
       this.deps.serializer,
       (async () => {
         await this.deps.ensureConnected();
-        if (this.inputSchema) {
+        if (shouldValidate && this.inputSchema) {
           await validateSchema(this.inputSchema, data);
         }
         const serialized = this.deps.serializer.serialize(data);

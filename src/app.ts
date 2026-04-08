@@ -8,7 +8,7 @@ import type { Duration } from "./scheduler/duration.js";
 import { parseDuration } from "./scheduler/duration.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { json } from "./serializer.js";
-import { Task, type TaskConfig, type TaskMigrationConfig } from "./task.js";
+import { Task, type TaskConfig, type TaskDeps, type TaskMigrationConfig } from "./task.js";
 import type { Taskora } from "./types.js";
 import { Worker } from "./worker.js";
 
@@ -23,6 +23,17 @@ export interface TaskoraOptions {
     concurrency?: number;
     stall?: Taskora.StallConfig;
   };
+  /**
+   * Whether `dispatch()` validates input via the task's Standard Schema
+   * before enqueueing. Disable when the producer fully trusts the input
+   * (e.g. already validated upstream) and you want to skip the schema
+   * cost. Worker-side validation is unaffected — it always runs before
+   * the handler so job data is still checked at some boundary.
+   *
+   * Per-call `dispatch(data, { skipValidation: true })` overrides this.
+   * Default: `true`.
+   */
+  validateOnDispatch?: boolean;
 }
 
 type MigrationFn = (data: unknown) => unknown;
@@ -125,6 +136,7 @@ export class App {
   readonly deadLetters: DeadLetterManager;
   private readonly defaults: NonNullable<TaskoraOptions["defaults"]>;
   private readonly schedulerConfig?: Taskora.SchedulerConfig;
+  private readonly validateOnDispatch: boolean;
   /** @internal — used by Worker for retention trim */
   readonly retention: {
     completed: { maxAgeMs: number; maxItems: number };
@@ -149,6 +161,7 @@ export class App {
     this.serializer = options.serializer ?? json();
     this.defaults = options.defaults ?? {};
     this.schedulerConfig = options.scheduler;
+    this.validateOnDispatch = options.validateOnDispatch ?? true;
     this.schedules = new ScheduleManager(this);
     this.deadLetters = new DeadLetterManager(this.adapter, this.tasks, () => this.inspect());
     this.retention = {
@@ -269,22 +282,7 @@ export class App {
         : undefined;
 
     const task = new Task<TInput, TOutput>(
-      {
-        adapter: this.adapter,
-        serializer: this.serializer,
-        ensureConnected: () => this.ensureConnected(),
-        onEventSubscribe: (taskName) => {
-          this.tasksNeedingEvents.add(taskName);
-          if (this.started) {
-            this.ensureSubscription().catch((err) => {
-              this.appEmitter.emit(
-                "worker:error",
-                err instanceof Error ? err : new Error(String(err)),
-              );
-            });
-          }
-        },
-      },
+      this.buildTaskDeps(),
       name,
       handler,
       { concurrency, timeout, retry, stall, singleton, concurrencyLimit, ttl, collect, onCancel },
@@ -351,22 +349,7 @@ export class App {
     const concurrency = this.defaults.concurrency ?? 1;
 
     const task = new Task<TInput, TOutput>(
-      {
-        adapter: this.adapter,
-        serializer: this.serializer,
-        ensureConnected: () => this.ensureConnected(),
-        onEventSubscribe: (taskName) => {
-          this.tasksNeedingEvents.add(taskName);
-          if (this.started) {
-            this.ensureSubscription().catch((err) => {
-              this.appEmitter.emit(
-                "worker:error",
-                err instanceof Error ? err : new Error(String(err)),
-              );
-            });
-          }
-        },
-      },
+      this.buildTaskDeps(),
       contract.name,
       safetyHandler,
       { concurrency, timeout, retry, stall },
@@ -522,10 +505,11 @@ export class App {
   }
 
   /** @internal — build the TaskDeps bag shared by `task()`, `register()`, and `implement()`. */
-  private buildTaskDeps(): Parameters<typeof Task>[0] {
+  private buildTaskDeps(): TaskDeps {
     return {
       adapter: this.adapter,
       serializer: this.serializer,
+      validateOnDispatch: this.validateOnDispatch,
       ensureConnected: () => this.ensureConnected(),
       onEventSubscribe: (taskName) => {
         this.tasksNeedingEvents.add(taskName);
