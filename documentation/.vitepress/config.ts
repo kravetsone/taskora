@@ -111,6 +111,8 @@ export default defineConfig({
           text: "Essentials",
           items: [
             { text: "Tasks", link: "/guide/tasks" },
+            { text: "Contracts", link: "/guide/contracts" },
+            { text: "Splitting Services", link: "/guide/splitting-services" },
             { text: "Dispatching Jobs", link: "/guide/dispatching" },
             { text: "Job Context", link: "/guide/job-context" },
             { text: "Adapters", link: "/guide/adapters" },

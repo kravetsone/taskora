@@ -141,7 +141,25 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–14, 17a, and 18 complete. Phases 15 (OpenTelemetry) and 16 (React Hooks) deferred. Next: Phase 17b (Durable Steps, Wait-for-Event). See `docs/IMPLEMENTATION.md` for full phase breakdown.
+Phases 1–14, 17a, 18, and 19 complete. Phases 15 (OpenTelemetry) and 16 (React Hooks) deferred. Next: Phase 17b (Durable Steps, Wait-for-Event). See `docs/IMPLEMENTATION.md` for full phase breakdown.
+
+Phase 19 delivered:
+- Task contracts: producer/consumer split via `defineTask()` / `staticContract()`
+- `TaskContract<TInput, TOutput>` — pure, serializable task declaration with no runtime dependency on App/Worker/Adapter. Plain object with phantom types via `declare const ... unique symbol` for inference.
+- `defineTask(config)` — contract with runtime Standard Schema (Zod/Valibot/ArkType)
+- `staticContract<I, O>(config)` — type-only contract for edge/browser producers, no schema runtime
+- `isTaskContract(value)` — runtime type guard
+- `App.register(contract)` — producer path. Returns `BoundTask<I, O>`. Idempotent by task name. `App.start()` skips the Worker loop for contract-only tasks, so producer-only processes start cleanly.
+- `App.implement(contract, handler, options?)` — worker path. Three overloads: bare handler, handler+options, object form (required for collect tasks). Throws on double-implement. Upgrades a prior `register()` in place — existing `BoundTask` references stay valid.
+- `BoundTask<I, O>` — dispatchable wrapper with `.dispatch()`, `.dispatchMany()`, `.on()`, `.s()`, `.map()`, `.chunk()`. Workflow composition from contracts works end-to-end.
+- `Task.hasHandler: boolean` flag. `App.start()` skips workers for contract-only registrations. `Task._mergeImplementation()` internal method swaps handler/config/middleware/migrations when `register()` is upgraded by `implement()`.
+- `App.buildTaskDeps()` private helper extracted to share `TaskDeps` construction between `task()` / `register()` / `implement()`.
+- `TaskoraOptions.validateOnDispatch?: boolean` (default `true`) — producer-side schema validation knob.
+- `DispatchOptions.skipValidation?: boolean` — per-call override.
+- Worker-side validation is unaffected by either flag — always runs before handler.
+- 9 unit tests + 23 integration tests (total: 134 unit, 198 integration)
+- Docs: `documentation/guide/contracts.md`, `documentation/guide/splitting-services.md`, Contracts section in `docs/API_DESIGN.md` (§19), Contracts section in `documentation/skills/using-taskora/SKILL.md`, skill metadata bumped to 0.3.0.
+- No Redis-backed contract registry — deliberately cut. Runtime drift safety comes from worker-side Standard Schema validation (Phase 1) + payload versioning & migrations (Phase 9), which together cover the drift cases a registry would have caught.
 
 Phase 18 delivered:
 - `taskora/board` entrypoint: `createBoard(app, options)` — admin dashboard for taskora

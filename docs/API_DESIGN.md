@@ -1584,6 +1584,126 @@ App developers: types are inferred, namespace rarely needed directly.
 
 ---
 
+## 19. Contracts — Producer/Consumer Split
+
+### Problem
+
+Inline `app.task("name", { handler, input, output })` ties declaration and implementation together in a single call. Any process that wants to `dispatch()` must import the handler file — and the handler's transitive dependency graph leaks into the caller's bundle. For a monolith this is fine; for production setups that split API servers from background workers, it's a leak.
+
+Concretely:
+- Web API server wants to dispatch `send-email`; it ends up bundling `nodemailer` and `handlebars` even though it never calls them.
+- Edge function wants to dispatch `process-image`; it can't, because `sharp` has native bindings and won't build for the edge.
+- Three services dispatch to one worker pool; each service duplicates the input/output types manually and drifts.
+
+### Design
+
+A **task contract** is a pure, serializable declaration:
+
+```ts
+const sendEmailTask = defineTask({
+  name: "send-email",
+  input: z.object({ to: z.email(), subject: z.string() }),
+  output: z.object({ messageId: z.string() }),
+  retry: { attempts: 3, backoff: "exponential" },
+  timeout: "30s",
+})
+```
+
+`defineTask()` returns a `TaskContract<TInput, TOutput>` — plain data with no runtime dependency on `App`, `Worker`, or `Adapter`. Types flow through the object phantom-style so TS inference works without a runtime brand.
+
+Contracts are bound to an `App` in one of two directions:
+
+- **`app.register(contract)`** → returns `BoundTask<I, O>`. Producer path: no handler, dispatch works, worker loop is skipped for this task. Idempotent by task name.
+- **`app.implement(contract, handler, options?)`** → returns `BoundTask<I, O>`. Worker path: attaches a handler. Three overloads: bare handler, handler+options, object form (required for collect tasks).
+
+Both return the same `BoundTask` type. The underlying `Task` instance is shared — calling `implement()` after `register()` upgrades the existing task in place, and the `BoundTask` reference returned by `register()` stays valid.
+
+### Design decisions and the roads not taken
+
+**Why explicit `register()` instead of auto-binding on dispatch.**
+
+The Trigger.dev / Inngest pattern is "contract IS dispatchable, auto-resolves at call time". Rejected because:
+1. It requires module-level state (which App is "the" App?) or a magic context lookup.
+2. It makes errors non-local: if a contract is dispatched without being bound to any app, the error surfaces far from where it was introduced.
+3. It complicates tests — swapping a test app for a prod app requires either mocking the module-level binding or passing the app through every call.
+
+Explicit `register()` costs one line per contract. In exchange: no global state, no magic, the type system enforces that a contract must be bound before dispatch.
+
+**Why no `TaskContract.s()` for workflow composition.**
+
+Workflow `Signature` objects currently carry a reference back to the `Task` instance — the dispatcher needs this to extract the adapter and serializer. Adding `.s()` directly on `TaskContract` would require either carrying an App reference on the contract (mutable data, no longer pure) or using module-level state at dispatch time. Neither fits the "contracts are pure data" principle.
+
+The workaround is trivial: `BoundTask.s()` works identically to `Task.s()`, so users `register()` or `implement()` their contracts once and compose workflows from the returned `BoundTask`s:
+
+```ts
+const fetchUser = taskora.register(fetchUserContract)
+const sendEmail = taskora.register(sendEmailContract)
+
+await chain(fetchUser.s({ id: "42" }), sendEmail.s()).dispatch()
+```
+
+**Why `register()` is idempotent, not strict.**
+
+The obvious rule is "calling register() twice for the same name is a bug". Rejected because the monolith case (both producer and worker in one process) naturally calls `register()` and `implement()` on the same contract, sometimes from different modules. An idempotent `register()` makes the intermediate state valid — the first call creates the task, the second returns the existing `BoundTask`, and `implement()` upgrades in place.
+
+The only real conflict is double-`implement()` (two handlers for the same task), which *is* a bug and throws.
+
+**Why `staticContract<I, O>()` as a distinct primitive.**
+
+Producers running on edge runtimes or in browser bundles can't afford to ship Zod/Valibot at runtime. `staticContract<I, O>({ name })` carries the types purely at the type level — no schemas, no runtime validation on the producer. Workers always validate through their own schemas (attached at `implement()` time), so the safety net stays intact at the worker boundary.
+
+A single codebase can have the contract file re-exported in two flavors: `contracts/tasks.ts` with `defineTask()` for Node consumers, and `contracts/tasks.edge.ts` with `staticContract()` for edge/browser. Same task names, same type shapes, different runtime payloads.
+
+### Distribution patterns
+
+The contract file needs to be importable by both producer and worker. Two recommended strategies:
+
+1. **Single package, two entrypoints** — one `package.json`, `src/contracts/tasks.ts` imported by `src/api/` and `src/worker/`, built into two bundles, deployed as two containers from the same Docker image. Friction 1/5. Default recommendation for small-to-mid teams.
+
+2. **Monorepo with `workspace:*` protocol** — bun/pnpm workspaces. `packages/contracts` exports the contract module, `apps/api` and `apps/worker` depend on `"@acme/contracts": "workspace:*"`. No publish step, no private registry. Friction 2/5 initial, 1/5 ongoing. Use when three or more consumers share the same contracts.
+
+Private npm registries (GitHub Packages, Verdaccio, JSR), git submodules, TS path aliases, code generation, and copy-paste are all explicitly documented as anti-patterns. Not because they don't work, but because they add friction without adding safety.
+
+### Runtime drift safety — no new mechanisms needed
+
+The phase was initially planned to include a Redis-backed contract registry (workers publish their implemented contracts on startup, producers verify on dispatch). This was cut. Rationale:
+
+- **Worker-side schema validation** (Phase 1) already validates every job before the handler. A producer dispatching stale data fails at the worker boundary with a clear `ValidationError`.
+- **Payload versioning & migrations** (Phase 9) let contracts evolve without requiring atomic deploys: ship worker first with migration chain, ship producer with new shape, in-flight jobs drain correctly.
+
+Together these two mechanisms cover the drift cases that a runtime registry would have caught, without introducing a new moving part. The contract design explicitly declines to add anything the existing primitives already handle.
+
+### `validateOnDispatch` knob
+
+`TaskoraOptions.validateOnDispatch?: boolean` (default `true`) controls whether `dispatch()` validates input against the task's Standard Schema before enqueueing. `DispatchOptions.skipValidation?: boolean` overrides per-call. Threaded through `TaskDeps.validateOnDispatch` into `Task.dispatch()`.
+
+Disable when:
+- The producer has already validated upstream (tRPC router, REST framework body parser).
+- The producer uses `staticContract()` and has no schema to run.
+- Validation cost is measured as a bottleneck.
+
+Worker-side validation is unaffected — it always runs before the handler.
+
+### What's exported
+
+```ts
+import {
+  defineTask,           // factory for contracts with runtime schemas
+  staticContract,       // factory for type-only contracts (no runtime deps)
+  isTaskContract,       // runtime type guard
+  BoundTask,            // class, instanceof-checkable
+  type TaskContract,    // the contract type
+  type DefineTaskConfig,
+  type StaticContractConfig,
+} from "taskora"
+
+// Also exposed as Taskora.TaskContract<I, O> inside the namespace for consistency
+import type { Taskora } from "taskora"
+type Foo = Taskora.TaskContract<{ a: number }, { b: string }>
+```
+
+---
+
 ## Comparison
 
 | Feature | BullMQ | Celery | **taskora** |

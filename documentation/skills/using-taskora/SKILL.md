@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.2.0"
+  version: "0.3.0"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -146,6 +146,167 @@ process.on("SIGTERM", async () => {
   await taskora.close()  // waits for active jobs to finish, then disconnects
 })
 ```
+
+## Contracts — producer/consumer split
+
+A **task contract** is a pure declaration of a task (name + schemas + defaults) with no runtime dependency on `App`/`Worker`/`Adapter`. Contracts are NOT the default path — inline `taskora.task("name", { handler, ... })` is simpler and correct for most projects. Reach for contracts only when the producer physically cannot import the handler.
+
+**When to use contracts vs inline tasks:**
+
+Default: inline. Same type safety, fewer concepts. If producer and worker run in the same process, stop here.
+
+Use contracts only when one of these applies:
+- Worker has heavy runtime deps (`sharp`, `puppeteer`, `ffmpeg`, native bindings, large ML models) that you don't want in the producer bundle.
+- Producer runs on an edge runtime or browser that physically cannot execute the handler.
+- Multiple services dispatch to the same worker pool, and you want one source of truth for task names and types (monorepo `packages/contracts` workspace).
+
+Inline tasks force the producer to import the handler file, which drags the handler's transitive dependency graph into the producer bundle. Contracts split declaration from implementation so the producer imports only the contract file (plain data, no handler code).
+
+If none of the above applies, stay with inline tasks. Contracts add an extra layer you don't need.
+
+### `defineTask()` — contract with runtime schemas
+
+```typescript
+// contracts/tasks.ts — shared between producer and worker
+import { defineTask } from "taskora"
+import { z } from "zod"
+
+export const sendEmailTask = defineTask({
+  name: "send-email",
+  input: z.object({
+    to: z.string().email(),
+    subject: z.string(),
+    body: z.string(),
+  }),
+  output: z.object({ messageId: z.string() }),
+  retry: { attempts: 3, backoff: "exponential" },
+  timeout: "30s",
+})
+```
+
+Returns `TaskContract<TInput, TOutput>`. Types are inferred from any Standard Schema compatible library (Zod, Valibot, ArkType). No `dispatch()` method on the contract itself — you must bind it to an `App` first via `register()` or `implement()`.
+
+### `staticContract()` — types only, no runtime schemas
+
+For producers that can't ship a schema library (edge runtimes, browsers, serverless). Worker still validates — validation always runs on the worker boundary regardless.
+
+```typescript
+import { staticContract } from "taskora"
+
+export const sendEmailTask = staticContract<
+  { to: string; subject: string; body: string },
+  { messageId: string }
+>({ name: "send-email" })
+```
+
+### `taskora.register()` — producer path
+
+```typescript
+// api/server.ts — producer only, never runs the handler
+import { createTaskora } from "taskora"
+import { redisAdapter } from "taskora/redis"
+import { sendEmailTask } from "../contracts/tasks.js"
+
+const taskora = createTaskora({ adapter: redisAdapter(process.env.REDIS_URL!) })
+const sendEmail = taskora.register(sendEmailTask)
+
+// Fully typed — TypeScript enforces { to, subject, body }
+const handle = sendEmail.dispatch({
+  to: "alice@example.com",
+  subject: "Welcome",
+  body: "...",
+})
+const result = await handle.result  // { messageId: string }
+```
+
+Key properties:
+- **Idempotent by task name** — calling `register(sameContract)` twice returns the same `BoundTask`.
+- **Producer-only processes can still call `taskora.start()`** — the worker loop simply skips contract-only tasks. Dispatch and event subscription still work.
+- Returns a `BoundTask<TInput, TOutput>` with `.dispatch()`, `.dispatchMany()`, `.on()`, `.s()`, `.map()`, `.chunk()`.
+
+### `taskora.implement()` — worker path, 3 call forms
+
+```typescript
+// Form 1: bare handler — most common
+taskora.implement(sendEmailTask, async (data, ctx) => {
+  return { messageId: await mailer.send(data) }
+})
+
+// Form 2: handler + worker-side options
+taskora.implement(
+  processImageTask,
+  async (data, ctx) => { /* ... */ },
+  {
+    concurrency: 4,
+    middleware: [withTracing()],
+    version: 3,
+    migrate: [(v1) => ({ ...v1, width: v1.w })],
+  },
+)
+
+// Form 3: object form — required for collect tasks, preferred for larger configs
+taskora.implement(batchEmailTask, {
+  collect: { key: "user-emails", delay: "5s", maxSize: 100 },
+  handler: async (items, ctx) => {
+    await mailer.sendBatch(items)
+    return { sent: items.length }
+  },
+})
+```
+
+`ImplementOptions` accepts all worker-side config that isn't on the contract: `concurrency`, `middleware`, `onCancel`, `singleton`, `concurrencyLimit`, `ttl`, `version`, `since`, `migrate`. Fields that also exist on the contract (`retry`, `timeout`, `stall`) act as worker-side overrides when set.
+
+**Precedence**: `implement()` options → contract defaults → app defaults.
+
+**Double-implement throws**. Calling `implement()` after `register()` is NOT a double-implement — it's the intended upgrade path. The existing `BoundTask` returned by `register()` is updated in place and keeps working.
+
+### Workflow composition from contracts
+
+Once registered or implemented, contract-based `BoundTask`s compose into chain/group/chord identically to inline tasks:
+
+```typescript
+import { chain } from "taskora"
+import { fetchUserTask, renderTemplateTask, sendEmailTask } from "../contracts/tasks.js"
+
+const fetchUser = taskora.register(fetchUserTask)
+const renderTemplate = taskora.register(renderTemplateTask)
+const sendEmail = taskora.register(sendEmailTask)
+
+// Producer-side composition — no handler code needed
+await chain(
+  fetchUser.s({ id: "42" }),
+  renderTemplate.s(),
+  sendEmail.s(),
+).dispatch().result
+```
+
+Jobs run on whichever process has implemented each contract. A single workflow can span multiple worker deployments — routing is by task name.
+
+### `validateOnDispatch` — producer-side validation knob
+
+Default-on: `dispatch()` validates input via Standard Schema before enqueueing. Disable when producer has already validated upstream or uses `staticContract()`:
+
+```typescript
+// Global — for all dispatches in this app
+const taskora = createTaskora({
+  adapter: redisAdapter(url),
+  validateOnDispatch: false,
+})
+
+// Per-call — overrides global default
+sendEmail.dispatch(data, { skipValidation: true })
+```
+
+**Worker-side validation is unaffected** — it always runs before the handler. The safety net stays at the worker boundary regardless of producer config.
+
+### Distribution: where the contract file lives
+
+Two strategies, ranked by friction:
+
+1. **Single package, two entrypoints** (recommended for 80% of cases). One repo, one `package.json`, `src/contracts/tasks.ts` imported by `src/api/index.ts` and `src/worker/index.ts`. Build two bundles, deploy as two containers from the same Docker image.
+2. **Monorepo with `workspace:*` protocol**. `packages/contracts` workspace, `apps/api` and `apps/worker` depend on `"@acme/contracts": "workspace:*"`. No npm publish — bun/pnpm symlinks locally.
+
+**Do NOT** use private npm registries, git submodules, path aliases without workspaces, code generation, or copy-paste. Workspace protocol is free and native; everything else is enterprise ceremony.
 
 ## Task context (ctx)
 
