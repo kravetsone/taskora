@@ -117,6 +117,7 @@ export default defineConfig({
             { text: "Serializers", link: "/guide/serializers" },
             { text: "Error Handling", link: "/guide/error-handling" },
             { text: "Conventions", link: "/guide/conventions" },
+            { text: "AI Skills", link: "/guide/ai-skills" },
           ],
         },
       ],
