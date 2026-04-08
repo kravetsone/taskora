@@ -46,10 +46,16 @@ export function createBoard(app: App, options: BoardOptions = {}): Board {
   if (staticDir) {
     const indexHtml = readFileSync(join(staticDir, "index.html"), "utf-8");
 
-    root.get(`${basePath}/*`, (c) => {
-      // Strip basePath prefix to get the relative file path
+    root.get(`${basePath}/*`, (c, next) => {
+      // Skip API routes — let Hono's API handler respond
       const url = new URL(c.req.url);
-      let filePath = url.pathname.slice(basePath.length) || "/";
+      const relative = url.pathname.slice(basePath.length);
+      if (relative.startsWith("/api/") || relative === "/api") {
+        return next();
+      }
+
+      // Strip basePath prefix to get the relative file path
+      let filePath = relative || "/";
       if (filePath === "/") filePath = "/index.html";
 
       const fullPath = join(staticDir, filePath);
