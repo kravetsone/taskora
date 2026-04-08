@@ -1,110 +1,119 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue"
+import { ref, computed, watch } from "vue";
 
-const baseDelay = ref(1000)
-const maxDelay = ref(60000)
-const maxAttempts = ref(6)
-const showJitter = ref(true)
+const baseDelay = ref(1000);
+const maxDelay = ref(60000);
+const maxAttempts = ref(6);
+const showJitter = ref(true);
 const strategies = ref({
   fixed: true,
   exponential: true,
   linear: true,
-})
+});
 
 const strategyColors = {
   fixed: "#3b82f6",
   exponential: "#ef4444",
   linear: "#22c55e",
-}
+};
 
 const strategyLabels = {
   fixed: "Fixed",
   exponential: "Exponential",
   linear: "Linear",
-}
+};
 
 function computeDelay(strategy: string, attempt: number): number {
-  let delay: number
+  let delay: number;
   switch (strategy) {
     case "fixed":
-      delay = baseDelay.value
-      break
+      delay = baseDelay.value;
+      break;
     case "exponential":
-      delay = baseDelay.value * Math.pow(2, attempt - 1)
-      break
+      delay = baseDelay.value * Math.pow(2, attempt - 1);
+      break;
     case "linear":
-      delay = baseDelay.value * attempt
-      break
+      delay = baseDelay.value * attempt;
+      break;
     default:
-      delay = baseDelay.value
+      delay = baseDelay.value;
   }
-  return Math.min(delay, maxDelay.value)
+  return Math.min(delay, maxDelay.value);
 }
 
 const chartData = computed(() => {
-  const data: Record<string, { attempt: number; delay: number; jitterLow: number; jitterHigh: number }[]> = {}
+  const data: Record<
+    string,
+    { attempt: number; delay: number; jitterLow: number; jitterHigh: number }[]
+  > = {};
   for (const [strategy, enabled] of Object.entries(strategies.value)) {
-    if (!enabled) continue
-    data[strategy] = []
+    if (!enabled) continue;
+    data[strategy] = [];
     for (let a = 1; a <= maxAttempts.value; a++) {
-      const delay = computeDelay(strategy, a)
-      const jitter = delay * 0.25
+      const delay = computeDelay(strategy, a);
+      const jitter = delay * 0.25;
       data[strategy].push({
         attempt: a,
         delay,
         jitterLow: Math.max(0, delay - jitter),
         jitterHigh: Math.min(maxDelay.value, delay + jitter),
-      })
+      });
     }
   }
-  return data
-})
+  return data;
+});
 
-const svgWidth = 480
-const svgHeight = 240
-const padding = { top: 20, right: 20, bottom: 30, left: 55 }
-const plotW = svgWidth - padding.left - padding.right
-const plotH = svgHeight - padding.top - padding.bottom
+const svgWidth = 480;
+const svgHeight = 240;
+const padding = { top: 20, right: 20, bottom: 30, left: 55 };
+const plotW = svgWidth - padding.left - padding.right;
+const plotH = svgHeight - padding.top - padding.bottom;
 
 const yMax = computed(() => {
-  let max = 0
+  let max = 0;
   for (const points of Object.values(chartData.value)) {
     for (const p of points) {
-      max = Math.max(max, showJitter.value ? p.jitterHigh : p.delay)
+      max = Math.max(max, showJitter.value ? p.jitterHigh : p.delay);
     }
   }
-  return Math.max(max * 1.1, 1000)
-})
+  return Math.max(max * 1.1, 1000);
+});
 
 function xScale(attempt: number): number {
-  return padding.left + ((attempt - 1) / Math.max(maxAttempts.value - 1, 1)) * plotW
+  return padding.left + ((attempt - 1) / Math.max(maxAttempts.value - 1, 1)) * plotW;
 }
 
 function yScale(value: number): number {
-  return padding.top + plotH - (value / yMax.value) * plotH
+  return padding.top + plotH - (value / yMax.value) * plotH;
 }
 
 function formatDelay(ms: number): string {
-  if (ms >= 60000) return `${(ms / 60000).toFixed(0)}m`
-  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`
-  return `${ms}ms`
+  if (ms >= 60000) return `${(ms / 60000).toFixed(0)}m`;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`;
+  return `${ms}ms`;
 }
 
 const yTicks = computed(() => {
-  const ticks: number[] = []
-  const step = yMax.value / 4
+  const ticks: number[] = [];
+  const step = yMax.value / 4;
   for (let i = 0; i <= 4; i++) {
-    ticks.push(Math.round(step * i))
+    ticks.push(Math.round(step * i));
   }
-  return ticks
-})
+  return ticks;
+});
 
-const animKey = ref(0)
+const animKey = ref(0);
 watch([baseDelay, maxDelay, maxAttempts, strategies, showJitter], () => {
-  animKey.value++
-})
+  animKey.value++;
+});
 
-const hoveredPoint = ref<{ strategy: string; attempt: number; delay: number; x: number; y: number } | null>(null)
+const hoveredPoint = ref<{
+  strategy: string;
+  attempt: number;
+  delay: number;
+  x: number;
+  y: number;
+} | null>(null);
 </script>
 
 <template>

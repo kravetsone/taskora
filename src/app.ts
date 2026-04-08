@@ -332,18 +332,13 @@ export class App {
         this.middlewares,
         task.config.onCancel,
         (info) => {
-          if (
-            task.hasEventListeners("failed") ||
-            this.appEmitter.hasListeners("task:failed")
-          ) {
+          if (task.hasEventListeners("failed") || this.appEmitter.hasListeners("task:failed")) {
             return;
           }
           const maxAttempts = info.maxAttempts > 1 ? `/${info.maxAttempts}` : "";
           const retry = info.willRetry ? ", will retry" : "";
           const stack =
-            info.error instanceof Error && info.error.stack
-              ? info.error.stack
-              : String(info.error);
+            info.error instanceof Error && info.error.stack ? info.error.stack : String(info.error);
           console.error(
             `[taskora] task "${info.task}" job ${info.jobId} failed (attempt ${info.attempt}${maxAttempts}${retry})\n${stack}`,
           );

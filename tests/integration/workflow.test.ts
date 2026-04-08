@@ -43,11 +43,7 @@ describe("workflow integration", () => {
     const doubleTask = app.task("double", async (data: number) => data * 2);
     const toStringTask = app.task("to-string", async (data: number) => `result: ${data}`);
 
-    const handle = chain(
-      addTask.s({ x: 5, y: 5 }),
-      doubleTask.s(),
-      toStringTask.s(),
-    ).dispatch();
+    const handle = chain(addTask.s({ x: 5, y: 5 }), doubleTask.s(), toStringTask.s()).dispatch();
     await handle;
 
     await app.start();
@@ -64,11 +60,7 @@ describe("workflow integration", () => {
     const addTask = app.task("add", async (data: { x: number; y: number }) => data.x + data.y);
     const doubleTask = app.task("double", async (data: number) => data * 2);
 
-    const handle = addTask
-      .s({ x: 1, y: 2 })
-      .pipe(doubleTask.s())
-      .pipe(doubleTask.s())
-      .dispatch();
+    const handle = addTask.s({ x: 1, y: 2 }).pipe(doubleTask.s()).pipe(doubleTask.s()).dispatch();
     await handle;
 
     await app.start();

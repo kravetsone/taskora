@@ -1,33 +1,31 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue"
+import { ref, onMounted } from "vue";
 
-const stars = ref<string | null>(null)
-const downloads = ref<string | null>(null)
+const stars = ref<string | null>(null);
+const downloads = ref<string | null>(null);
 
 function formatNumber(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
-  return n.toString()
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return n.toString();
 }
 
 onMounted(async () => {
   try {
-    const res = await fetch("https://api.github.com/repos/kravetsone/taskora")
+    const res = await fetch("https://api.github.com/repos/kravetsone/taskora");
     if (res.ok) {
-      const data = await res.json()
-      stars.value = formatNumber(data.stargazers_count)
+      const data = await res.json();
+      stars.value = formatNumber(data.stargazers_count);
     }
   } catch {}
 
   try {
-    const res = await fetch(
-      "https://api.npmjs.org/downloads/point/last-week/taskora",
-    )
+    const res = await fetch("https://api.npmjs.org/downloads/point/last-week/taskora");
     if (res.ok) {
-      const data = await res.json()
-      downloads.value = formatNumber(data.downloads)
+      const data = await res.json();
+      downloads.value = formatNumber(data.downloads);
     }
   } catch {}
-})
+});
 </script>
 
 <template>

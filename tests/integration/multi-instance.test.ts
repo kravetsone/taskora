@@ -136,10 +136,7 @@ describe("multi-instance event fan-out", () => {
     await handle;
 
     // All 3 pods should receive the completed event
-    await waitFor(
-      () => eventsPerApp.every((events) => events.length >= 1),
-      10_000,
-    );
+    await waitFor(() => eventsPerApp.every((events) => events.length >= 1), 10_000);
 
     for (let i = 0; i < 3; i++) {
       expect(eventsPerApp[i]).toContain(handle.id);
@@ -163,10 +160,7 @@ describe("multi-instance event fan-out", () => {
     const handle = task0.dispatch("hey");
     await handle;
 
-    await waitFor(
-      () => appEvents.every((events) => events.length >= 1),
-      10_000,
-    );
+    await waitFor(() => appEvents.every((events) => events.length >= 1), 10_000);
 
     expect(appEvents[0]).toContain(handle.id);
     expect(appEvents[1]).toContain(handle.id);

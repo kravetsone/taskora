@@ -38,7 +38,12 @@ export class TestRunner {
   private readonly serializer: Taskora.Serializer;
   private readonly restoreFns: Array<() => void> = [];
   private timeOffset = 0;
-  private workflowSteps: Array<{ workflowId: string; nodeIndex: number; taskName: string; state: string }> = [];
+  private workflowSteps: Array<{
+    workflowId: string;
+    nodeIndex: number;
+    taskName: string;
+    state: string;
+  }> = [];
 
   constructor(options?: TestRunnerOptions) {
     this.backend = new MemoryBackend({
@@ -362,11 +367,7 @@ export class TestRunner {
     }
   }
 
-  private async failWorkflowStep(
-    taskName: string,
-    jobId: string,
-    error: string,
-  ): Promise<void> {
+  private async failWorkflowStep(taskName: string, jobId: string, error: string): Promise<void> {
     try {
       const meta = await this.backend.getWorkflowMeta(taskName, jobId);
       if (!meta) return;

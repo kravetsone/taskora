@@ -1,81 +1,109 @@
 <script setup lang="ts">
-import { ref, computed } from "vue"
+import { ref, computed } from "vue";
 
-type Phase = "idle" | "entering" | "app-mw-1-in" | "app-mw-2-in" | "task-mw-in" | "handler" | "task-mw-out" | "app-mw-2-out" | "app-mw-1-out" | "done"
+type Phase =
+  | "idle"
+  | "entering"
+  | "app-mw-1-in"
+  | "app-mw-2-in"
+  | "task-mw-in"
+  | "handler"
+  | "task-mw-out"
+  | "app-mw-2-out"
+  | "app-mw-1-out"
+  | "done";
 
 const layers = [
-  { id: "app-mw-1", label: "App MW 1", color: "#3b82f6", inPhase: "app-mw-1-in" as Phase, outPhase: "app-mw-1-out" as Phase },
-  { id: "app-mw-2", label: "App MW 2", color: "#6366f1", inPhase: "app-mw-2-in" as Phase, outPhase: "app-mw-2-out" as Phase },
-  { id: "task-mw", label: "Task MW", color: "#a855f7", inPhase: "task-mw-in" as Phase, outPhase: "task-mw-out" as Phase },
-]
+  {
+    id: "app-mw-1",
+    label: "App MW 1",
+    color: "#3b82f6",
+    inPhase: "app-mw-1-in" as Phase,
+    outPhase: "app-mw-1-out" as Phase,
+  },
+  {
+    id: "app-mw-2",
+    label: "App MW 2",
+    color: "#6366f1",
+    inPhase: "app-mw-2-in" as Phase,
+    outPhase: "app-mw-2-out" as Phase,
+  },
+  {
+    id: "task-mw",
+    label: "Task MW",
+    color: "#a855f7",
+    inPhase: "task-mw-in" as Phase,
+    outPhase: "task-mw-out" as Phase,
+  },
+];
 
-const phase = ref<Phase>("idle")
-const isRunning = ref(false)
-const dataSnippet = ref('{ to: "user@..." }')
-const resultSnippet = ref("")
-const showMutate = ref(false)
+const phase = ref<Phase>("idle");
+const isRunning = ref(false);
+const dataSnippet = ref('{ to: "user@..." }');
+const resultSnippet = ref("");
+const showMutate = ref(false);
 
 function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runRequest() {
-  if (isRunning.value) return
-  isRunning.value = true
-  dataSnippet.value = '{ to: "user@..." }'
-  resultSnippet.value = ""
+  if (isRunning.value) return;
+  isRunning.value = true;
+  dataSnippet.value = '{ to: "user@..." }';
+  resultSnippet.value = "";
 
-  phase.value = "entering"
-  await wait(400)
+  phase.value = "entering";
+  await wait(400);
 
   // Inward journey
-  phase.value = "app-mw-1-in"
-  if (showMutate.value) dataSnippet.value = '{ to: "user@...", ts: 1712... }'
-  await wait(500)
+  phase.value = "app-mw-1-in";
+  if (showMutate.value) dataSnippet.value = '{ to: "user@...", ts: 1712... }';
+  await wait(500);
 
-  phase.value = "app-mw-2-in"
-  await wait(500)
+  phase.value = "app-mw-2-in";
+  await wait(500);
 
-  phase.value = "task-mw-in"
-  await wait(500)
+  phase.value = "task-mw-in";
+  await wait(500);
 
   // Handler
-  phase.value = "handler"
-  await wait(700)
-  resultSnippet.value = '{ messageId: "abc" }'
+  phase.value = "handler";
+  await wait(700);
+  resultSnippet.value = '{ messageId: "abc" }';
 
   // Outward journey
-  phase.value = "task-mw-out"
-  await wait(500)
+  phase.value = "task-mw-out";
+  await wait(500);
 
-  phase.value = "app-mw-2-out"
-  await wait(500)
+  phase.value = "app-mw-2-out";
+  await wait(500);
 
-  phase.value = "app-mw-1-out"
-  if (showMutate.value) resultSnippet.value = '{ data: {...}, meta: {...} }'
-  await wait(500)
+  phase.value = "app-mw-1-out";
+  if (showMutate.value) resultSnippet.value = "{ data: {...}, meta: {...} }";
+  await wait(500);
 
-  phase.value = "done"
-  await wait(600)
-  phase.value = "idle"
-  isRunning.value = false
+  phase.value = "done";
+  await wait(600);
+  phase.value = "idle";
+  isRunning.value = false;
 }
 
-function isLayerActive(layer: typeof layers[0]): boolean {
-  return phase.value === layer.inPhase || phase.value === layer.outPhase
+function isLayerActive(layer: (typeof layers)[0]): boolean {
+  return phase.value === layer.inPhase || phase.value === layer.outPhase;
 }
 
-function isInward(layer: typeof layers[0]): boolean {
-  return phase.value === layer.inPhase
+function isInward(layer: (typeof layers)[0]): boolean {
+  return phase.value === layer.inPhase;
 }
 
-const handlerActive = computed(() => phase.value === "handler")
+const handlerActive = computed(() => phase.value === "handler");
 
 const currentDirection = computed(() => {
-  const inPhases: Phase[] = ["entering", "app-mw-1-in", "app-mw-2-in", "task-mw-in"]
-  if (inPhases.includes(phase.value)) return "in"
-  return "out"
-})
+  const inPhases: Phase[] = ["entering", "app-mw-1-in", "app-mw-2-in", "task-mw-in"];
+  if (inPhases.includes(phase.value)) return "in";
+  return "out";
+});
 </script>
 
 <template>

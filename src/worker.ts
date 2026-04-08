@@ -368,12 +368,20 @@ export class Worker {
     // Retention trim — piggyback on stall check interval
     const now = Date.now();
     try {
-      await this.adapter.trimCompleted(this.task.name, now - this.retention.completed.maxAgeMs, this.retention.completed.maxItems);
+      await this.adapter.trimCompleted(
+        this.task.name,
+        now - this.retention.completed.maxAgeMs,
+        this.retention.completed.maxItems,
+      );
     } catch {
       // Trim failed — will retry on next interval
     }
     try {
-      await this.adapter.trimDLQ(this.task.name, now - this.retention.failed.maxAgeMs, this.retention.failed.maxItems);
+      await this.adapter.trimDLQ(
+        this.task.name,
+        now - this.retention.failed.maxAgeMs,
+        this.retention.failed.maxItems,
+      );
     } catch {
       // Trim failed — will retry on next interval
     }

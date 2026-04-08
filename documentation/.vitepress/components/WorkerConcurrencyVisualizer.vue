@@ -1,24 +1,33 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from "vue"
+import { ref, reactive, onMounted, onUnmounted, computed } from "vue";
 
 interface Job {
-  id: number
-  color: string
-  progress: number
-  state: "queued" | "processing" | "done"
+  id: number;
+  color: string;
+  progress: number;
+  state: "queued" | "processing" | "done";
 }
 
-const colors = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#6366f1", "#ec4899", "#14b8a6"]
-let nextId = 1
+const colors = [
+  "#3b82f6",
+  "#22c55e",
+  "#f59e0b",
+  "#ef4444",
+  "#a855f7",
+  "#6366f1",
+  "#ec4899",
+  "#14b8a6",
+];
+let nextId = 1;
 
-const queue = reactive<Job[]>([])
-const slots = reactive<(Job | null)[]>([null, null, null])
-const concurrency = ref(3)
-const speed = ref(1)
-const paused = ref(false)
-const completedCount = ref(0)
+const queue = reactive<Job[]>([]);
+const slots = reactive<(Job | null)[]>([null, null, null]);
+const concurrency = ref(3);
+const speed = ref(1);
+const paused = ref(false);
+const completedCount = ref(0);
 
-let intervalId: ReturnType<typeof setInterval> | null = null
+let intervalId: ReturnType<typeof setInterval> | null = null;
 
 function addJob() {
   queue.push({
@@ -26,62 +35,64 @@ function addJob() {
     color: colors[(nextId - 1) % colors.length],
     progress: 0,
     state: "queued",
-  })
+  });
 }
 
 function addMany() {
-  for (let i = 0; i < 10; i++) addJob()
+  for (let i = 0; i < 10; i++) addJob();
 }
 
 function tick() {
-  if (paused.value) return
+  if (paused.value) return;
 
   // Fill empty slots from queue
   for (let i = 0; i < concurrency.value; i++) {
     if (!slots[i] && queue.length > 0) {
-      const job = queue.shift()!
-      job.state = "processing"
-      job.progress = 0
-      slots[i] = job
+      const job = queue.shift()!;
+      job.state = "processing";
+      job.progress = 0;
+      slots[i] = job;
     }
   }
 
   // Clear excess slots when concurrency decreases
   for (let i = concurrency.value; i < slots.length; i++) {
     if (slots[i]) {
-      slots[i]!.state = "queued"
-      queue.unshift(slots[i]!)
-      slots[i] = null
+      slots[i]!.state = "queued";
+      queue.unshift(slots[i]!);
+      slots[i] = null;
     }
   }
 
   // Progress active slots
   for (let i = 0; i < concurrency.value; i++) {
-    const job = slots[i]
+    const job = slots[i];
     if (job && job.state === "processing") {
-      job.progress += 3 * speed.value
+      job.progress += 3 * speed.value;
       if (job.progress >= 100) {
-        job.progress = 100
-        job.state = "done"
-        completedCount.value++
-        slots[i] = null
+        job.progress = 100;
+        job.state = "done";
+        completedCount.value++;
+        slots[i] = null;
       }
     }
   }
 }
 
 onMounted(() => {
-  intervalId = setInterval(tick, 50)
-})
-onUnmounted(() => { if (intervalId) clearInterval(intervalId) })
+  intervalId = setInterval(tick, 50);
+});
+onUnmounted(() => {
+  if (intervalId) clearInterval(intervalId);
+});
 
 // Ensure slots array matches max possible size
 function ensureSlots() {
-  while (slots.length < 10) slots.push(null)
+  while (slots.length < 10) slots.push(null);
 }
-ensureSlots()
+ensureSlots();
 
-const activeCount = computed(() => slots.filter((s) => s !== null).length)
+const activeCount = computed(() => slots.filter((s) => s !== null).length);
 </script>
 
 <template>

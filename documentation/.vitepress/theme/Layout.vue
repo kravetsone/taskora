@@ -1,22 +1,22 @@
 <script setup lang="ts">
-import DefaultTheme from "vitepress/theme"
-import { PackageManagerSwitch } from "vitepress-plugin-package-managers/client"
-import { nextTick, provide } from "vue"
-import { useData } from "vitepress"
+import DefaultTheme from "vitepress/theme";
+import { PackageManagerSwitch } from "vitepress-plugin-package-managers/client";
+import { nextTick, provide } from "vue";
+import { useData } from "vitepress";
 
-const { isDark } = useData()
+const { isDark } = useData();
 
 function enableTransitions() {
   return (
     "startViewTransition" in document &&
     window.matchMedia("(prefers-reduced-motion: no-preference)").matches
-  )
+  );
 }
 
 provide("toggle-appearance", async ({ clientX: x, clientY: y }: MouseEvent) => {
   if (!enableTransitions()) {
-    isDark.value = !isDark.value
-    return
+    isDark.value = !isDark.value;
+    return;
   }
 
   const clipPath = [
@@ -25,13 +25,13 @@ provide("toggle-appearance", async ({ clientX: x, clientY: y }: MouseEvent) => {
       Math.max(x, innerWidth - x),
       Math.max(y, innerHeight - y),
     )}px at ${x}px ${y}px)`,
-  ]
+  ];
 
   // @ts-expect-error — View Transition API
   await document.startViewTransition(async () => {
-    isDark.value = !isDark.value
-    await nextTick()
-  }).ready
+    isDark.value = !isDark.value;
+    await nextTick();
+  }).ready;
 
   document.documentElement.animate(
     { clipPath: isDark.value ? clipPath.reverse() : clipPath },
@@ -40,8 +40,8 @@ provide("toggle-appearance", async ({ clientX: x, clientY: y }: MouseEvent) => {
       easing: "ease-in",
       pseudoElement: `::view-transition-${isDark.value ? "old" : "new"}(root)`,
     },
-  )
-})
+  );
+});
 </script>
 
 <template>

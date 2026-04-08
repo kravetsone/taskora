@@ -1,124 +1,148 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from "vue"
+import { ref, reactive, onMounted, onUnmounted, computed } from "vue";
 
-const colors = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#6366f1", "#ec4899", "#14b8a6"]
-let nextId = 1
+const colors = [
+  "#3b82f6",
+  "#22c55e",
+  "#f59e0b",
+  "#ef4444",
+  "#a855f7",
+  "#6366f1",
+  "#ec4899",
+  "#14b8a6",
+];
+let nextId = 1;
 
 interface Item {
-  id: number
-  color: string
+  id: number;
+  color: string;
 }
 
 interface Batch {
-  id: number
-  items: Item[]
-  trigger: "delay" | "maxSize" | "maxWait"
+  id: number;
+  items: Item[];
+  trigger: "delay" | "maxSize" | "maxWait";
 }
 
-const buffer = reactive<Item[]>([])
-const batches = reactive<Batch[]>([])
-let batchId = 0
+const buffer = reactive<Item[]>([]);
+const batches = reactive<Batch[]>([]);
+let batchId = 0;
 
-const delayMs = ref(2000)
-const maxSize = ref(5)
-const maxWaitMs = ref(8000)
-const streaming = ref(false)
+const delayMs = ref(2000);
+const maxSize = ref(5);
+const maxWaitMs = ref(8000);
+const streaming = ref(false);
 
-let debounceTimer: ReturnType<typeof setTimeout> | null = null
-let maxWaitTimer: ReturnType<typeof setTimeout> | null = null
-let streamTimer: ReturnType<typeof setInterval> | null = null
-const debounceProgress = ref(0)
-const maxWaitProgress = ref(0)
-let debounceStart = 0
-let maxWaitStart = 0
-let rafId: number | null = null
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let maxWaitTimer: ReturnType<typeof setTimeout> | null = null;
+let streamTimer: ReturnType<typeof setInterval> | null = null;
+const debounceProgress = ref(0);
+const maxWaitProgress = ref(0);
+let debounceStart = 0;
+let maxWaitStart = 0;
+let rafId: number | null = null;
 
 function tick(now: number) {
   if (debounceTimer && debounceStart) {
-    debounceProgress.value = Math.min(1, (Date.now() - debounceStart) / delayMs.value)
+    debounceProgress.value = Math.min(1, (Date.now() - debounceStart) / delayMs.value);
   }
   if (maxWaitTimer && maxWaitStart) {
-    maxWaitProgress.value = Math.min(1, (Date.now() - maxWaitStart) / maxWaitMs.value)
+    maxWaitProgress.value = Math.min(1, (Date.now() - maxWaitStart) / maxWaitMs.value);
   }
-  rafId = requestAnimationFrame(tick)
+  rafId = requestAnimationFrame(tick);
 }
 
 onMounted(() => {
-  rafId = requestAnimationFrame(tick)
-})
+  rafId = requestAnimationFrame(tick);
+});
 onUnmounted(() => {
-  if (rafId) cancelAnimationFrame(rafId)
-  clearTimers()
-  if (streamTimer) clearInterval(streamTimer)
-})
+  if (rafId) cancelAnimationFrame(rafId);
+  clearTimers();
+  if (streamTimer) clearInterval(streamTimer);
+});
 
 function clearTimers() {
-  if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
-  if (maxWaitTimer) { clearTimeout(maxWaitTimer); maxWaitTimer = null }
-  debounceProgress.value = 0
-  maxWaitProgress.value = 0
-  debounceStart = 0
-  maxWaitStart = 0
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  if (maxWaitTimer) {
+    clearTimeout(maxWaitTimer);
+    maxWaitTimer = null;
+  }
+  debounceProgress.value = 0;
+  maxWaitProgress.value = 0;
+  debounceStart = 0;
+  maxWaitStart = 0;
 }
 
 function flush(trigger: "delay" | "maxSize" | "maxWait") {
-  if (buffer.length === 0) return
-  batches.unshift({ id: batchId++, items: [...buffer], trigger })
-  buffer.length = 0
-  clearTimers()
-  if (batches.length > 5) batches.length = 5
+  if (buffer.length === 0) return;
+  batches.unshift({ id: batchId++, items: [...buffer], trigger });
+  buffer.length = 0;
+  clearTimers();
+  if (batches.length > 5) batches.length = 5;
 }
 
 function addItem() {
   const item: Item = {
     id: nextId++,
     color: colors[(nextId - 1) % colors.length],
-  }
-  buffer.push(item)
+  };
+  buffer.push(item);
 
   // Check maxSize
   if (buffer.length >= maxSize.value) {
-    flush("maxSize")
-    return
+    flush("maxSize");
+    return;
   }
 
   // Reset debounce timer
-  if (debounceTimer) clearTimeout(debounceTimer)
-  debounceStart = Date.now()
-  debounceProgress.value = 0
-  debounceTimer = setTimeout(() => flush("delay"), delayMs.value)
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceStart = Date.now();
+  debounceProgress.value = 0;
+  debounceTimer = setTimeout(() => flush("delay"), delayMs.value);
 
   // Start maxWait timer (only on first item after flush)
   if (!maxWaitTimer && maxWaitMs.value > 0) {
-    maxWaitStart = Date.now()
-    maxWaitProgress.value = 0
-    maxWaitTimer = setTimeout(() => flush("maxWait"), maxWaitMs.value)
+    maxWaitStart = Date.now();
+    maxWaitProgress.value = 0;
+    maxWaitTimer = setTimeout(() => flush("maxWait"), maxWaitMs.value);
   }
 }
 
 function toggleStream() {
-  streaming.value = !streaming.value
+  streaming.value = !streaming.value;
   if (streaming.value) {
-    streamTimer = setInterval(() => {
-      addItem()
-    }, 300 + Math.random() * 700)
+    streamTimer = setInterval(
+      () => {
+        addItem();
+      },
+      300 + Math.random() * 700,
+    );
   } else {
-    if (streamTimer) { clearInterval(streamTimer); streamTimer = null }
+    if (streamTimer) {
+      clearInterval(streamTimer);
+      streamTimer = null;
+    }
   }
 }
 
 function reset() {
-  buffer.length = 0
-  batches.length = 0
-  clearTimers()
-  streaming.value = false
-  if (streamTimer) { clearInterval(streamTimer); streamTimer = null }
+  buffer.length = 0;
+  batches.length = 0;
+  clearTimers();
+  streaming.value = false;
+  if (streamTimer) {
+    clearInterval(streamTimer);
+    streamTimer = null;
+  }
 }
 
-const sizeProgress = computed(() => buffer.length / maxSize.value)
+const sizeProgress = computed(() => buffer.length / maxSize.value);
 
-const triggerColors = { delay: "#3b82f6", maxSize: "#f59e0b", maxWait: "#ef4444" }
-const triggerLabels = { delay: "debounce", maxSize: "maxSize", maxWait: "maxWait" }
+const triggerColors = { delay: "#3b82f6", maxSize: "#f59e0b", maxWait: "#ef4444" };
+const triggerLabels = { delay: "debounce", maxSize: "maxSize", maxWait: "maxWait" };
 </script>
 
 <template>

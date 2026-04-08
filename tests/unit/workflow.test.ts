@@ -93,10 +93,7 @@ describe("Workflow", () => {
 
   describe("chord()", () => {
     it("creates a ChordSignature", () => {
-      const c = chord(
-        [add.s({ x: 1, y: 2 }), add.s({ x: 3, y: 4 })],
-        sum.s(),
-      );
+      const c = chord([add.s({ x: 1, y: 2 }), add.s({ x: 3, y: 4 })], sum.s());
       expect(c).toBeInstanceOf(ChordSignature);
       expect(c.header).toHaveLength(2);
       expect(c.callback._tag).toBe("signature");
@@ -131,10 +128,7 @@ describe("Workflow", () => {
     });
 
     it("group(a, b)", () => {
-      const graph = flattenToDAG(
-        group(add.s({ x: 1, y: 2 }), add.s({ x: 3, y: 4 })),
-        serializer,
-      );
+      const graph = flattenToDAG(group(add.s({ x: 1, y: 2 }), add.s({ x: 3, y: 4 })), serializer);
       expect(graph.nodes).toHaveLength(2);
       expect(graph.nodes[0].deps).toEqual([]);
       expect(graph.nodes[1].deps).toEqual([]);
@@ -155,11 +149,7 @@ describe("Workflow", () => {
 
     it("chain(a, group(b, c), d)", () => {
       const graph = flattenToDAG(
-        chain(
-          add.s({ x: 1, y: 2 }),
-          group(double.s(), double.s()),
-          sum.s(),
-        ),
+        chain(add.s({ x: 1, y: 2 }), group(double.s(), double.s()), sum.s()),
         serializer,
       );
       expect(graph.nodes).toHaveLength(4);
@@ -176,19 +166,16 @@ describe("Workflow", () => {
     it("chord([chain(a,b), chain(c,d)], e)", () => {
       const graph = flattenToDAG(
         chord(
-          [
-            chain(add.s({ x: 1, y: 2 }), double.s()),
-            chain(add.s({ x: 3, y: 4 }), double.s()),
-          ],
+          [chain(add.s({ x: 1, y: 2 }), double.s()), chain(add.s({ x: 3, y: 4 }), double.s())],
           sum.s(),
         ),
         serializer,
       );
       expect(graph.nodes).toHaveLength(5);
-      expect(graph.nodes[0].deps).toEqual([]);   // a
-      expect(graph.nodes[1].deps).toEqual([0]);   // b
-      expect(graph.nodes[2].deps).toEqual([]);   // c
-      expect(graph.nodes[3].deps).toEqual([2]);   // d
+      expect(graph.nodes[0].deps).toEqual([]); // a
+      expect(graph.nodes[1].deps).toEqual([0]); // b
+      expect(graph.nodes[2].deps).toEqual([]); // c
+      expect(graph.nodes[3].deps).toEqual([2]); // d
       expect(graph.nodes[4].deps).toEqual([1, 3]); // e
       expect(graph.terminal).toEqual([4]);
     });
@@ -226,11 +213,7 @@ describe("Workflow", () => {
     });
 
     it("executes a three-step chain", async () => {
-      const handle = chain(
-        add.s({ x: 5, y: 5 }),
-        double.s(),
-        double.s(),
-      ).dispatch();
+      const handle = chain(add.s({ x: 5, y: 5 }), double.s(), double.s()).dispatch();
       await handle;
 
       for (let i = 0; i < 10; i++) {
@@ -272,10 +255,7 @@ describe("Workflow", () => {
 
   describe("chord execution", () => {
     it("executes chord (group + callback)", async () => {
-      const handle = chord(
-        [add.s({ x: 1, y: 2 }), add.s({ x: 3, y: 4 })],
-        sum.s(),
-      ).dispatch();
+      const handle = chord([add.s({ x: 1, y: 2 }), add.s({ x: 3, y: 4 })], sum.s()).dispatch();
       await handle;
 
       for (let i = 0; i < 10; i++) {
@@ -295,10 +275,7 @@ describe("Workflow", () => {
   describe("nested composition", () => {
     it("chord([chain, chain], callback)", async () => {
       const handle = chord(
-        [
-          chain(add.s({ x: 1, y: 1 }), double.s()),
-          chain(add.s({ x: 2, y: 2 }), double.s()),
-        ],
+        [chain(add.s({ x: 1, y: 1 }), double.s()), chain(add.s({ x: 2, y: 2 }), double.s())],
         sum.s(),
       ).dispatch();
       await handle;

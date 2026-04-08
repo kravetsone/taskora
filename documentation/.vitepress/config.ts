@@ -1,18 +1,18 @@
-import { defineConfig } from "vitepress"
-import { transformerTwoslash } from "@shikijs/vitepress-twoslash"
-import UnoCSS from "unocss/vite"
-import llms from "vitepress-plugin-llms"
-import { packageManagersMarkdownPlugin } from "vitepress-plugin-package-managers"
-import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons"
+import { defineConfig } from "vitepress";
+import { transformerTwoslash } from "@shikijs/vitepress-twoslash";
+import UnoCSS from "unocss/vite";
+import llms from "vitepress-plugin-llms";
+import { packageManagersMarkdownPlugin } from "vitepress-plugin-package-managers";
+import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons";
 
 // Load TypeDoc-generated sidebar — may not exist before first `bun run gen:typedoc`
-let typeDocSidebar: Record<string, unknown[]> = {}
+let typeDocSidebar: Record<string, unknown[]> = {};
 try {
   const { default: sidebarItems } = await import(
     // @ts-ignore — generated file, not always present
     "../api/typedoc-sidebar.json",
     { with: { type: "json" } }
-  )
+  );
   if (Array.isArray(sidebarItems) && sidebarItems.length > 0) {
     typeDocSidebar = {
       "/api/": [
@@ -22,7 +22,7 @@ try {
           items: sidebarItems,
         },
       ],
-    }
+    };
   }
 } catch {
   // Not yet generated — use static fallback in sidebar
@@ -31,8 +31,7 @@ try {
 export default defineConfig({
   base: process.env.BASE_URL ?? "/",
   title: "Taskora",
-  description:
-    "The task queue Node.js deserves. TypeScript-first, batteries-included.",
+  description: "The task queue Node.js deserves. TypeScript-first, batteries-included.",
 
   cleanUrls: true,
 
@@ -46,16 +45,12 @@ export default defineConfig({
 
   head: [
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
-    [
-      "meta",
-      { property: "og:title", content: "Taskora — Task Queue for Node.js" },
-    ],
+    ["meta", { property: "og:title", content: "Taskora — Task Queue for Node.js" }],
     [
       "meta",
       {
         property: "og:description",
-        content:
-          "TypeScript-first distributed task queue. Batteries-included.",
+        content: "TypeScript-first distributed task queue. Batteries-included.",
       },
     ],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
@@ -72,8 +67,8 @@ export default defineConfig({
   markdown: {
     codeTransformers: [transformerTwoslash()],
     config: (md) => {
-      md.use(groupIconMdPlugin)
-      md.use(packageManagersMarkdownPlugin)
+      md.use(groupIconMdPlugin);
+      md.use(packageManagersMarkdownPlugin);
     },
   },
 
@@ -224,8 +219,7 @@ export default defineConfig({
     ],
 
     editLink: {
-      pattern:
-        "https://github.com/kravetsone/taskora/edit/main/documentation/:path",
+      pattern: "https://github.com/kravetsone/taskora/edit/main/documentation/:path",
     },
 
     search: {
@@ -236,4 +230,4 @@ export default defineConfig({
       message: "Released under the MIT License.",
     },
   },
-})
+});

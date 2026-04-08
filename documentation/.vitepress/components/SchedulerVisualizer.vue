@@ -1,83 +1,83 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from "vue"
+import { ref, reactive, onMounted, onUnmounted, computed } from "vue";
 
 interface Instance {
-  id: number
-  state: "follower" | "leader" | "dead"
+  id: number;
+  state: "follower" | "leader" | "dead";
 }
 
 interface Tick {
-  id: number
-  time: number
-  dispatched: boolean
-  skipped: boolean
-  reason?: string
+  id: number;
+  time: number;
+  dispatched: boolean;
+  skipped: boolean;
+  reason?: string;
 }
 
 const instances = reactive<Instance[]>([
   { id: 1, state: "leader" },
   { id: 2, state: "follower" },
   { id: 3, state: "follower" },
-])
+]);
 
-const ticks = reactive<Tick[]>([])
-let tickId = 0
-const overlap = ref(false)
-const missedPolicy = ref<"skip" | "catch-up" | "catch-up-limit:3">("skip")
-const paused = ref(false)
-const jobActive = ref(false)
-const intervalMs = 2000
-let tickTimer: ReturnType<typeof setInterval> | null = null
-let jobTimer: ReturnType<typeof setTimeout> | null = null
+const ticks = reactive<Tick[]>([]);
+let tickId = 0;
+const overlap = ref(false);
+const missedPolicy = ref<"skip" | "catch-up" | "catch-up-limit:3">("skip");
+const paused = ref(false);
+const jobActive = ref(false);
+const intervalMs = 2000;
+let tickTimer: ReturnType<typeof setInterval> | null = null;
+let jobTimer: ReturnType<typeof setTimeout> | null = null;
 
-const leader = computed(() => instances.find((i) => i.state === "leader"))
+const leader = computed(() => instances.find((i) => i.state === "leader"));
 
 function schedulerTick() {
-  if (paused.value) return
+  if (paused.value) return;
 
-  const canDispatch = overlap.value || !jobActive.value
+  const canDispatch = overlap.value || !jobActive.value;
   const tick: Tick = {
     id: tickId++,
     time: Date.now(),
     dispatched: canDispatch,
     skipped: !canDispatch,
     reason: !canDispatch ? "overlap" : undefined,
-  }
-  ticks.push(tick)
-  if (ticks.length > 12) ticks.shift()
+  };
+  ticks.push(tick);
+  if (ticks.length > 12) ticks.shift();
 
   if (canDispatch) {
-    jobActive.value = true
+    jobActive.value = true;
     jobTimer = setTimeout(() => {
-      jobActive.value = false
-    }, intervalMs * 1.5)
+      jobActive.value = false;
+    }, intervalMs * 1.5);
   }
 }
 
 onMounted(() => {
-  tickTimer = setInterval(schedulerTick, intervalMs)
-})
+  tickTimer = setInterval(schedulerTick, intervalMs);
+});
 onUnmounted(() => {
-  if (tickTimer) clearInterval(tickTimer)
-  if (jobTimer) clearTimeout(jobTimer)
-})
+  if (tickTimer) clearInterval(tickTimer);
+  if (jobTimer) clearTimeout(jobTimer);
+});
 
 function killLeader() {
-  const currentLeader = instances.find((i) => i.state === "leader")
-  if (!currentLeader) return
+  const currentLeader = instances.find((i) => i.state === "leader");
+  if (!currentLeader) return;
 
-  currentLeader.state = "dead"
+  currentLeader.state = "dead";
 
   // Failover after a short delay
   setTimeout(() => {
-    const follower = instances.find((i) => i.state === "follower")
-    if (follower) follower.state = "leader"
-  }, 800)
+    const follower = instances.find((i) => i.state === "follower");
+    if (follower) follower.state = "leader";
+  }, 800);
 }
 
 function reviveInstance(inst: Instance) {
   if (inst.state === "dead") {
-    inst.state = "follower"
+    inst.state = "follower";
   }
 }
 
@@ -85,24 +85,28 @@ function addInstance() {
   instances.push({
     id: instances.length + 1,
     state: "follower",
-  })
+  });
 }
 
 function removeInstance() {
-  if (instances.length <= 1) return
-  const removed = instances.pop()
+  if (instances.length <= 1) return;
+  const removed = instances.pop();
   if (removed?.state === "leader") {
-    const first = instances.find((i) => i.state === "follower")
-    if (first) first.state = "leader"
+    const first = instances.find((i) => i.state === "follower");
+    if (first) first.state = "leader";
   }
 }
 
 function togglePause() {
-  paused.value = !paused.value
+  paused.value = !paused.value;
   if (!paused.value && missedPolicy.value !== "skip") {
     // Simulate catch-up on resume
-    const catchUpCount = missedPolicy.value === "catch-up" ? 5 :
-      missedPolicy.value.startsWith("catch-up-limit:") ? 3 : 0
+    const catchUpCount =
+      missedPolicy.value === "catch-up"
+        ? 5
+        : missedPolicy.value.startsWith("catch-up-limit:")
+          ? 3
+          : 0;
 
     for (let i = 0; i < catchUpCount; i++) {
       setTimeout(() => {
@@ -112,9 +116,9 @@ function togglePause() {
           dispatched: true,
           skipped: false,
           reason: "catch-up",
-        })
-        if (ticks.length > 12) ticks.shift()
-      }, i * 200)
+        });
+        if (ticks.length > 12) ticks.shift();
+      }, i * 200);
     }
   }
 }

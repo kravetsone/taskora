@@ -1,109 +1,117 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from "vue"
+import { ref, reactive, onMounted, onUnmounted } from "vue";
 
 interface DispatchMark {
-  id: number
-  time: number
-  accepted: boolean
-  label?: string
+  id: number;
+  time: number;
+  accepted: boolean;
+  label?: string;
 }
 
-const delay = ref(2000)
-const throttleMax = ref(3)
-const elapsedMs = ref(0)
-let nextId = 1
-let rafId: number | null = null
-let lastTime: number | null = null
+const delay = ref(2000);
+const throttleMax = ref(3);
+const elapsedMs = ref(0);
+let nextId = 1;
+let rafId: number | null = null;
+let lastTime: number | null = null;
 
 // Debounce state
-const debounceMarks = reactive<DispatchMark[]>([])
-let debounceTimer: ReturnType<typeof setTimeout> | null = null
-const debounceEnqueued = ref<number>(0)
+const debounceMarks = reactive<DispatchMark[]>([]);
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+const debounceEnqueued = ref<number>(0);
 
 // Throttle state
-const throttleMarks = reactive<DispatchMark[]>([])
-const throttleWindowStart = ref(0)
-const throttleCount = ref(0)
-const throttleEnqueued = ref<number>(0)
+const throttleMarks = reactive<DispatchMark[]>([]);
+const throttleWindowStart = ref(0);
+const throttleCount = ref(0);
+const throttleEnqueued = ref<number>(0);
 
 // Dedup state
-const dedupMarks = reactive<DispatchMark[]>([])
-const dedupJobActive = ref(false)
-let dedupJobTimer: ReturnType<typeof setTimeout> | null = null
-const dedupEnqueued = ref<number>(0)
+const dedupMarks = reactive<DispatchMark[]>([]);
+const dedupJobActive = ref(false);
+let dedupJobTimer: ReturnType<typeof setTimeout> | null = null;
+const dedupEnqueued = ref<number>(0);
 
 function tick(now: number) {
-  if (lastTime === null) lastTime = now
-  elapsedMs.value += now - lastTime
-  lastTime = now
-  rafId = requestAnimationFrame(tick)
+  if (lastTime === null) lastTime = now;
+  elapsedMs.value += now - lastTime;
+  lastTime = now;
+  rafId = requestAnimationFrame(tick);
 }
 
 onMounted(() => {
-  rafId = requestAnimationFrame(tick)
-})
+  rafId = requestAnimationFrame(tick);
+});
 onUnmounted(() => {
-  if (rafId) cancelAnimationFrame(rafId)
-  if (debounceTimer) clearTimeout(debounceTimer)
-  if (dedupJobTimer) clearTimeout(dedupJobTimer)
-})
+  if (rafId) cancelAnimationFrame(rafId);
+  if (debounceTimer) clearTimeout(debounceTimer);
+  if (dedupJobTimer) clearTimeout(dedupJobTimer);
+});
 
 function dispatch() {
-  const time = elapsedMs.value
-  const id = nextId++
+  const time = elapsedMs.value;
+  const id = nextId++;
 
   // Debounce
-  if (debounceTimer) clearTimeout(debounceTimer)
-  debounceMarks.push({ id, time, accepted: true, label: "replaced" })
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceMarks.push({ id, time, accepted: true, label: "replaced" });
   debounceTimer = setTimeout(() => {
-    debounceMarks[debounceMarks.length - 1].label = "ENQUEUED"
-    debounceEnqueued.value++
-  }, delay.value)
+    debounceMarks[debounceMarks.length - 1].label = "ENQUEUED";
+    debounceEnqueued.value++;
+  }, delay.value);
 
   // Throttle
   if (time - throttleWindowStart.value > delay.value) {
-    throttleWindowStart.value = time
-    throttleCount.value = 0
+    throttleWindowStart.value = time;
+    throttleCount.value = 0;
   }
-  const throttleAccepted = throttleCount.value < throttleMax.value
-  if (throttleAccepted) throttleCount.value++
+  const throttleAccepted = throttleCount.value < throttleMax.value;
+  if (throttleAccepted) throttleCount.value++;
   throttleMarks.push({
-    id, time, accepted: throttleAccepted,
+    id,
+    time,
+    accepted: throttleAccepted,
     label: throttleAccepted ? "accepted" : "rejected",
-  })
-  if (throttleAccepted) throttleEnqueued.value++
+  });
+  if (throttleAccepted) throttleEnqueued.value++;
 
   // Dedup
   if (dedupJobActive.value) {
-    dedupMarks.push({ id, time, accepted: false, label: "skipped" })
+    dedupMarks.push({ id, time, accepted: false, label: "skipped" });
   } else {
-    dedupMarks.push({ id, time, accepted: true, label: "created" })
-    dedupJobActive.value = true
-    dedupEnqueued.value++
+    dedupMarks.push({ id, time, accepted: true, label: "created" });
+    dedupJobActive.value = true;
+    dedupEnqueued.value++;
     dedupJobTimer = setTimeout(() => {
-      dedupJobActive.value = false
-    }, delay.value * 1.5)
+      dedupJobActive.value = false;
+    }, delay.value * 1.5);
   }
 }
 
 function rapidFire() {
-  dispatch()
+  dispatch();
   for (let i = 1; i <= 4; i++) {
-    setTimeout(() => dispatch(), i * 120)
+    setTimeout(() => dispatch(), i * 120);
   }
 }
 
 function reset() {
-  debounceMarks.length = 0
-  throttleMarks.length = 0
-  dedupMarks.length = 0
-  debounceEnqueued.value = 0
-  throttleEnqueued.value = 0
-  dedupEnqueued.value = 0
-  throttleCount.value = 0
-  dedupJobActive.value = false
-  if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
-  if (dedupJobTimer) { clearTimeout(dedupJobTimer); dedupJobTimer = null }
+  debounceMarks.length = 0;
+  throttleMarks.length = 0;
+  dedupMarks.length = 0;
+  debounceEnqueued.value = 0;
+  throttleEnqueued.value = 0;
+  dedupEnqueued.value = 0;
+  throttleCount.value = 0;
+  dedupJobActive.value = false;
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  if (dedupJobTimer) {
+    clearTimeout(dedupJobTimer);
+    dedupJobTimer = null;
+  }
 }
 </script>
 
