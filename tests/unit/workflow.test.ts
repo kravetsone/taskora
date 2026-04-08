@@ -1,17 +1,17 @@
-import { describe, expect, it, beforeEach } from "vitest";
-import { createTestRunner } from "../../src/test/index.js";
-import {
-  chain,
-  group,
-  chord,
-  Signature,
-  ChainSignature,
-  GroupSignature,
-  ChordSignature,
-} from "../../src/workflow/index.js";
-import { flattenToDAG } from "../../src/workflow/graph.js";
+import { beforeEach, describe, expect, it } from "vitest";
 import { json } from "../../src/serializer.js";
 import type { Task } from "../../src/task.js";
+import { createTestRunner } from "../../src/test/index.js";
+import { flattenToDAG } from "../../src/workflow/graph.js";
+import {
+  ChainSignature,
+  ChordSignature,
+  GroupSignature,
+  Signature,
+  chain,
+  chord,
+  group,
+} from "../../src/workflow/index.js";
 
 describe("Workflow", () => {
   let runner: ReturnType<typeof createTestRunner>;

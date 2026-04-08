@@ -71,13 +71,8 @@ export class IoredisDriver implements RedisDriver {
     }
   }
 
-  async blockingZPopMin(
-    key: string,
-    timeoutSec: number,
-  ): Promise<[string, string, string] | null> {
-    const result = (await this.client.bzpopmin(key, timeoutSec)) as
-      | [string, string, string]
-      | null;
+  async blockingZPopMin(key: string, timeoutSec: number): Promise<[string, string, string] | null> {
+    const result = (await this.client.bzpopmin(key, timeoutSec)) as [string, string, string] | null;
     return result ?? null;
   }
 
@@ -103,10 +98,7 @@ export class IoredisDriver implements RedisDriver {
     return result ?? null;
   }
 
-  async subscribe(
-    channel: string,
-    handler: (message: string) => void,
-  ): Promise<Unsubscribe> {
+  async subscribe(channel: string, handler: (message: string) => void): Promise<Unsubscribe> {
     await this.client.subscribe(channel);
     const onMessage = (_channel: string, message: string) => {
       handler(message);
@@ -193,14 +185,18 @@ class IoredisPipelineBuilder implements PipelineBuilder {
  * config object, or a pre-built `Redis` instance. Returns the driver and an `ownsClient`
  * flag the factory uses to decide whether `close()` should call `quit()`.
  */
-export function createIoredisDriver(
-  connection: string | RedisOptions | Redis,
-): { driver: IoredisDriver; ownsClient: boolean } {
+export function createIoredisDriver(connection: string | RedisOptions | Redis): {
+  driver: IoredisDriver;
+  ownsClient: boolean;
+} {
   if (connection instanceof Redis) {
     return { driver: new IoredisDriver(connection), ownsClient: false };
   }
   if (typeof connection === "string") {
-    return { driver: new IoredisDriver(new Redis(connection, { lazyConnect: true })), ownsClient: true };
+    return {
+      driver: new IoredisDriver(new Redis(connection, { lazyConnect: true })),
+      ownsClient: true,
+    };
   }
   return {
     driver: new IoredisDriver(new Redis({ ...connection, lazyConnect: true })),

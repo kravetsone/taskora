@@ -120,11 +120,10 @@ export class EventReader {
         break;
       }
       case "failed": {
-        const meta = (await this.driver.command("hmget", [
-          jobKey,
-          "attempt",
-          "error",
-        ])) as (string | null)[];
+        const meta = (await this.driver.command("hmget", [jobKey, "attempt", "error"])) as (
+          | string
+          | null
+        )[];
         if (meta[0]) fields.attempt = meta[0];
         if (meta[1]) fields.error = meta[1];
         break;

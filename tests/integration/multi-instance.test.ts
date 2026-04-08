@@ -1,8 +1,8 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { App } from "../../src/app.js";
 import { createTaskora } from "../../src/index.js";
 import { redisAdapter } from "../create-adapter.js";
-import type { App } from "../../src/app.js";
 import { url, waitFor } from "../helpers.js";
 
 let redis: Redis;
@@ -37,7 +37,7 @@ describe("multi-instance job distribution", () => {
     // Create 3 independent app instances (simulating 3 pods)
     for (let i = 1; i <= 3; i++) {
       const app = createApp();
-      app.task<{ id: string }, null>(`dist-task`, {
+      app.task<{ id: string }, null>("dist-task", {
         concurrency: 5,
         handler: async (data) => {
           const existing = processedBy.get(data.id);

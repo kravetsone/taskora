@@ -7,10 +7,10 @@
  *   3. Open:         http://localhost:4000/board/
  */
 
-import { createTaskora } from "../src/index.js";
-import { chain, group, chord } from "../src/workflow/index.js";
-import { redisAdapter } from "../src/redis/index.js";
 import { createBoard } from "../src/board/index.js";
+import { createTaskora } from "../src/index.js";
+import { redisAdapter } from "../src/redis/index.js";
+import { chain, chord, group } from "../src/workflow/index.js";
 
 const app = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),
@@ -25,22 +25,19 @@ const app = createTaskora({
 // ══════════════════════════════════════════════════════════════════
 
 // Fast task, rarely fails — lots of completed
-const sendEmail = app.task<{ to: string; subject: string }, { sent: boolean }>(
-  "send-email",
-  {
-    concurrency: 5,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Sending to ${data.to}: "${data.subject}"`);
-      ctx.progress(30);
-      await sleep(random(100, 400));
-      ctx.progress(80);
-      await sleep(random(50, 150));
-      ctx.progress(100);
-      if (Math.random() < 0.08) throw new Error(`SMTP refused: ${data.to}`);
-      return { sent: true };
-    },
+const sendEmail = app.task<{ to: string; subject: string }, { sent: boolean }>("send-email", {
+  concurrency: 5,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Sending to ${data.to}: "${data.subject}"`);
+    ctx.progress(30);
+    await sleep(random(100, 400));
+    ctx.progress(80);
+    await sleep(random(50, 150));
+    ctx.progress(100);
+    if (Math.random() < 0.08) throw new Error(`SMTP refused: ${data.to}`);
+    return { sent: true };
   },
-);
+});
 
 // Slow task, moderate failures — builds up active count
 const processImage = app.task<{ url: string; size: string }, { w: number; h: number }>(
@@ -63,123 +60,99 @@ const processImage = app.task<{ url: string; size: string }, { w: number; h: num
 );
 
 // Bulk task — dispatched with delays, fills delayed queue
-const syncData = app.task<{ source: string; batch: number }, { records: number }>(
-  "sync-data",
-  {
-    concurrency: 1,
-    retry: { attempts: 5, backoff: "linear", delay: 3000 },
-    handler: async (data, ctx) => {
-      ctx.log.info(`Syncing batch ${data.batch} from ${data.source}`);
-      const total = random(100, 1000);
-      for (let i = 0; i <= 10; i++) {
-        ctx.progress({ current: Math.round(i * (total / 10)), total, step: `page ${i}/10` });
-        await sleep(random(200, 600));
-      }
-      if (Math.random() < 0.35) throw new Error(`Timeout connecting to ${data.source}`);
-      return { records: total };
-    },
+const syncData = app.task<{ source: string; batch: number }, { records: number }>("sync-data", {
+  concurrency: 1,
+  retry: { attempts: 5, backoff: "linear", delay: 3000 },
+  handler: async (data, ctx) => {
+    ctx.log.info(`Syncing batch ${data.batch} from ${data.source}`);
+    const total = random(100, 1000);
+    for (let i = 0; i <= 10; i++) {
+      ctx.progress({ current: Math.round(i * (total / 10)), total, step: `page ${i}/10` });
+      await sleep(random(200, 600));
+    }
+    if (Math.random() < 0.35) throw new Error(`Timeout connecting to ${data.source}`);
+    return { records: total };
   },
-);
+});
 
 // Ultra-flaky — most fail permanently, fills DLQ
-const webhookDelivery = app.task<{ url: string; payload: string }, void>(
-  "webhook-delivery",
-  {
-    concurrency: 3,
-    retry: { attempts: 3, backoff: "exponential", delay: 1000 },
-    ttl: { max: "10s", onExpire: "fail" },
-    handler: async (data, ctx) => {
-      ctx.log.info(`POST ${data.url}`);
-      await sleep(random(200, 800));
-      // 60% fail — lots of retries then DLQ
-      if (Math.random() < 0.6) throw new Error(`HTTP 503 from ${data.url}`);
-      ctx.log.info("Delivered OK");
-    },
+const webhookDelivery = app.task<{ url: string; payload: string }, void>("webhook-delivery", {
+  concurrency: 3,
+  retry: { attempts: 3, backoff: "exponential", delay: 1000 },
+  ttl: { max: "10s", onExpire: "fail" },
+  handler: async (data, ctx) => {
+    ctx.log.info(`POST ${data.url}`);
+    await sleep(random(200, 800));
+    // 60% fail — lots of retries then DLQ
+    if (Math.random() < 0.6) throw new Error(`HTTP 503 from ${data.url}`);
+    ctx.log.info("Delivered OK");
   },
-);
+});
 
 // Report generation — slow, always succeeds
-const generateReport = app.task<{ type: string; period: string }, string>(
-  "generate-report",
-  {
-    concurrency: 1,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Generating ${data.period} ${data.type} report...`);
-      ctx.progress(10);
-      await sleep(random(1000, 3000));
-      ctx.progress(50);
-      await sleep(random(500, 1500));
-      ctx.progress(90);
-      await sleep(random(200, 500));
-      ctx.progress(100);
-      ctx.log.info("Report ready");
-      return `report-${data.type}-${data.period}-${Date.now()}.pdf`;
-    },
+const generateReport = app.task<{ type: string; period: string }, string>("generate-report", {
+  concurrency: 1,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Generating ${data.period} ${data.type} report...`);
+    ctx.progress(10);
+    await sleep(random(1000, 3000));
+    ctx.progress(50);
+    await sleep(random(500, 1500));
+    ctx.progress(90);
+    await sleep(random(200, 500));
+    ctx.progress(100);
+    ctx.log.info("Report ready");
+    return `report-${data.type}-${data.period}-${Date.now()}.pdf`;
   },
-);
+});
 
 // Workflow step tasks — used in chains/groups/chords
-const resize = app.task<{ url: string; width: number }, { url: string }>(
-  "resize",
-  {
-    concurrency: 3,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Resizing ${data.url} to ${data.width}px`);
-      await sleep(random(300, 800));
-      if (Math.random() < 0.1) throw new Error("Out of memory during resize");
-      return { url: `${data.url}?w=${data.width}` };
-    },
+const resize = app.task<{ url: string; width: number }, { url: string }>("resize", {
+  concurrency: 3,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Resizing ${data.url} to ${data.width}px`);
+    await sleep(random(300, 800));
+    if (Math.random() < 0.1) throw new Error("Out of memory during resize");
+    return { url: `${data.url}?w=${data.width}` };
   },
-);
+});
 
-const watermark = app.task<{ url: string }, { url: string }>(
-  "watermark",
-  {
-    concurrency: 3,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Watermarking ${data.url}`);
-      await sleep(random(200, 600));
-      return { url: `${data.url}&wm=1` };
-    },
+const watermark = app.task<{ url: string }, { url: string }>("watermark", {
+  concurrency: 3,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Watermarking ${data.url}`);
+    await sleep(random(200, 600));
+    return { url: `${data.url}&wm=1` };
   },
-);
+});
 
-const uploadCDN = app.task<{ url: string }, { cdnUrl: string }>(
-  "upload-cdn",
-  {
-    concurrency: 2,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Uploading to CDN: ${data.url}`);
-      await sleep(random(500, 1200));
-      if (Math.random() < 0.15) throw new Error("CDN upload timeout");
-      return { cdnUrl: `https://cdn.example.com/${Date.now()}.jpg` };
-    },
+const uploadCDN = app.task<{ url: string }, { cdnUrl: string }>("upload-cdn", {
+  concurrency: 2,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Uploading to CDN: ${data.url}`);
+    await sleep(random(500, 1200));
+    if (Math.random() < 0.15) throw new Error("CDN upload timeout");
+    return { cdnUrl: `https://cdn.example.com/${Date.now()}.jpg` };
   },
-);
+});
 
-const notify = app.task<{ cdnUrl: string }, void>(
-  "notify",
-  {
-    concurrency: 5,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Notifying about ${data.cdnUrl}`);
-      await sleep(random(100, 300));
-    },
+const notify = app.task<{ cdnUrl: string }, void>("notify", {
+  concurrency: 5,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Notifying about ${data.cdnUrl}`);
+    await sleep(random(100, 300));
   },
-);
+});
 
 // Chord callback — receives tuple of results
-const aggregate = app.task<any, { count: number }>(
-  "aggregate",
-  {
-    concurrency: 1,
-    handler: async (data, ctx) => {
-      ctx.log.info(`Aggregating ${data.length} results`);
-      await sleep(random(300, 600));
-      return { count: data.length };
-    },
+const aggregate = app.task<any, { count: number }>("aggregate", {
+  concurrency: 1,
+  handler: async (data, ctx) => {
+    ctx.log.info(`Aggregating ${data.length} results`);
+    await sleep(random(300, 600));
+    return { count: data.length };
   },
-);
+});
 
 // ══════════════════════════════════════════════════════════════════
 // Schedules
@@ -232,7 +205,13 @@ console.log("");
 // Dispatch loops — create varied, interesting state
 // ══════════════════════════════════════════════════════════════════
 
-const emails = ["alice@co.com", "bob@io.dev", "charlie@test.org", "diana@mail.co", "eve@startup.io"];
+const emails = [
+  "alice@co.com",
+  "bob@io.dev",
+  "charlie@test.org",
+  "diana@mail.co",
+  "eve@startup.io",
+];
 const images = ["photo.jpg", "banner.png", "avatar.webp", "hero.heic", "thumb.gif"];
 const sizes = ["sm", "md", "lg", "xl"];
 const webhookUrls = [
@@ -281,7 +260,10 @@ async function syncLoop() {
 async function webhookLoop() {
   while (true) {
     const url = webhookUrls[random(0, webhookUrls.length - 1)];
-    webhookDelivery.dispatch({ url, payload: `{"event":"order.created","id":${random(1, 99999)}}` });
+    webhookDelivery.dispatch({
+      url,
+      payload: `{"event":"order.created","id":${random(1, 99999)}}`,
+    });
     await sleep(random(1500, 4000));
   }
 }
@@ -290,12 +272,7 @@ async function webhookLoop() {
 async function chainLoop() {
   while (true) {
     const url = `https://uploads.example.com/${images[random(0, images.length - 1)]}`;
-    const pipeline = chain(
-      resize.s({ url, width: 800 }),
-      watermark.s(),
-      uploadCDN.s(),
-      notify.s(),
-    );
+    const pipeline = chain(resize.s({ url, width: 800 }), watermark.s(), uploadCDN.s(), notify.s());
     pipeline.dispatch({ name: "image-pipeline" });
     await sleep(random(8000, 15000));
   }

@@ -1294,13 +1294,16 @@ export class MemoryBackend implements Taskora.Adapter {
       const allDepsCompleted = node.deps.every((d: number) => wf.nodeStates.get(d) === "completed");
       if (!allDepsCompleted) continue;
 
-      // Compute input data
+      // Compute input data — `allDepsCompleted` above guarantees every dep
+      // has a stored result, so these `get()` calls cannot return undefined.
       let inputData: string;
       if (node.data !== undefined) {
         inputData = node.data;
       } else if (node.deps.length === 1) {
+        // biome-ignore lint/style/noNonNullAssertion: dep completion was just verified
         inputData = wf.nodeResults.get(node.deps[0])!;
       } else {
+        // biome-ignore lint/style/noNonNullAssertion: dep completion was just verified
         const results = node.deps.map((d: number) => wf.nodeResults.get(d)!);
         inputData = `[${results.join(",")}]`;
       }
@@ -1326,6 +1329,7 @@ export class MemoryBackend implements Taskora.Adapter {
       if (terminalNodes.length === 1) {
         wf.result = wf.nodeResults.get(terminalNodes[0]);
       } else {
+        // biome-ignore lint/style/noNonNullAssertion: allTerminalDone above verified every terminal node has a result
         const results = terminalNodes.map((i: number) => wf.nodeResults.get(i)!);
         wf.result = `[${results.join(",")}]`;
       }

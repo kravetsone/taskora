@@ -5,7 +5,7 @@ import type { Taskora } from "../types.js";
 export interface BoardOptions {
   basePath?: string;
   readOnly?: boolean;
-  auth?: (req: Request) => Response | void | Promise<Response | void>;
+  auth?: (req: Request) => Response | undefined | Promise<Response | undefined>;
   title?: string;
   logo?: string;
   favicon?: string;

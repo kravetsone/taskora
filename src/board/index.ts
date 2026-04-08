@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from "node:fs";
-import { join, resolve, extname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { extname, join, resolve } from "node:path";
 import { Hono } from "hono";
 import type { App } from "../app.js";
 import { createApi } from "./api.js";
@@ -96,10 +96,7 @@ export function createBoard(app: App, options: BoardOptions = {}): Board {
         (g.Bun as { serve: (opts: unknown) => void }).serve({ fetch: honoFetch, port });
         console.log(`taskora board listening on http://localhost:${port}${basePath}`);
       } else if (typeof g.Deno !== "undefined") {
-        (g.Deno as { serve: (opts: unknown, handler: unknown) => void }).serve(
-          { port },
-          honoFetch,
-        );
+        (g.Deno as { serve: (opts: unknown, handler: unknown) => void }).serve({ port }, honoFetch);
         console.log(`taskora board listening on http://localhost:${port}${basePath}`);
       } else {
         throw new Error(

@@ -217,24 +217,24 @@ describe("inspector.find()", () => {
 
     const job = await app.inspect().find(jobId);
     expect(job).not.toBeNull();
-    expect(job!.id).toBe(jobId);
-    expect(job!.task).toBe("find-test");
-    expect(job!.state).toBe("completed");
-    expect(job!.data).toEqual({ msg: "hello" });
-    expect(job!.result).toEqual({ ok: true });
-    expect(job!.attempt).toBe(1);
+    expect(job?.id).toBe(jobId);
+    expect(job?.task).toBe("find-test");
+    expect(job?.state).toBe("completed");
+    expect(job?.data).toEqual({ msg: "hello" });
+    expect(job?.result).toEqual({ ok: true });
+    expect(job?.attempt).toBe(1);
 
     // Timeline
-    expect(job!.timeline.length).toBeGreaterThanOrEqual(2);
-    expect(job!.timeline[0].state).toBe("waiting");
-    expect(job!.timeline[0].at).toBeGreaterThan(0);
-    const activeEntry = job!.timeline.find((e) => e.state === "active");
+    expect(job?.timeline.length).toBeGreaterThanOrEqual(2);
+    expect(job?.timeline[0].state).toBe("waiting");
+    expect(job?.timeline[0].at).toBeGreaterThan(0);
+    const activeEntry = job?.timeline.find((e) => e.state === "active");
     expect(activeEntry).toBeDefined();
 
     // Logs
-    expect(job!.logs).toHaveLength(1);
-    expect(job!.logs[0].level).toBe("info");
-    expect(job!.logs[0].message).toBe("processing");
+    expect(job?.logs).toHaveLength(1);
+    expect(job?.logs[0].level).toBe("info");
+    expect(job?.logs[0].message).toBe("processing");
 
     await app.close();
   });
@@ -257,8 +257,8 @@ describe("inspector.find()", () => {
 
     const job = await app.inspect().find(t, jobId);
     expect(job).not.toBeNull();
-    expect(job!.data).toEqual({ x: 5 });
-    expect(job!.result).toEqual({ doubled: 10 });
+    expect(job?.data).toEqual({ x: 5 });
+    expect(job?.result).toEqual({ doubled: 10 });
 
     await app.close();
   });

@@ -109,12 +109,7 @@ export interface RedisDriver {
    * The backend does not see NOSCRIPT errors — that recovery logic lives here
    * to avoid duplicating it across driver implementations.
    */
-  evalSha(
-    sha: string,
-    numKeys: number,
-    args: RedisArg[],
-    fallbackSource: string,
-  ): Promise<unknown>;
+  evalSha(sha: string, numKeys: number, args: RedisArg[], fallbackSource: string): Promise<unknown>;
 
   /**
    * Blocking `BZPOPMIN`. Returns `[key, member, score]` (all strings) or `null`
@@ -126,10 +121,7 @@ export interface RedisDriver {
    *
    * @param timeoutSec  Timeout in seconds. `0` means block forever.
    */
-  blockingZPopMin(
-    key: string,
-    timeoutSec: number,
-  ): Promise<[string, string, string] | null>;
+  blockingZPopMin(key: string, timeoutSec: number): Promise<[string, string, string] | null>;
 
   /**
    * Blocking `XREAD`. Returns the parsed stream entries or `null` on timeout.
@@ -162,10 +154,7 @@ export interface RedisDriver {
    *
    * Returns an unsubscribe function that closes the channel and releases resources.
    */
-  subscribe(
-    channel: string,
-    handler: (message: string) => void,
-  ): Promise<Unsubscribe>;
+  subscribe(channel: string, handler: (message: string) => void): Promise<Unsubscribe>;
 
   /**
    * Create an independent driver bound to a separate connection to the same server.
