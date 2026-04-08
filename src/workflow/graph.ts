@@ -26,6 +26,8 @@ export interface WorkflowGraph {
   nodes: WorkflowNode[];
   /** Indices of terminal nodes (define final result). */
   terminal: number[];
+  /** Optional human-readable name for debugging. */
+  name?: string;
 }
 
 // ── Flatten composition tree → DAG ──────────────────────────────────

@@ -38,62 +38,51 @@ export function WorkflowList() {
         ))}
       </div>
 
-      <div className="rounded-lg border border-board-border bg-board-surface overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-board-border text-board-muted text-xs">
-              <th className="text-left px-4 py-2 font-medium">ID</th>
-              <th className="text-left px-3 py-2 font-medium">State</th>
-              <th className="text-right px-3 py-2 font-medium">Nodes</th>
-              <th className="text-left px-3 py-2 font-medium">Tasks</th>
-              <th className="text-right px-4 py-2 font-medium">Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && !workflows ? (
-              <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-board-muted">
-                  Loading...
-                </td>
-              </tr>
-            ) : !workflows?.length ? (
-              <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-board-muted">
-                  No workflows
-                </td>
-              </tr>
-            ) : (
-              workflows.map((wf) => (
-                <tr
-                  key={wf.id}
-                  className="border-b border-board-border/50 hover:bg-board-border/20"
-                >
-                  <td className="px-4 py-2.5">
-                    <Link
-                      to={`/workflows/${wf.id}`}
-                      className="text-board-primary hover:underline font-mono text-xs"
-                    >
-                      {wf.id.slice(0, 12)}...
-                    </Link>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <Badge state={wf.state} />
-                  </td>
-                  <td className="text-right px-3 py-2.5 tabular-nums text-board-muted">
-                    {wf.nodeCount}
-                  </td>
-                  <td className="px-3 py-2.5 text-xs text-board-muted">
-                    {wf.terminalTasks.join(", ")}
-                  </td>
-                  <td className="text-right px-4 py-2.5 text-xs text-board-muted">
-                    {relativeTime(wf.createdAt)}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      {isLoading && !workflows ? (
+        <div className="text-board-muted text-sm">Loading...</div>
+      ) : !workflows?.length ? (
+        <div className="text-board-muted text-sm">No workflows</div>
+      ) : (
+        <div className="space-y-2">
+          {workflows.map((wf) => (
+            <Link
+              key={wf.id}
+              to={`/workflows/${wf.id}`}
+              className="block rounded-lg border border-board-border bg-board-surface p-4 hover:border-board-primary/50 transition-colors"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  {wf.name ? (
+                    <span className="font-medium text-sm text-board-text truncate">{wf.name}</span>
+                  ) : (
+                    <span className="font-mono text-xs text-board-primary">{wf.id.slice(0, 12)}...</span>
+                  )}
+                  <Badge state={wf.state} />
+                  <span className="text-xs text-board-muted shrink-0">{wf.nodeCount} nodes</span>
+                </div>
+                <span className="text-xs text-board-muted shrink-0">{relativeTime(wf.createdAt)}</span>
+              </div>
+
+              {/* Task flow visualization */}
+              <div className="flex items-center gap-1 mt-2 flex-wrap">
+                {wf.tasks.map((task, i) => (
+                  <span key={`${task}-${i}`} className="flex items-center gap-1">
+                    {i > 0 && <span className="text-board-muted text-[10px]">→</span>}
+                    <span className="text-xs bg-board-bg border border-board-border rounded px-1.5 py-0.5 text-board-muted">
+                      {task}
+                    </span>
+                  </span>
+                ))}
+              </div>
+
+              {/* ID when name is shown */}
+              {wf.name && (
+                <div className="text-[10px] text-board-muted font-mono mt-1.5">{wf.id}</div>
+              )}
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

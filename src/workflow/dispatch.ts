@@ -27,6 +27,9 @@ function dispatchWorkflow<T>(
   const workflowId = randomUUID();
   const graph = flattenToDAG(comp, serializer);
 
+  // Attach name: explicit or auto-generated from composition structure
+  graph.name = options?.name ?? describeComposition(comp);
+
   const dispatchPromise = (async () => {
     await ensureConnected();
     await adapter.createWorkflow(workflowId, JSON.stringify(graph));
@@ -102,6 +105,33 @@ function findFirstLeaf(comp: AnySignature): Signature<any, any> | null {
       return findFirstLeaf((comp as GroupSignature<any>).members[0]);
     case "chord":
       return findFirstLeaf((comp as ChordSignature<any>).header[0]);
+  }
+}
+
+/**
+ * Auto-generate a human-readable description from composition structure.
+ * e.g. "chain(resize → watermark → upload-cdn → notify)"
+ *      "group(resize, resize, resize)"
+ *      "chord(resize, resize, resize → aggregate)"
+ */
+function describeComposition(comp: AnySignature): string {
+  switch (comp._tag) {
+    case "signature":
+      return (comp as Signature<any, any>).task.name;
+    case "chain": {
+      const steps = (comp as ChainSignature<any, any>).steps.map(describeComposition);
+      return `chain(${steps.join(" → ")})`;
+    }
+    case "group": {
+      const members = (comp as GroupSignature<any>).members.map(describeComposition);
+      return `group(${members.join(", ")})`;
+    }
+    case "chord": {
+      const c = comp as ChordSignature<any>;
+      const header = c.header.map(describeComposition);
+      const callback = describeComposition(c.callback as AnySignature);
+      return `chord(${header.join(", ")} → ${callback})`;
+    }
   }
 }
 

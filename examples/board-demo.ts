@@ -296,7 +296,7 @@ async function chainLoop() {
       uploadCDN.s(),
       notify.s(),
     );
-    pipeline.dispatch();
+    pipeline.dispatch({ name: "image-pipeline" });
     await sleep(random(8000, 15000));
   }
 }
@@ -310,7 +310,7 @@ async function groupLoop() {
       resize.s({ url, width: 800 }),
       resize.s({ url, width: 1600 }),
     );
-    parallel.dispatch();
+    parallel.dispatch({ name: "multi-size-resize" });
     await sleep(random(12000, 25000));
   }
 }
@@ -327,7 +327,7 @@ async function chordLoop() {
       ],
       aggregate.s(),
     );
-    batch.dispatch();
+    batch.dispatch({ name: "resize-and-aggregate" });
     await sleep(random(15000, 30000));
   }
 }

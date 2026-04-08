@@ -411,7 +411,8 @@ export namespace Taskora {
         state: WorkflowState;
         createdAt: number;
         nodeCount: number;
-        terminalTasks: string[];
+        name: string | null;
+        tasks: string[];
       }>
     >;
     getWorkflowDetail(workflowId: string): Promise<WorkflowDetail | null>;

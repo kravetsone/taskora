@@ -1167,7 +1167,8 @@ export class RedisBackend implements Taskora.Adapter {
       state: Taskora.WorkflowState;
       createdAt: number;
       nodeCount: number;
-      terminalTasks: string[];
+      name: string | null;
+      tasks: string[];
     }>
   > {
     const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
@@ -1177,7 +1178,8 @@ export class RedisBackend implements Taskora.Adapter {
       state: Taskora.WorkflowState;
       createdAt: number;
       nodeCount: number;
-      terminalTasks: string[];
+      name: string | null;
+      tasks: string[];
     }> = [];
 
     let cursor = "0";
@@ -1189,7 +1191,6 @@ export class RedisBackend implements Taskora.Adapter {
       collected.push(...keys);
     } while (cursor !== "0");
 
-    // Pipeline HMGET for state, createdAt, graph
     const pipe = this.client.pipeline();
     for (const key of collected) {
       pipe.hmget(key, "state", "createdAt", "graph");
@@ -1203,19 +1204,23 @@ export class RedisBackend implements Taskora.Adapter {
       if (state && wfState !== state) continue;
 
       const key = collected[i];
-      // Extract workflow ID from key: base:wf:{id}
       const idMatch = key.match(/wf:\{(.+)\}$/);
       const id = idMatch?.[1] ?? key;
 
       let nodeCount = 0;
-      const terminalTasks: string[] = [];
+      let name: string | null = null;
+      const tasks: string[] = [];
       if (values[2]) {
         try {
           const graph = JSON.parse(values[2]);
           nodeCount = graph.nodes?.length ?? 0;
-          if (graph.terminal && graph.nodes) {
-            for (const ti of graph.terminal) {
-              terminalTasks.push(graph.nodes[ti]?.taskName ?? "unknown");
+          name = graph.name ?? null;
+          // Collect unique task names in order
+          const seen = new Set<string>();
+          for (const node of graph.nodes ?? []) {
+            if (!seen.has(node.taskName)) {
+              seen.add(node.taskName);
+              tasks.push(node.taskName);
             }
           }
         } catch {
@@ -1223,16 +1228,9 @@ export class RedisBackend implements Taskora.Adapter {
         }
       }
 
-      results.push({
-        id,
-        state: wfState,
-        createdAt: Number(values[1] ?? 0),
-        nodeCount,
-        terminalTasks,
-      });
+      results.push({ id, state: wfState, createdAt: Number(values[1] ?? 0), nodeCount, name, tasks });
     }
 
-    // Sort by createdAt desc
     results.sort((a, b) => b.createdAt - a.createdAt);
     return results.slice(offset, offset + limit);
   }

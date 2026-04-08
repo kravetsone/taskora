@@ -1490,7 +1490,8 @@ export class MemoryBackend implements Taskora.Adapter {
       state: Taskora.WorkflowState;
       createdAt: number;
       nodeCount: number;
-      terminalTasks: string[];
+      name: string | null;
+      tasks: string[];
     }>
   > {
     const results: Array<{
@@ -1498,21 +1499,28 @@ export class MemoryBackend implements Taskora.Adapter {
       state: Taskora.WorkflowState;
       createdAt: number;
       nodeCount: number;
-      terminalTasks: string[];
+      name: string | null;
+      tasks: string[];
     }> = [];
 
     for (const [id, wf] of this.workflows) {
       if (state && wf.state !== state) continue;
       const graph = JSON.parse(wf.graph);
-      const terminalTasks = (graph.terminal ?? []).map(
-        (i: number) => graph.nodes[i]?.taskName ?? "unknown",
-      );
+      const seen = new Set<string>();
+      const tasks: string[] = [];
+      for (const node of graph.nodes ?? []) {
+        if (!seen.has(node.taskName)) {
+          seen.add(node.taskName);
+          tasks.push(node.taskName);
+        }
+      }
       results.push({
         id,
         state: wf.state as Taskora.WorkflowState,
         createdAt: wf.createdAt,
         nodeCount: graph.nodes.length,
-        terminalTasks,
+        name: graph.name ?? null,
+        tasks,
       });
     }
 

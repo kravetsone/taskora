@@ -125,10 +125,13 @@ export function WorkflowDetailPage() {
             &larr; Workflows
           </Link>
           <div className="flex items-center gap-3 mt-1">
-            <h2 className="text-lg font-semibold font-mono">{detail.id.slice(0, 12)}...</h2>
+            <h2 className="text-lg font-semibold">
+              {detail.graph.name ?? <span className="font-mono">{detail.id.slice(0, 12)}...</span>}
+            </h2>
             <Badge state={detail.state} />
           </div>
           <div className="text-xs text-board-muted mt-1">
+            {detail.graph.name && <span className="font-mono mr-2">{detail.id.slice(0, 12)}...</span>}
             Created {relativeTime(detail.createdAt)} | {detail.graph.nodes.length} nodes
           </div>
         </div>

@@ -3,6 +3,7 @@ import type { WorkflowHandle } from "./handle.js";
 
 export interface WorkflowDispatchOptions {
   ttl?: import("../scheduler/duration.js").Duration;
+  name?: string;
 }
 
 /**

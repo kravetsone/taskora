@@ -107,7 +107,8 @@ export interface WorkflowSummary {
   state: string;
   createdAt: number;
   nodeCount: number;
-  terminalTasks: string[];
+  name: string | null;
+  tasks: string[];
 }
 
 export interface WorkflowDetail {
@@ -117,6 +118,7 @@ export interface WorkflowDetail {
   graph: {
     nodes: Array<{ taskName: string; data?: string; deps: number[]; jobId: string; _v: number }>;
     terminal: number[];
+    name?: string;
   };
   nodes: Array<{
     index: number;
