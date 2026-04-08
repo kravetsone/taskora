@@ -14,6 +14,7 @@ export {
 export { json } from "./serializer.js";
 export { type TaskoraOptions, App } from "./app.js";
 export { Task } from "./task.js";
+export { BoundTask } from "./bound-task.js";
 export {
   type TaskContract,
   type DefineTaskConfig,

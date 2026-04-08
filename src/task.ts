@@ -68,6 +68,12 @@ export class Task<TInput, TOutput> {
   readonly since: number;
   readonly migrations: Map<number, MigrationFn>;
   readonly middleware: Taskora.Middleware[];
+  /**
+   * `true` if a real handler is attached and this process should run a worker
+   * loop for this task. `false` for contract-only registrations (`app.register`)
+   * where the handler lives in a separate process.
+   */
+  hasHandler = true;
   private readonly deps: TaskDeps;
   private readonly emitter = new TypedEmitter<Taskora.TaskEventMap<TOutput>>();
 

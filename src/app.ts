@@ -1,4 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { BoundTask } from "./bound-task.js";
+import type { TaskContract } from "./contract.js";
 import { DeadLetterManager } from "./dlq.js";
 import { TypedEmitter } from "./emitter.js";
 import { Inspector } from "./inspector.js";
@@ -273,6 +275,74 @@ export class App {
     return task;
   }
 
+  /**
+   * Register a task contract without a handler. Returns a {@link BoundTask}
+   * that can dispatch jobs — intended for producer-only processes where the
+   * handler lives in a separate worker process.
+   *
+   * Idempotent: calling `register()` twice for the same task name returns the
+   * same underlying task. If a task with that name already exists (via
+   * `app.task()` or a prior `app.implement()`), the existing task is wrapped
+   * and its handler is left untouched.
+   *
+   * @example
+   * ```ts
+   * // producer.ts
+   * import { sendEmailContract } from "./contracts.js"
+   * const sendEmail = taskora.register(sendEmailContract)
+   * await sendEmail.dispatch({ to: "a@b.c", subject: "Welcome" })
+   * ```
+   */
+  register<TInput, TOutput>(contract: TaskContract<TInput, TOutput>): BoundTask<TInput, TOutput> {
+    const existing = this.tasks.get(contract.name) as Task<TInput, TOutput> | undefined;
+    if (existing) {
+      return new BoundTask(existing);
+    }
+
+    const safetyHandler: (data: TInput, ctx: Taskora.Context) => Promise<TOutput> = async () => {
+      throw new Error(
+        `Task "${contract.name}" was registered as a contract but no handler has been implemented in this process. Call taskora.implement(contract, handler) in the process that should execute it.`,
+      );
+    };
+
+    const retry = contract.retry ?? this.defaults.retry;
+    const timeout = contract.timeout
+      ? parseDuration(contract.timeout)
+      : (this.defaults.timeout ?? 30_000);
+    const stall = contract.stall ?? this.defaults.stall;
+    const concurrency = this.defaults.concurrency ?? 1;
+
+    const task = new Task<TInput, TOutput>(
+      {
+        adapter: this.adapter,
+        serializer: this.serializer,
+        ensureConnected: () => this.ensureConnected(),
+        onEventSubscribe: (taskName) => {
+          this.tasksNeedingEvents.add(taskName);
+          if (this.started) {
+            this.ensureSubscription().catch((err) => {
+              this.appEmitter.emit(
+                "worker:error",
+                err instanceof Error ? err : new Error(String(err)),
+              );
+            });
+          }
+        },
+      },
+      contract.name,
+      safetyHandler,
+      { concurrency, timeout, retry, stall },
+      contract.input || contract.output
+        ? { input: contract.input, output: contract.output }
+        : undefined,
+      contract.version !== undefined ? { version: contract.version } : undefined,
+    );
+
+    task.hasHandler = false;
+    this.tasks.set(contract.name, task as Task<unknown, unknown>);
+    return new BoundTask(task);
+  }
+
   schedule(name: string, config: Taskora.ScheduleConfig): void {
     if (!config.every && !config.cron) {
       throw new Error("Schedule must have either 'every' or 'cron'");
@@ -324,6 +394,10 @@ export class App {
     await this.ensureSubscription();
 
     for (const task of this.tasks.values()) {
+      // Contract-only registrations: no handler in this process, skip the worker loop.
+      // Dispatch and event subscription still work — this process is producer-only for this task.
+      if (!task.hasHandler) continue;
+
       const worker = new Worker(
         task,
         this.adapter,
