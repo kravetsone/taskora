@@ -2,6 +2,10 @@
 
 Patterns for monitoring taskora in production.
 
+::: tip Looking for the admin UI?
+For an in-process, batteries-included dashboard with workflow DAGs, schedule management, DLQ, and live SSE updates, see [Board](/operations/board). This page covers long-term metrics pipelines (Grafana / Datadog / Prometheus) — the board is not a replacement for those, it complements them.
+:::
+
 ## Health Check Endpoint
 
 ```ts

@@ -116,6 +116,17 @@ src/
   3. `documentation/skills/using-taskora/SKILL.md` — the public `/taskora` Agent Skill consumed by Claude Code, Cursor, Windsurf, Cline, and 40+ other AI agents. Also bump `version` in `documentation/skills/metadata.json` + the `metadata.version` field in SKILL.md frontmatter when making user-visible changes.
 
   The skill is a curated quick reference — not auto-generated. If it gets out of sync with the real API, every AI agent using it will produce broken code. Treat it as a first-class artifact, not an afterthought.
+- **VitePress package-manager commands**: in `documentation/**/*.md`, **never** hand-roll `::: code-group` blocks for `npm install` / `pnpm add` / `bun add` / `yarn add`. Always use the [`vitepress-plugin-package-managers`](https://www.npmjs.com/package/vitepress-plugin-package-managers) container syntax that's already wired into `.vitepress/config.ts`:
+
+  ```md
+  ::: pm-add hono
+  :::
+
+  ::: pm-add taskora ioredis
+  :::
+  ```
+
+  Available: `pm-add`, `pm-install`, `pm-run`, etc. Existing usage: `guide/getting-started.md`, `index.md`, `features/scheduling.md`. The plugin auto-generates tabs for all four managers with site-wide tab-sync — manual code-groups break the sync and drift out of date.
 
 ## Commands
 

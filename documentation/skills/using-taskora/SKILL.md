@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.1.0"
+  version: "0.2.0"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -775,24 +775,126 @@ afterEach(() => runner.dispose())  // from-instance mode (restores original adap
 
 ## Admin dashboard (Board)
 
+`taskora/board` ships a full-featured admin UI as a pre-built React SPA served by a Hono backend. No build step for users — install the `hono` peer dep and mount the board.
+
 ```typescript
 import { createBoard } from "taskora/board"
 
 const board = createBoard(taskora, {
-  auth: async (req) => { /* return true/false */ },
-  readOnly: false,
-  basePath: "/admin/taskora",
+  basePath: "/board",                  // default "/board"
+  readOnly: false,                     // hides mutation UI + rejects POST/PUT/DELETE
+  auth: async (req) => {               // runs on every API request
+    const token = req.headers.get("authorization")
+    if (!token) return new Response("Unauthorized", { status: 401 })
+    // return undefined to allow the request through
+  },
+  title: "My Queue",
+  theme: "auto",                       // "light" | "dark" | "auto"
+  redact: ["password", "apiKey", "ssn"], // deep, case-insensitive key redaction
+  refreshInterval: 2000,               // stats polling fallback — SSE is primary
+  formatters: {
+    data: (data, taskName) => data,    // per-task render preprocessing
+    result: (result, taskName) => result,
+  },
 })
-
-// Standalone
-board.listen(3000)
-
-// Or integrate with frameworks
-app.use("/admin/taskora", board.fetch)     // Bun.serve / Deno.serve
-app.route("/admin/taskora", board.app)     // Hono
 ```
 
-Features: overview dashboard, task detail, job detail with timeline, workflow DAG visualization, schedule management, DLQ view, global job search, dark/light theme, keyboard shortcuts (1-5 navigation, `/` search).
+### Serving the board
+
+The `Board` interface exposes four ways to serve the UI — pick whichever fits your host:
+
+```typescript
+interface Board {
+  app: Hono                                             // raw Hono instance
+  fetch: (req: Request) => Response | Promise<Response> // Web standard fetch handler
+  handler: (req, res) => void                          // Node.js-style (requires @hono/node-server)
+  listen: (port: number) => void                       // standalone server (Bun / Deno only)
+}
+```
+
+```typescript
+// Standalone (Bun / Deno only — throws on plain Node.js)
+board.listen(3000)
+
+// Bun.serve / Deno.serve / Cloudflare Workers / Vercel Edge
+Bun.serve({ fetch: board.fetch, port: 3000 })
+Deno.serve({ port: 3000 }, board.fetch)
+
+// Hono — mount as sub-route on an existing Hono app
+honoApp.route("/admin/taskora", board.app)
+
+// Node.js (Express / Fastify / Koa) — wrap with @hono/node-server
+import { serve } from "@hono/node-server"
+serve({ fetch: board.fetch, port: 3000 })
+```
+
+Anything that speaks the Web `Request`/`Response` standard can mount `board.fetch` directly. For Node.js-native frameworks, always wrap with `@hono/node-server` — calling `board.handler` without it throws.
+
+### What the UI provides
+
+- **Overview dashboard** — global stat cards (waiting/active/delayed/failed/completed/cancelled/expired), 24h throughput chart (Recharts), task table, Redis health (version, memory, uptime)
+- **Task detail** — state tabs, paginated job table, bulk retry-all and clean-by-age actions
+- **Job detail** — timeline (`ts` → `processedOn` → `finishedOn`), data/result/error/logs tabs, progress bar, attempt history, retry + cancel actions, workflow link
+- **Workflow DAG** — `@xyflow/react` with BFS auto-layout, state-colored nodes, animated edges, cascade cancel; renders chains/groups/chords including nested
+- **Schedule management** — list with next-run countdown, pause/resume/trigger-now/delete/update
+- **DLQ view** — failed jobs grouped by error-message frequency, per-job retry + atomic retry-all (`retryAllDLQ.lua` batched 100 at a time)
+- **Migrations view** — version distribution bar chart per task, `canBumpSince` indicator
+- **Real-time SSE** — `/api/events` streams `adapter.subscribe()` events live + periodic `stats:update`; `refreshInterval` polling only as fallback
+- **Global job search** — paste job ID → detail view
+- **Keyboard shortcuts** — `1`–`5` for top-level nav, `/` for global search
+- **Dark / light / auto theme** via CSS custom properties
+
+### Throughput backing
+
+`ack.lua` and `fail.lua` `INCR` per-minute counters with a 24h TTL, so the throughput chart is accurate without any external time-series database.
+
+### REST API (under `${basePath}/api`)
+
+The SPA talks to a public REST API — you can call these from your own tooling. Key endpoints:
+
+```
+GET    /api/overview                    — global stats + tasks + Redis info
+GET    /api/tasks/:task/jobs            — paginated (query: state, limit, offset)
+GET    /api/tasks/:task/stats           — queue counts
+GET    /api/tasks/:task/migrations      — version distribution + canBumpSince
+POST   /api/tasks/:task/retry-all       — retry every failed job for a task
+POST   /api/tasks/:task/clean           — trim completed/failed
+GET    /api/jobs/:jobId                 — full JobDetailResponse w/ timeline + workflow link
+POST   /api/jobs/:jobId/retry
+POST   /api/jobs/:jobId/cancel
+GET    /api/schedules
+POST   /api/schedules/:name/pause
+POST   /api/schedules/:name/resume
+POST   /api/schedules/:name/trigger
+PUT    /api/schedules/:name
+DELETE /api/schedules/:name
+GET    /api/workflows
+GET    /api/workflows/:workflowId       — DAG graph + per-node state
+POST   /api/workflows/:workflowId/cancel
+GET    /api/dlq                         — grouped by error-message frequency
+POST   /api/dlq/:jobId/retry
+POST   /api/dlq/retry-all
+GET    /api/throughput                  — 24h per-minute buckets
+GET    /api/events                      — Server-Sent Events stream
+GET    /api/config                      — static config (title, logo, theme, readOnly)
+```
+
+All mutation endpoints honor `readOnly` and the `auth` hook.
+
+### Field redaction
+
+`redact: ["password", "secret", ...]` walks every field in `data`, `result`, `error`, and `logs.meta` and masks keys matching (case-insensitive) recursively through nested objects and arrays. Redaction runs **on the server** — secrets never leave the process.
+
+For per-task control, use `formatters.data` / `formatters.result` instead.
+
+### Production checklist
+
+- **Always** set `auth` — never expose the board publicly without it
+- Configure `redact` for any sensitive payload fields
+- Consider `readOnly: true` for broad internal visibility
+- Mount behind HTTPS (the board has no TLS — that's the proxy's job)
+- If fronted by nginx, disable `proxy_buffering` on the board location so SSE works
+- Pin a stable `basePath` — changing it invalidates cached asset URLs in browsers
 
 ## Adapters
 
