@@ -915,3 +915,589 @@ const apiTask = taskora.task("call-external-api", {
   },
 })
 ```
+
+---
+
+## Internal flows
+
+### Job lifecycle state machine
+
+```
+dispatch()
+    │
+    ├──(no delay)──→ WAITING ──→ worker claims ──→ ACTIVE
+    │                   │                            │
+    └──(delay > 0)──→ DELAYED ─(timer fires)──→ WAITING  │
+                                                     │
+                        ┌────────────────────────────┤
+                        │            │               │              │
+                        ▼            ▼               ▼              ▼
+                   COMPLETED      FAILED          RETRYING      CANCELLED
+                                    │               │
+                                    │               ▼
+                                    │           DELAYED ──→ WAITING ──→ ACTIVE ...
+                                    │
+                                (expired job during dequeue)
+                                    ▼
+                                 EXPIRED
+```
+
+State transitions and what triggers them:
+
+| From | To | Trigger |
+|---|---|---|
+| — | `waiting` | `dispatch()` with no delay |
+| — | `delayed` | `dispatch()` with `delay` option |
+| `delayed` | `waiting` | Score time reached in sorted set, promoted by `moveToActive.lua` |
+| `waiting` | `active` | Worker claims via `blockingDequeue` → `moveToActive.lua` |
+| `active` | `completed` | Handler returns successfully → `ack.lua` |
+| `active` | `failed` | Handler throws, no retries left → `fail.lua` |
+| `active` | `retrying` | Handler throws, retries remaining → `fail.lua` (retry path) |
+| `retrying` | `delayed` | `fail.lua` sets ZADD with backoff delay score |
+| `active` | `cancelled` | `handle.cancel()` → `cancel.lua` + worker detects via pub/sub or `extendLock` |
+| `waiting`/`delayed` | `cancelled` | `handle.cancel()` → `cancel.lua` (immediate) |
+| `waiting`/`delayed` | `expired` | TTL exceeded, detected during `moveToActive.lua` promote/dequeue |
+
+Every state transition is a **Lua script** — no partial states, no race conditions.
+
+### Worker processing pipeline
+
+When a worker claims a job, this is the exact sequence:
+
+```
+blockingDequeue (BZPOPMIN on marker ZSET)
+    │
+    ▼
+moveToActive.lua
+  ├── promote delayed jobs (ZRANGEBYSCORE → LPUSH)
+  ├── check TTL expiration (expireAt < now → EXPIRED)
+  ├── check singleton (LLEN active > 0 → re-queue with 1s delay)
+  ├── check concurrency key limit
+  ├── RPOPLPUSH wait → active
+  ├── set lock token + processedOn timestamp
+  └── return job data
+    │
+    ▼
+Version check
+  ├── job._v > task.version → nack (future version, leave for newer worker)
+  ├── job._v < task.since → fail permanently ("migration no longer available")
+  └── job._v <= task.version → continue
+    │
+    ▼
+Deserialize (serializer.deserialize)
+    │
+    ▼
+Migration (if job._v < task.version)
+  └── run migration chain: for each v from job._v to task.version, apply migrate[v] if exists
+    │
+    ▼
+Schema validation (if input schema + versioned task)
+  └── standardSchema.validate(data) — applies .default() values
+    │
+    ▼
+Middleware pipeline (composed once at Worker construction)
+  └── app middleware → task middleware → handler wrapper
+    │
+    ▼
+Handler execution (with timeout race if configured)
+  ├── timeout fires → TimeoutError + controller.abort("timeout")
+  └── handler completes → result
+    │
+    ▼
+Output validation (if output schema)
+    │
+    ▼
+Cancel check (signal.aborted && reason === "cancelled"?)
+  ├── yes → onCancel hook → finishCancel.lua
+  └── no → continue
+    │
+    ├──(success)──→ ack.lua (LREM active + store result + ZADD completed + XADD event)
+    │                  └── advance workflow if part of one
+    │
+    └──(error)──→ Retry decision:
+                    ├── RetryError → always retry (unless attempts exhausted)
+                    ├── TimeoutError → NOT retried by default (must be in retryOn)
+                    ├── noRetryOn match → permanent fail
+                    ├── retryOn set + no match → permanent fail
+                    └── else → shouldRetry(attempt < max) → retry or fail
+                      │
+                      ├── retry → fail.lua (retry path: HINCRBY attempt, state=retrying,
+                      │           ZADD delayed with backoff score, XADD retrying event)
+                      │
+                      └── permanent fail → fail.lua (LREM active + ZADD failed + XADD event)
+                                            └── failWorkflow if part of one
+```
+
+### Retry decision flow
+
+```
+Handler throws error
+    │
+    ▼
+Is error a RetryError (manual ctx.retry())?
+  ├── yes → Are attempts exhausted (attempt >= retry.attempts)?
+  │           ├── yes → permanent fail
+  │           └── no → RETRY with RetryError.delay or computed backoff
+  │
+  └── no → Is error a TimeoutError?
+              ├── yes → Is TimeoutError in retry.retryOn?
+              │           ├── yes, and attempt < attempts → RETRY
+              │           └── no → permanent fail
+              │
+              └── no → Is error in retry.noRetryOn?
+                          ├── yes → permanent fail
+                          └── no → Is retry.retryOn set?
+                                    ├── yes → Is error in retryOn?
+                                    │           ├── yes, attempt < attempts → RETRY
+                                    │           └── no → permanent fail
+                                    └── no → attempt < retry.attempts?
+                                              ├── yes → RETRY
+                                              └── no → permanent fail
+```
+
+Backoff delay computation:
+
+```
+base = retry.delay (default: 1000ms)
+strategy:
+  "fixed"       → base
+  "linear"      → base * attempt
+  "exponential" → base * 2^(attempt-1)  [default]
+  function      → fn(attempt)
+
+cap: min(delay, retry.maxDelay)
+jitter (default on): delay * random(0.75, 1.25)
+```
+
+`retry.attempts` is **total attempts**, not retry count. `attempts: 3` means 1 initial + 2 retries.
+
+### Workflow execution flow
+
+```
+dispatch(composition)
+    │
+    ▼
+flattenToDAG(composition)
+  └── recursively flatten chain/group/chord into WorkflowGraph:
+      { nodes: [{ taskName, data, deps, jobId }], terminal: [indices] }
+    │
+    ▼
+createWorkflow(workflowId, graph)
+  └── store entire graph as single Redis hash: taskora:wf:{id}
+    │
+    ▼
+Enqueue root nodes (nodes with deps = [])
+  └── each node gets a pre-generated jobId, enqueued as normal job with _wf/_wfNode fields
+    │
+    ▼
+Worker completes node job → ack.lua
+    │
+    ▼
+advanceWorkflow(workflowId, nodeIndex, result)
+  └── Lua script:
+      1. Mark node as completed, store result
+      2. Find nodes whose ALL deps are now completed
+      3. For each ready node:
+         ├── 1 dep → pass that dep's result as input
+         └── N deps → pass array of all dep results as input
+      4. Return toDispatch list + whether workflow completed
+    │
+    ├──(toDispatch not empty)──→ enqueue next batch of nodes
+    │
+    ├──(completed = true)──→ workflow state = "completed"
+    │     └── result = terminal nodes' results (single or array)
+    │
+    └──(node failed permanently)──→ failWorkflow(workflowId, nodeIndex, error)
+          └── Lua script:
+              1. Mark workflow as "failed"
+              2. Return list of active jobIds
+              3. Worker cancels all active/pending nodes (cascade)
+```
+
+Data flow through chains: `task.s(data)` = bound (ignores pipeline), `task.s()` = unbound (receives predecessor output). First chain step MUST have bound data.
+
+### Scheduling flow
+
+```
+app.schedule() or task schedule option
+    │
+    ▼
+Store config in Redis hash + next run time in sorted set
+    │
+    ▼
+Scheduler loop (runs in ONE leader across all workers):
+    │
+    ├── acquireSchedulerLock (SET NX PX 30s, token-based)
+    │     ├── acquired → I am leader
+    │     └── not acquired → skip tick (another leader owns it)
+    │
+    └── tickScheduler (every pollInterval, default 1s):
+          │
+          ▼
+        TICK_SCHEDULER Lua:
+          1. ZRANGEBYSCORE schedules:next (score <= now)
+          2. ZREM claimed entries (atomic — first worker wins)
+          3. HGET config for each
+          4. Return list of due schedules
+            │
+            ▼
+          For each due schedule:
+            ├── overlap check: if overlap=false, check lastJobId state
+            │     ├── still active → skip this run
+            │     └── done/not exists → dispatch
+            │
+            ├── missed run policy:
+            │     ├── "skip" → dispatch once, set next run
+            │     ├── "catch-up" → dispatch for each missed interval
+            │     └── "catch-up-limit:N" → dispatch up to N missed
+            │
+            └── dispatch task → update lastJobId + next run time
+
+Leader failover: lock has 30s TTL, renewed every tick. If leader dies,
+another worker acquires within ~30s.
+```
+
+### Cancellation flow
+
+```
+handle.cancel({ reason })
+    │
+    ▼
+cancel.lua:
+  ├── job in waiting/delayed/retrying?
+  │     └── move to cancelled set immediately → return "cancelled"
+  │
+  └── job in active?
+        └── set cancelledAt flag in hash + PUBLISH to cancel channel
+            → return "flagged"
+    │
+    ▼
+Worker detects cancel (two paths, whichever first):
+  ├── Redis pub/sub: cancel channel message → controller.abort("cancelled")
+  └── extendLock heartbeat: returns "cancelled" → controller.abort("cancelled")
+    │
+    ▼
+Handler observes ctx.signal.aborted = true
+  ├── handler checks signal and stops → throws/returns
+  └── handler ignores signal → continues until done
+    │
+    ▼
+After handler exits:
+  └── worker detects signal.reason === "cancelled"
+      └── onCancel hook runs (if defined)
+          └── finishCancel.lua: LREM active → ZADD cancelled, clean dedup/concurrency keys
+```
+
+### Stall detection flow
+
+```
+Every stallInterval (default 30s):
+    │
+    ▼
+stalledCheck.lua (two-phase):
+  Phase 1: previousActiveSet ∩ currentActiveSet = stalled candidates
+    └── for each candidate: does lock key exist?
+          ├── yes → healthy (extendLock already SREMed from stalled set)
+          └── no → truly stalled
+                ├── stalledCount < maxCount → re-queue (LPUSH wait, state=waiting)
+                └── stalledCount >= maxCount → fail permanently
+
+  Phase 2: SADD all currently active IDs for next check cycle
+```
+
+### Collect (batch accumulation) flow
+
+```
+dispatch(item)
+    │
+    ▼
+COLLECT_PUSH Lua:
+  1. RPUSH item to collect:{key}:items list
+  2. Count items in list
+  3. count >= maxSize?
+  │    ├── yes → immediate flush: drain list → create real job in wait set
+  │    └── no → update/create flush sentinel (delayed job with collectKey)
+  │              └── debounce: each dispatch resets the delay timer
+  │
+  ▼ (when sentinel fires — delay elapsed without new items)
+moveToActive.lua: sentinel job claimed
+  └── detects collectKey → drains collect:{key}:items into :data
+      └── worker receives items[] as handler data
+  │
+  ▼ (or maxWait fires — absolute deadline reached)
+same as above — maxWait creates a hard deadline independent of debounce
+```
+
+Three flush triggers (whichever first): debounce delay reset per dispatch, maxSize immediate flush, maxWait absolute deadline.
+
+---
+
+## Best practices
+
+### Production checklist
+
+```typescript
+const taskora = createTaskora({
+  adapter: redisAdapter({
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT),
+    password: process.env.REDIS_PASSWORD,
+    maxRetriesPerRequest: null,      // required for blocking commands
+    enableReadyCheck: false,         // faster startup
+    lazyConnect: true,               // connect on first use
+  }),
+  defaults: {
+    retry: { attempts: 3, backoff: "exponential", delay: 1000, maxDelay: 60_000 },
+    timeout: 30_000,
+    concurrency: 5,
+  },
+  retention: {
+    completed: { maxAge: "24h", maxItems: 1_000 },
+    failed: { maxAge: "30d", maxItems: 5_000 },
+  },
+})
+```
+
+### Always set timeouts
+
+Every task should have a timeout. Without one, a stuck handler holds the lock forever (until stall detection kicks in at 30s intervals).
+
+```typescript
+// Bad — no timeout, stuck handler blocks the slot
+const task = taskora.task("risky", {
+  handler: async (data) => await externalApi.call(data),
+})
+
+// Good — timeout + signal propagation
+const task = taskora.task("risky", {
+  timeout: 30_000,
+  handler: async (data, ctx) => {
+    return await externalApi.call(data, { signal: ctx.signal })
+  },
+})
+```
+
+### Propagate ctx.signal to all I/O
+
+The AbortSignal fires on shutdown AND cancellation. Pass it to every `fetch`, database call, or child process to ensure clean abort.
+
+```typescript
+handler: async (data, ctx) => {
+  const response = await fetch(url, { signal: ctx.signal })
+  await db.query(sql, { signal: ctx.signal })
+  const result = await childProcess.exec(cmd, { signal: ctx.signal })
+}
+```
+
+### Use ctx.heartbeat() for long operations
+
+Lock TTL is 30s, extended every 10s automatically. But if a single operation takes >30s (e.g., large file upload), extend the lock manually:
+
+```typescript
+handler: async (data, ctx) => {
+  for (const chunk of largeFile.chunks()) {
+    ctx.heartbeat()  // extend lock
+    await uploadChunk(chunk)
+  }
+}
+```
+
+### Idempotent handlers
+
+Jobs can be delivered more than once (network partitions, stall recovery, lock expiry). Design handlers to be idempotent.
+
+```typescript
+// Bad — double-charge if job retried after ack failure
+handler: async (data) => {
+  await chargeCustomer(data.customerId, data.amount)
+}
+
+// Good — idempotency key prevents double processing
+handler: async (data, ctx) => {
+  await chargeCustomer(data.customerId, data.amount, {
+    idempotencyKey: ctx.id,  // job ID is stable across retries
+  })
+}
+```
+
+### Choose the right flow control
+
+| Need | Use | Why |
+|---|---|---|
+| Only process the latest update | `debounce` | Replaces previous job, last dispatch wins |
+| Limit rate per user/key | `throttle` | Drops excess, per-key |
+| Don't queue duplicate work | `deduplicate` | No-op if existing job matches |
+| Limit rate for the whole task | `concurrency` | Queue excess, per-worker |
+| Only one active globally | `singleton: true` | Queue excess, global across workers |
+| Limit concurrent per group | `concurrencyKey + concurrencyLimit` | Queue excess, per-key |
+| Job is useless after timeout | `ttl` | Expires before processing starts |
+| Accumulate items then batch | `collect` | Flushes on debounce/size/maxWait |
+
+### Retry anti-patterns
+
+```typescript
+// Bad — retrying non-transient errors wastes resources
+const task = taskora.task("validate", {
+  retry: { attempts: 5, backoff: "exponential" },
+  handler: async (data) => {
+    // ValidationError will be retried 5 times for nothing
+    if (!data.email.includes("@")) throw new ValidationError("bad email")
+  },
+})
+
+// Good — exclude non-transient errors
+const task = taskora.task("validate", {
+  retry: {
+    attempts: 5,
+    backoff: "exponential",
+    noRetryOn: [ValidationError, AuthError, NotFoundError],
+  },
+  handler: async (data) => { /* ... */ },
+})
+```
+
+### Structure task definitions consistently
+
+```typescript
+// Recommended pattern for production tasks
+const processOrderTask = taskora.task("process-order", {
+  // Schema validation
+  input: orderSchema,
+  output: orderResultSchema,
+
+  // Resilience
+  retry: { attempts: 3, backoff: "exponential", noRetryOn: [ValidationError] },
+  timeout: 60_000,
+
+  // Concurrency
+  concurrency: 10,
+
+  // Versioning (bump when schema changes)
+  version: 2,
+  migrate: {
+    1: (data) => ({ ...(data as any), priority: "normal" }),
+  },
+
+  // Middleware
+  middleware: [auditLog(), validatePermissions()],
+
+  // Handler
+  handler: async (data, ctx) => {
+    ctx.log.info("Processing order", { orderId: data.id })
+    ctx.progress(0)
+    // ... process
+    ctx.progress(100)
+    return { status: "completed", processedAt: Date.now() }
+  },
+
+  // Cancellation cleanup
+  onCancel: async (data, ctx) => {
+    await rollbackPartialOrder(ctx.id)
+  },
+})
+```
+
+### Testing strategy
+
+```typescript
+// Unit test: handler logic only (fast, no queue)
+it("processes order correctly", async () => {
+  const result = await runner.run(processOrderTask, validOrderData)
+  expect(result.status).toBe("completed")
+})
+
+// Integration test: full pipeline with retries
+it("retries on transient error then succeeds", async () => {
+  let calls = 0
+  const flaky = runner.app.task("flaky", {
+    retry: { attempts: 3 },
+    handler: async () => {
+      calls++
+      if (calls < 3) throw new Error("transient")
+      return "ok"
+    },
+  })
+
+  const exec = await runner.execute(flaky, {})
+  expect(exec.state).toBe("completed")
+  expect(exec.attempts).toBe(3)
+})
+
+// Workflow test
+it("chain passes data between steps", async () => {
+  const handle = chain(addTask.s({ x: 1, y: 2 }), doubleTask.s()).dispatch()
+  await handle
+  while (await handle.getState() !== "completed") {
+    await runner.processAll()
+  }
+  expect(await handle.result).toBe(6)
+})
+```
+
+### Graceful shutdown
+
+```typescript
+// Handle both SIGTERM (orchestrator stop) and SIGINT (Ctrl+C)
+const signals = ["SIGTERM", "SIGINT"] as const
+let shuttingDown = false
+
+for (const signal of signals) {
+  process.on(signal, async () => {
+    if (shuttingDown) return  // prevent double-shutdown
+    shuttingDown = true
+    console.log(`Received ${signal}, shutting down...`)
+    await taskora.close()  // waits for active jobs, then disconnects
+    process.exit(0)
+  })
+}
+
+await taskora.start()
+```
+
+### Monitoring with events
+
+```typescript
+// Global error tracking
+taskora.on("task:failed", (event) => {
+  errorTracker.captureException(new Error(event.error), {
+    tags: { task: event.task, jobId: event.id, attempt: event.attempt },
+  })
+})
+
+// Metrics
+taskora.on("task:completed", (event) => {
+  metrics.histogram("task.duration", event.duration, { task: event.task })
+})
+
+taskora.on("task:stalled", (event) => {
+  alerting.warn(`Job ${event.id} stalled (${event.action})`, { task: event.task })
+})
+```
+
+### When to use workflows vs standalone dispatch
+
+```typescript
+// Standalone: steps are independent, don't need result passing
+await sendEmailTask.dispatch(emailData)
+await logAnalyticsTask.dispatch(analyticsData)
+
+// Chain: output of step N is input of step N+1
+const handle = chain(
+  createUserTask.s(userData),
+  sendWelcomeEmailTask.s(),   // needs user ID from previous step
+  notifySlackTask.s(),        // needs email result
+).dispatch()
+
+// Group: independent steps that should complete together
+const handle = group(
+  resizeSmall.s(imgData),
+  resizeMedium.s(imgData),
+  resizeLarge.s(imgData),
+).dispatch()
+
+// Chord: parallel work, then aggregate
+const handle = chord(
+  [fetchA.s(), fetchB.s(), fetchC.s()],
+  merge.s(),  // receives [resultA, resultB, resultC]
+).dispatch()
+```
