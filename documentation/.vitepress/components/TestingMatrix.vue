@@ -1,5 +1,11 @@
 <template>
-  <div class="testing-matrix">
+  <a
+    class="testing-matrix"
+    href="https://github.com/kravetsone/taskora/actions/workflows/test.yml"
+    target="_blank"
+    rel="noopener noreferrer"
+    aria-label="View the Taskora cross-runtime test matrix runs on GitHub Actions"
+  >
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 720 380"
@@ -102,13 +108,31 @@
         font-variant-numeric="tabular-nums"
       >1,500 live-Redis integration test runs per push</text>
     </svg>
-  </div>
+  </a>
 </template>
 
 <style scoped>
 .testing-matrix {
+  display: block;
   margin: 1.5rem auto;
   max-width: 720px;
+  /* Reset <a> defaults so the wrapper reads as a visual card, not a text link. */
+  text-decoration: none;
+  color: inherit;
+  border-radius: 12px;
+  transition:
+    transform 0.18s ease-out,
+    filter 0.18s ease-out;
+}
+.testing-matrix:hover {
+  /* Subtle lift + slight brighten on hover so the link affordance is
+     discoverable without turning the whole graphic into a button. */
+  transform: translateY(-2px);
+  filter: brightness(1.05);
+}
+.testing-matrix:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 4px;
 }
 .testing-matrix__svg {
   width: 100%;
