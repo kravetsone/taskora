@@ -1501,3 +1501,15 @@ const handle = chord(
   merge.s(),  // receives [resultA, resultB, resultC]
 ).dispatch()
 ```
+
+---
+
+## Further reading
+
+Full taskora documentation in LLM-friendly formats (regenerated on every docs build, always matches the current version):
+
+- **Single-file full docs**: `https://kravetsone.github.io/taskora/llms-full.txt` — entire documentation concatenated, paste into context when you need the exhaustive reference
+- **Index**: `https://kravetsone.github.io/taskora/llms.txt` — table of contents with descriptions, use to decide which page to fetch
+- **Per-page markdown**: append `.md` to any doc URL (e.g. `https://kravetsone.github.io/taskora/features/workflows.md`)
+
+Prefer this SKILL.md for day-to-day work (it's the curated quick reference). Fall back to `llms-full.txt` when you need deeper detail on a specific subsystem not covered here (e.g. full inspector API surface, board internals, specific recipe walkthroughs).
