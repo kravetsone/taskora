@@ -1,41 +1,73 @@
 # AI Skills
 
-Taskora ships a public **Claude Code skill** that gives AI assistants deep knowledge of the library — every API, pattern, flow, and best practice. Instead of guessing from training data, your AI gets a structured reference tuned to taskora's conventions.
+Taskora ships a public **Agent Skill** that gives AI coding assistants deep knowledge of the library — every API, pattern, flow, and best practice. Instead of guessing from training data (which is frozen and often hallucinated), your AI gets a structured reference tuned to taskora's conventions.
+
+Agent Skills are a **shared specification** — a single `SKILL.md` file with YAML frontmatter — that works across 45+ AI coding tools including Claude Code, Cursor, Windsurf, Cline, Continue, GitHub Copilot, Codex, Gemini CLI, Zed, Aider, Goose, OpenCode, Kilo Code, and many more.
 
 ## What's included
 
 The `/taskora` skill provides:
 
-- **Full API reference** — `createTaskora()`, `app.task()`, `dispatch()`, `chain/group/chord`, events, inspector, DLQ, board
+- **Full API reference** — `createTaskora()`, `app.task()`, `dispatch()`, `chain`/`group`/`chord`, events, inspector, DLQ, board
 - **Internal flows** — job lifecycle state machine, worker processing pipeline, retry decision tree, workflow DAG execution, scheduling loop, cancellation and stall detection flows
 - **Best practices** — production checklist, idempotent handlers, timeout/signal propagation, flow control selection guide, retry anti-patterns, testing strategy, graceful shutdown
 - **Type system** — `Taskora` namespace, all public interfaces, adapter abstraction
 
 ## Installation
 
-### Claude Code
+### Universal install (any supported agent)
+
+The fastest way — works with any of the 45+ supported agents via the [`skills` CLI](https://github.com/vercel-labs/skills):
 
 ::: code-group
 ```bash [Quick install]
 npx skills add kravetsone/taskora/documentation/skills
 ```
 
-```bash [Specific skill only]
+```bash [Global (all projects)]
+npx skills add kravetsone/taskora/documentation/skills --global
+```
+
+```bash [Target specific agent]
+npx skills add kravetsone/taskora/documentation/skills --agent cursor
+# or: --agent claude-code, --agent windsurf, --agent cline, --agent codex, ...
+```
+
+```bash [Install without prompts]
 npx skills add kravetsone/taskora/documentation/skills --all
 ```
 :::
 
-Or install manually — copy `documentation/skills/using-taskora/SKILL.md` from the [taskora repo](https://github.com/kravetsone/taskora) into your project's `.claude/skills/` directory:
+The CLI detects which agents you have installed and syncs the skill into the right directory for each. For a full list of supported targets, run `npx skills add --help`.
+
+### Agent-specific install paths
+
+Agent Skills live in a well-known directory per tool. The `skills` CLI handles this automatically, but if you prefer manual installation, here's where to put `SKILL.md`:
+
+| Agent | Project-local path | Global path |
+|---|---|---|
+| Claude Code | `.claude/skills/using-taskora/` | `~/.claude/skills/using-taskora/` |
+| Cursor | `.cursor/skills/using-taskora/` | `~/.cursor/skills/using-taskora/` |
+| Windsurf | `.windsurf/skills/using-taskora/` | `~/.windsurf/skills/using-taskora/` |
+| Cline | `.cline/skills/using-taskora/` | `~/.cline/skills/using-taskora/` |
+| Continue | `.continue/skills/using-taskora/` | `~/.continue/skills/using-taskora/` |
+| Codex / GitHub Copilot / Gemini CLI / Zed / Aider / Goose / ... | see [vercel-labs/skills](https://github.com/vercel-labs/skills) | same |
+
+### Manual install (copy one file)
 
 ```bash
-mkdir -p .claude/skills/using-taskora
+mkdir -p .claude/skills/using-taskora  # or your agent's path
 curl -o .claude/skills/using-taskora/SKILL.md \
   https://raw.githubusercontent.com/kravetsone/taskora/main/documentation/skills/using-taskora/SKILL.md
 ```
 
-### Other AI assistants
+That's it — `SKILL.md` is a single self-contained file. No dependencies, no build step.
 
-Taskora's documentation site publishes machine-readable variants for any LLM, following the [llmstxt.org](https://llmstxt.org) standard. These are generated at build time by [`vitepress-plugin-llms`](https://github.com/okineadev/vitepress-plugin-llms) — no manual curation, the plugin scans the VitePress source tree and produces the files automatically.
+## Alternative: LLM-friendly docs
+
+If your AI tool doesn't yet support Agent Skills (or you're using ChatGPT / Claude Desktop / a custom RAG pipeline), taskora's documentation site publishes machine-readable variants following the [llmstxt.org](https://llmstxt.org) standard.
+
+These are generated at build time by [`vitepress-plugin-llms`](https://github.com/okineadev/vitepress-plugin-llms) — the plugin scans the VitePress source tree and produces the files automatically on every docs build, so they always match the current taskora version.
 
 | File | Description |
 |---|---|
@@ -79,15 +111,23 @@ Now help me build a task that..."
 
 The plugin walks every `.md` file under `documentation/` and respects frontmatter. Each page entry in `llms.txt` uses the page's title and `description` frontmatter field. Content inside `<llm-only>` tags appears **only** in the generated LLM files; content in `<llm-exclude>` is stripped from LLM output but still shown to human readers.
 
-**Why this matters:**
+**Skill vs llms-full.txt — which to use?**
 
-Unlike training-data knowledge (which is frozen at a cutoff date and often hallucinated), these files are **regenerated on every docs build** — they always match the current taskora version. Point any LLM at `llms-full.txt` and you get an up-to-date, authoritative reference.
+| | `/taskora` skill | `llms-full.txt` |
+|---|---|---|
+| Size | ~30 KB (curated) | ~200+ KB (full docs) |
+| Activation | Automatic on relevant prompts | Manual paste / explicit fetch |
+| Content | Quick reference + flows + best practices | Every page verbatim |
+| Use when | You use a supported agent (Claude Code, Cursor, Windsurf, ...) | You use ChatGPT, custom RAG, or want exhaustive detail |
+| Updates | Edit `documentation/skills/using-taskora/SKILL.md` | Auto-regenerated from all docs |
+
+Use the skill for day-to-day coding — it's designed to fit in context without bloat. Fall back to `llms-full.txt` when you need deeper detail on a specific subsystem.
 
 ## What the skill covers
 
 | Area | Topics |
 |---|---|
-| **Setup** | `createTaskora()`, `redisAdapter()`, `memoryAdapter()`, adapter pattern |
+| **Setup** | `createTaskora()`, `redisAdapter()` (ioredis / Bun variants), `memoryAdapter()`, adapter pattern |
 | **Tasks** | `app.task()`, handler signature, options, `Task<TInput, TOutput>` |
 | **Dispatching** | `dispatch()`, `dispatchMany()`, `ResultHandle`, dispatch options |
 | **Context** | `ctx.id`, `ctx.signal`, `ctx.progress()`, `ctx.log`, `ctx.heartbeat()`, `ctx.retry()` |
@@ -108,7 +148,7 @@ Unlike training-data knowledge (which is frozen at a cutoff date and often hallu
 
 ## How it works
 
-When the skill is installed, Claude Code automatically activates it when you:
+When the skill is installed, your AI agent automatically activates it when you:
 
 - Ask about taskora APIs or patterns
 - Write or modify task handlers
@@ -116,7 +156,7 @@ When the skill is installed, Claude Code automatically activates it when you:
 - Debug retry behavior or job state issues
 - Write tests using `taskora/test`
 
-The skill is a single markdown file (`SKILL.md`) with structured frontmatter. Claude Code reads it on activation and uses the reference to generate accurate, convention-following code.
+The skill is a single markdown file (`SKILL.md`) with structured YAML frontmatter. The agent reads it on activation and uses the reference to generate accurate, convention-following code.
 
 ## Example prompts
 
