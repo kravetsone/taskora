@@ -100,10 +100,10 @@ export function WorkflowDetailPage() {
   const { workflowId } = useParams<{ workflowId: string }>();
   const queryClient = useQueryClient();
 
-  const { data: detail, isLoading } = useQuery({
+  const { data: detail } = useQuery({
     queryKey: ["workflow", workflowId],
     queryFn: () => api.getWorkflow(workflowId!),
-    refetchInterval: 3000,
+    refetchInterval: 30_000,
   });
 
   const cancelWf = useMutation({
@@ -113,7 +113,7 @@ export function WorkflowDetailPage() {
 
   const graph = useMemo(() => (detail ? buildGraph(detail) : null), [detail]);
 
-  if (isLoading || !detail || !graph) {
+  if (!detail || !graph) {
     return <div className="p-6 text-board-muted">Loading...</div>;
   }
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { api, type JobDetail } from "@/lib/api";
@@ -23,10 +23,11 @@ export function TaskDetail() {
   const queryClient = useQueryClient();
   const limit = 20;
 
-  const { data: jobs, isLoading } = useQuery({
+  const { data: jobs, isLoading, isFetching } = useQuery({
     queryKey: ["jobs", taskName, activeState, page],
     queryFn: () => api.getJobs(taskName!, activeState, limit, page * limit),
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
   });
 
   const retryAll = useMutation({
@@ -98,7 +99,7 @@ export function TaskDetail() {
             </tr>
           </thead>
           <tbody>
-            {isLoading ? (
+            {isLoading && !jobs ? (
               <tr>
                 <td colSpan={5} className="px-4 py-8 text-center text-board-muted">
                   Loading...

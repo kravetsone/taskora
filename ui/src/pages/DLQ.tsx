@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { api } from "@/lib/api";
@@ -18,7 +18,8 @@ export function DLQ() {
   const { data: jobs, isLoading } = useQuery({
     queryKey: ["dlq", taskFilter],
     queryFn: () => api.getDlq(taskFilter, 50),
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
   });
 
   const retryJob = useMutation({
@@ -98,7 +99,7 @@ export function DLQ() {
             </tr>
           </thead>
           <tbody>
-            {isLoading ? (
+            {isLoading && !jobs ? (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-board-muted">
                   Loading...

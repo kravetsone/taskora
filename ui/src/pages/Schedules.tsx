@@ -10,7 +10,7 @@ export function Schedules() {
   const { data: schedules, isLoading } = useQuery({
     queryKey: ["schedules"],
     queryFn: api.getSchedules,
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
 
   const pause = useMutation({

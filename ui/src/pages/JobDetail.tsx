@@ -15,10 +15,10 @@ export function JobDetailPage() {
   const [tab, setTab] = useState<Tab>("data");
   const queryClient = useQueryClient();
 
-  const { data: job, isLoading } = useQuery({
+  const { data: job } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId!),
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
 
   const retry = useMutation({
@@ -31,7 +31,7 @@ export function JobDetailPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["job", jobId] }),
   });
 
-  if (isLoading || !job) {
+  if (!job) {
     return <div className="p-6 text-board-muted">Loading...</div>;
   }
 

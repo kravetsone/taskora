@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   Area,
@@ -15,19 +15,21 @@ import { api } from "@/lib/api";
 import { formatDuration, formatNumber, relativeTime } from "@/lib/utils";
 
 export function Overview() {
-  const { data: overview, isLoading } = useQuery({
+  const { data: overview } = useQuery({
     queryKey: ["overview"],
     queryFn: api.getOverview,
-    refetchInterval: 3000,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
   });
 
   const { data: throughput } = useQuery({
     queryKey: ["throughput"],
     queryFn: () => api.getThroughput(60000, 60),
-    refetchInterval: 10000,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
   });
 
-  if (isLoading || !overview) {
+  if (!overview) {
     return <div className="p-6 text-board-muted">Loading...</div>;
   }
 

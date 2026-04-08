@@ -1,16 +1,17 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { formatNumber } from "@/lib/utils";
 
 export function TaskList() {
-  const { data: overview, isLoading } = useQuery({
+  const { data: overview } = useQuery({
     queryKey: ["overview"],
     queryFn: api.getOverview,
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
   });
 
-  if (isLoading || !overview) {
+  if (!overview) {
     return <div className="p-6 text-board-muted">Loading...</div>;
   }
 

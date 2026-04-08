@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Badge } from "@/components/Badge";
 import { api } from "@/lib/api";
 import { relativeTime, cn } from "@/lib/utils";
@@ -13,7 +13,8 @@ export function WorkflowList() {
   const { data: workflows, isLoading } = useQuery({
     queryKey: ["workflows", filter],
     queryFn: () => api.getWorkflows(filter, 50),
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
   });
 
   return (
@@ -49,7 +50,7 @@ export function WorkflowList() {
             </tr>
           </thead>
           <tbody>
-            {isLoading ? (
+            {isLoading && !workflows ? (
               <tr>
                 <td colSpan={5} className="px-4 py-8 text-center text-board-muted">
                   Loading...
