@@ -1,15 +1,15 @@
-import type { Redis } from "ioredis";
 import type { Taskora } from "../types.js";
+import type { RedisDriver } from "./driver.js";
 import { buildKeys } from "./keys.js";
 
 export class EventReader {
-  private readonly client: Redis;
+  private readonly driver: RedisDriver;
   private readonly prefix?: string;
   private running = false;
   private lastIds = new Map<string, string>();
 
-  constructor(client: Redis, prefix?: string) {
-    this.client = client;
+  constructor(driver: RedisDriver, prefix?: string) {
+    this.driver = driver;
     this.prefix = prefix;
   }
 
@@ -21,9 +21,13 @@ export class EventReader {
     for (const task of tasks) {
       const keys = buildKeys(task, this.prefix);
       if (!this.lastIds.has(keys.events)) {
-        const last = (await this.client.xrevrange(keys.events, "+", "-", "COUNT", "1")) as Array<
-          [string, string[]]
-        > | null;
+        const last = (await this.driver.command("xrevrange", [
+          keys.events,
+          "+",
+          "-",
+          "COUNT",
+          "1",
+        ])) as Array<[string, string[]]> | null;
         this.lastIds.set(keys.events, last && last.length > 0 ? last[0][0] : "0-0");
       }
     }
@@ -31,9 +35,9 @@ export class EventReader {
     this.poll(tasks, handler);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
-    this.client.disconnect(false);
+    // The driver itself is closed by the caller (`subscribe()` in backend.ts).
   }
 
   private async poll(
@@ -53,15 +57,7 @@ export class EventReader {
       try {
         const ids = streams.map((s) => this.lastIds.get(s) || "$");
 
-        const result = await this.client.xread(
-          "BLOCK",
-          5000,
-          "COUNT",
-          100,
-          "STREAMS",
-          ...streams,
-          ...ids,
-        );
+        const result = await this.driver.blockingXRead(streams, ids, 5000, 100);
 
         if (!result) continue;
 
@@ -107,36 +103,39 @@ export class EventReader {
 
     switch (event) {
       case "completed": {
-        const pipe = this.client.pipeline();
-        pipe.hmget(jobKey, "attempt", "processedOn", "finishedOn");
-        pipe.get(`${jobKey}:result`);
-        const results = await pipe.exec();
-        if (results) {
-          const meta = results[0]?.[1] as (string | null)[] | null;
-          if (meta) {
-            if (meta[0]) fields.attempt = meta[0];
-            if (meta[1] && meta[2]) {
-              fields.duration = String(Number(meta[2]) - Number(meta[1]));
-            }
+        const results = await this.driver
+          .pipeline()
+          .add("hmget", [jobKey, "attempt", "processedOn", "finishedOn"])
+          .add("get", [`${jobKey}:result`])
+          .exec();
+        const meta = results[0]?.[1] as (string | null)[] | null;
+        if (meta) {
+          if (meta[0]) fields.attempt = meta[0];
+          if (meta[1] && meta[2]) {
+            fields.duration = String(Number(meta[2]) - Number(meta[1]));
           }
-          const resultVal = results[1]?.[1] as string | null;
-          if (resultVal) fields.result = resultVal;
         }
+        const resultVal = results[1]?.[1] as string | null;
+        if (resultVal) fields.result = resultVal;
         break;
       }
       case "failed": {
-        const meta = await this.client.hmget(jobKey, "attempt", "error");
+        const meta = (await this.driver.command("hmget", [
+          jobKey,
+          "attempt",
+          "error",
+        ])) as (string | null)[];
         if (meta[0]) fields.attempt = meta[0];
         if (meta[1]) fields.error = meta[1];
         break;
       }
       case "retrying": {
-        const error = await this.client.hget(jobKey, "error");
+        const error = (await this.driver.command("hget", [jobKey, "error"])) as string | null;
         if (error) fields.error = error;
         break;
       }
       case "active": {
-        const attempt = await this.client.hget(jobKey, "attempt");
+        const attempt = (await this.driver.command("hget", [jobKey, "attempt"])) as string | null;
         if (attempt) fields.attempt = attempt;
         break;
       }

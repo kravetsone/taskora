@@ -27,7 +27,9 @@ Task queue library for Node.js. TypeScript-first, Celery-inspired, BullMQ replac
 
 ```
 taskora              — core engine, types, task API (zero DB deps)
-taskora/redis        — Redis adapter (peer dep: ioredis)
+taskora/redis        — Redis adapter, canonical entry (re-exports taskora/redis/ioredis)
+taskora/redis/ioredis — Redis adapter explicitly using ioredis (peer dep: ioredis)
+taskora/redis/bun    — Redis adapter using Bun's built-in RedisClient (Bun runtime only)
 taskora/board        — admin dashboard (peer dep: hono)
 taskora/postgres     — future
 taskora/memory       — in-memory adapter (zero DB deps)
@@ -36,7 +38,9 @@ taskora/telemetry    — OpenTelemetry adapter (deferred)
 taskora/react        — React hooks (deferred)
 ```
 
-`ioredis` is an optional peer dep — only required when using `taskora/redis`.
+`ioredis` is an optional peer dep — only required when using `taskora/redis` or
+`taskora/redis/ioredis`. The `taskora/redis/bun` entry has no peer deps; it uses
+Bun's built-in `Bun.RedisClient` (Bun runtime only — Cluster/Sentinel unsupported).
 
 ## Source layout
 
@@ -60,11 +64,19 @@ src/
 │   ├── scheduler.ts      — Scheduler class (leader election, poll, dispatch)
 │   └── duration.ts       — Duration type + parseDuration()
 ├── redis/
-│   ├── index.ts          — redisAdapter() factory
-│   ├── backend.ts        — Adapter implementation
-│   ├── event-reader.ts   — XREAD BLOCK stream reader
-│   ├── job-waiter.ts     — Push-based ResultHandle (shared XREAD)
-│   └── scripts.ts        — Lua scripts (inline, SCRIPT LOAD)
+│   ├── index.ts          — re-export shim (canonical taskora/redis → ioredis)
+│   ├── ioredis.ts        — redisAdapter() factory backed by ioredis
+│   ├── bun.ts            — redisAdapter() factory backed by Bun.RedisClient
+│   ├── driver.ts         — RedisDriver interface (10-method abstraction)
+│   ├── drivers/
+│   │   ├── ioredis.ts    — IoredisDriver (RedisDriver impl over ioredis)
+│   │   └── bun.ts        — BunDriver (RedisDriver impl over Bun.RedisClient via .send())
+│   ├── backend.ts        — RedisBackend (Adapter impl, generic over RedisDriver)
+│   ├── event-reader.ts   — XREAD BLOCK stream reader (consumes RedisDriver)
+│   ├── job-waiter.ts     — Push-based ResultHandle (consumes RedisDriver)
+│   ├── keys.ts           — key builders (client-agnostic)
+│   ├── scripts.ts        — Lua scripts (inline, SCRIPT LOAD via driver.scriptLoad())
+│   └── workflow-scripts.ts — workflow Lua scripts
 ├── memory/
 │   ├── index.ts          — memoryAdapter() factory
 │   └── backend.ts        — MemoryBackend (in-memory Adapter)

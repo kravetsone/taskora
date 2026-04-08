@@ -17,6 +17,16 @@
       "import": "./dist/redis/index.mjs",
       "require": "./dist/redis/index.cjs"
     },
+    "./redis/ioredis": {
+      "types": "./dist/redis/ioredis.d.mts",
+      "import": "./dist/redis/ioredis.mjs",
+      "require": "./dist/redis/ioredis.cjs"
+    },
+    "./redis/bun": {
+      "types": "./dist/redis/bun.d.mts",
+      "import": "./dist/redis/bun.mjs",
+      "require": "./dist/redis/bun.cjs"
+    },
     "./memory": {
       "types": "./dist/memory/index.d.mts",
       "import": "./dist/memory/index.mjs",

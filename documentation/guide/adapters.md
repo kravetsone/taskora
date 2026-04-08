@@ -4,26 +4,56 @@ Taskora separates the core engine from storage backends via the `Adapter` interf
 
 ## Redis Adapter
 
-The production adapter. Requires Redis 7.0+ and `ioredis` as a peer dependency.
+The production adapter. Requires Redis 7.0+. You can pick one of two drivers depending on your runtime — both implement the same `Adapter` interface and share 100% of taskora's logic (Lua scripts, key layout, state machines).
+
+| Entry | Runtime | Peer dep | Use when |
+|---|---|---|---|
+| `taskora/redis` | Any | `ioredis` | The default. Re-exports `taskora/redis/ioredis`. |
+| `taskora/redis/ioredis` | Any (Node, Bun, Deno) | `ioredis` | Explicit ioredis. Required for Redis Cluster or Sentinel. |
+| `taskora/redis/bun` | **Bun only** | none | Bun deployments that want to skip the ioredis peer dep. |
+
+### ioredis driver (default)
 
 ```ts
 import { redisAdapter } from "taskora/redis"
-```
+// or, equivalently:
+import { redisAdapter } from "taskora/redis/ioredis"
 
-### Connection Modes
-
-```ts
 // URL string
 const adapter = redisAdapter("redis://localhost:6379")
 
 // Options object
 const adapter = redisAdapter({ host: "redis.internal", port: 6379, password: "secret" })
 
-// Existing ioredis instance
+// Existing ioredis instance — adapter will NOT close it on disconnect
 import Redis from "ioredis"
 const redis = new Redis("redis://localhost:6379")
 const adapter = redisAdapter(redis)
 ```
+
+### Bun driver
+
+```ts
+import { redisAdapter } from "taskora/redis/bun"
+
+// URL string
+const adapter = redisAdapter("redis://localhost:6379")
+
+// Options
+const adapter = redisAdapter({ host: "localhost", port: 6379 })
+
+// Existing Bun.RedisClient — adapter will NOT close it on disconnect
+const client = new Bun.RedisClient("redis://localhost:6379")
+const adapter = redisAdapter(client)
+```
+
+The Bun driver routes commands through `Bun.RedisClient.send()` (the generic RESP escape hatch). Bun's auto-pipelining batches same-tick calls into a single round trip, so pipeline performance matches ioredis. The driver issues `HELLO 2` at connect time to force RESP2 response shapes — this keeps `HGETALL`, Lua return values, and stream entries identical across drivers.
+
+::: warning Bun driver limitations
+- **No Redis Cluster.** `Bun.RedisClient` does not support cluster mode. Cluster users must stay on the ioredis driver.
+- **No Redis Sentinel.** Same constraint.
+- **Bun runtime only.** The Bun driver throws a clear error if loaded under Node.
+:::
 
 ### Key Prefix
 
@@ -38,7 +68,7 @@ const adapter = redisAdapter("redis://localhost:6379", {
 
 ### Redis Cluster
 
-All keys for a single job use a `{hash tag}` for cluster compatibility. Jobs are guaranteed to land on the same shard.
+All keys for a single job use a `{hash tag}` for cluster compatibility. Jobs are guaranteed to land on the same shard. Cluster routing requires the **ioredis driver** — Bun's built-in client does not support cluster mode.
 
 ## Memory Adapter
 

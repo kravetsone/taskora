@@ -1,5 +1,5 @@
-import type { Redis } from "ioredis";
 import type { Taskora } from "../types.js";
+import type { RedisDriver } from "./driver.js";
 import { buildKeys } from "./keys.js";
 
 interface Pending {
@@ -12,17 +12,17 @@ interface Pending {
 const STATE_CHECK_INTERVAL = 2_000;
 
 export class JobWaiter {
-  private readonly mainClient: Redis;
+  private readonly mainDriver: RedisDriver;
   private readonly prefix?: string;
 
-  private subClient: Redis | null = null;
+  private subDriver: RedisDriver | null = null;
   private pending = new Map<string, Pending>();
   private streams = new Map<string, string>();
   private taskByStream = new Map<string, string>();
   private running = false;
 
-  constructor(mainClient: Redis, prefix?: string) {
-    this.mainClient = mainClient;
+  constructor(mainDriver: RedisDriver, prefix?: string) {
+    this.mainDriver = mainDriver;
     this.prefix = prefix;
   }
 
@@ -37,9 +37,13 @@ export class JobWaiter {
     // if job completes after snapshot, XREAD catches it;
     // if job completed before snapshot, state check sees it.
     if (!this.streams.has(keys.events)) {
-      const last = (await this.mainClient.xrevrange(keys.events, "+", "-", "COUNT", "1")) as Array<
-        [string, string[]]
-      > | null;
+      const last = (await this.mainDriver.command("xrevrange", [
+        keys.events,
+        "+",
+        "-",
+        "COUNT",
+        "1",
+      ])) as Array<[string, string[]]> | null;
       this.streams.set(keys.events, last && last.length > 0 ? last[0][0] : "0-0");
       this.taskByStream.set(keys.events, task);
     }
@@ -73,9 +77,9 @@ export class JobWaiter {
       pending.resolve(null);
     }
     this.pending.clear();
-    if (this.subClient) {
-      this.subClient.disconnect(false);
-      this.subClient = null;
+    if (this.subDriver) {
+      await this.subDriver.close();
+      this.subDriver = null;
     }
     this.streams.clear();
     this.taskByStream.clear();
@@ -85,9 +89,8 @@ export class JobWaiter {
     if (this.running) return;
     this.running = true;
 
-    if (!this.subClient) {
-      this.subClient = this.mainClient.duplicate();
-      await this.subClient.connect();
+    if (!this.subDriver) {
+      this.subDriver = await this.mainDriver.duplicate();
     }
 
     this.poll();
@@ -113,15 +116,7 @@ export class JobWaiter {
 
         const ids = streamKeys.map((s) => this.streams.get(s) ?? "0-0");
 
-        const result = await this.subClient?.xread(
-          "BLOCK",
-          2000,
-          "COUNT",
-          100,
-          "STREAMS",
-          ...streamKeys,
-          ...ids,
-        );
+        const result = await this.subDriver?.blockingXRead(streamKeys, ids, 2000, 100);
 
         if (!result) continue;
 
@@ -182,7 +177,7 @@ export class JobWaiter {
   private async checkJobState(task: string, jobId: string): Promise<Taskora.AwaitJobResult | null> {
     const keys = buildKeys(task, this.prefix);
     const jobKey = `${keys.jobPrefix}${jobId}`;
-    const state = await this.mainClient.hget(jobKey, "state");
+    const state = (await this.mainDriver.command("hget", [jobKey, "state"])) as string | null;
 
     if (state === "completed" || state === "failed" || state === "cancelled") {
       return this.fetchJobResult(task, jobId, state as "completed" | "failed" | "cancelled");
@@ -199,11 +194,11 @@ export class JobWaiter {
     const jobKey = `${keys.jobPrefix}${jobId}`;
 
     if (state === "completed") {
-      const result = await this.mainClient.get(`${jobKey}:result`);
+      const result = (await this.mainDriver.command("get", [`${jobKey}:result`])) as string | null;
       return { state, result: result ?? undefined };
     }
     if (state === "failed") {
-      const error = await this.mainClient.hget(jobKey, "error");
+      const error = (await this.mainDriver.command("hget", [jobKey, "error"])) as string | null;
       return { state, error: error ?? undefined };
     }
     return { state };
@@ -211,9 +206,9 @@ export class JobWaiter {
 
   private cleanupIfEmpty(): void {
     if (this.pending.size > 0) return;
-    if (this.subClient) {
-      this.subClient.disconnect(false);
-      this.subClient = null;
+    if (this.subDriver) {
+      this.subDriver.close().catch(() => {});
+      this.subDriver = null;
     }
     this.streams.clear();
     this.taskByStream.clear();

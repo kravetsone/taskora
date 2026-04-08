@@ -1,6 +1,5 @@
-import { Redis } from "ioredis";
-import type { RedisOptions } from "ioredis";
 import type { Taskora } from "../types.js";
+import type { RedisDriver } from "./driver.js";
 import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
 import { buildKeys, buildScheduleKeys } from "./keys.js";
@@ -38,51 +37,38 @@ const SCRIPT_MAP: Record<string, string> = {
 };
 
 export class RedisBackend implements Taskora.Adapter {
-  private client: Redis;
-  private ownsClient: boolean;
+  private driver: RedisDriver;
+  private ownsDriver: boolean;
   private prefix?: string;
   private shas = new Map<string, string>();
   private jobWaiter: JobWaiter | null = null;
-  private blockingClients = new Map<string, Redis>();
+  private blockingClients = new Map<string, RedisDriver>();
+  private connected = false;
 
-  constructor(connection: string | RedisOptions | Redis, options?: { prefix?: string }) {
-    if (connection instanceof Redis) {
-      this.client = connection;
-      this.ownsClient = false;
-    } else if (typeof connection === "string") {
-      this.client = new Redis(connection, { lazyConnect: true });
-      this.ownsClient = true;
-    } else {
-      this.client = new Redis({ ...connection, lazyConnect: true });
-      this.ownsClient = true;
-    }
-    this.prefix = options?.prefix;
+  constructor(options: { driver: RedisDriver; ownsDriver: boolean; prefix?: string }) {
+    this.driver = options.driver;
+    this.ownsDriver = options.ownsDriver;
+    this.prefix = options.prefix;
   }
 
   async connect(): Promise<void> {
-    const { status } = this.client;
-    if (status === "wait") {
-      await this.client.connect();
-    } else if (status !== "ready") {
-      await new Promise<void>((resolve, reject) => {
-        this.client.once("ready", resolve);
-        this.client.once("error", reject);
-      });
-    }
+    await this.driver.connect();
+    this.connected = true;
     await this.loadScripts();
   }
 
   async disconnect(): Promise<void> {
+    this.connected = false;
     for (const client of this.blockingClients.values()) {
-      client.disconnect(false);
+      await client.close();
     }
     this.blockingClients.clear();
     if (this.jobWaiter) {
       await this.jobWaiter.shutdown();
       this.jobWaiter = null;
     }
-    if (this.ownsClient) {
-      await this.client.quit();
+    if (this.ownsDriver) {
+      await this.driver.close();
     }
   }
 
@@ -127,6 +113,7 @@ export class RedisBackend implements Taskora.Adapter {
       return;
     }
 
+    const __t0 = Date.now();
     await this.eval(
       "enqueue",
       3,
@@ -146,6 +133,7 @@ export class RedisBackend implements Taskora.Adapter {
       (options as { _wf?: string })._wf ?? "",
       String((options as { _wfNode?: number })._wfNode ?? ""),
     );
+    console.log(`[DBG] enqueue ${task} ${jobId.slice(0, 8)} took ${Date.now() - __t0}ms @ ${Date.now()}`);
   }
 
   async debounceEnqueue(
@@ -367,7 +355,7 @@ export class RedisBackend implements Taskora.Adapter {
 
     // Fast path: try non-blocking moveToActive first
     const quick = await this.dequeue(task, lockTtl, token, options);
-    if (quick) return quick;
+    if (quick) { console.log(`[DBG] blockingDequeue ${task} fast-path HIT ${quick.id.slice(0,8)} @ ${Date.now()}`); return quick; }
 
     const blockClient = await this.getBlockingClient(task);
     const deadline = Date.now() + timeoutMs;
@@ -379,13 +367,13 @@ export class RedisBackend implements Taskora.Adapter {
       const blockSec = Math.min(remaining, 2000) / 1000;
       let popped: [string, string, string] | null = null;
 
+      const __tb = Date.now();
       try {
-        popped = (await blockClient.bzpopmin(keys.marker, blockSec)) as
-          | [string, string, string]
-          | null;
+        popped = await blockClient.blockingZPopMin(keys.marker, blockSec);
       } catch {
         return null; // connection interrupted (shutdown)
       }
+      console.log(`[DBG] blockingDequeue ${task} BZPOPMIN blockSec=${blockSec} took ${Date.now() - __tb}ms popped=${popped ? "yes" : "null"} @ ${Date.now()}`);
 
       if (popped) {
         const score = Number(popped[2]);
@@ -396,7 +384,7 @@ export class RedisBackend implements Taskora.Adapter {
           const waitMs = Math.min(score - now, Math.max(0, deadline - now));
           if (waitMs > 0) {
             try {
-              await blockClient.bzpopmin(keys.marker, waitMs / 1000);
+              await blockClient.blockingZPopMin(keys.marker, waitMs / 1000);
             } catch {
               return null;
             }
@@ -412,11 +400,10 @@ export class RedisBackend implements Taskora.Adapter {
     return null;
   }
 
-  private async getBlockingClient(task: string): Promise<import("ioredis").default> {
+  private async getBlockingClient(task: string): Promise<RedisDriver> {
     let client = this.blockingClients.get(task);
     if (!client) {
-      client = this.client.duplicate();
-      await client.connect();
+      client = await this.driver.duplicate();
       this.blockingClients.set(task, client);
     }
     return client;
@@ -472,7 +459,11 @@ export class RedisBackend implements Taskora.Adapter {
     const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
     const bucket = Math.floor(Date.now() / 60000) * 60000;
     const key = `${base}:metrics:${task}:${type}:${bucket}`;
-    this.client.incr(key).then(() => this.client.expire(key, 86400)).catch(() => {});
+    // Fire-and-forget — failures are non-critical (metrics are best-effort).
+    this.driver
+      .command("incr", [key])
+      .then(() => this.driver.command("expire", [key, 86400]))
+      .catch(() => {});
   }
 
   async nack(task: string, jobId: string, token: string): Promise<void> {
@@ -492,8 +483,8 @@ export class RedisBackend implements Taskora.Adapter {
 
   async setProgress(task: string, jobId: string, value: string): Promise<void> {
     const keys = buildKeys(task, this.prefix);
-    await this.client.hset(`${keys.jobPrefix}${jobId}`, "progress", value);
-    await this.client.xadd(
+    await this.driver.command("hset", [`${keys.jobPrefix}${jobId}`, "progress", value]);
+    await this.driver.command("xadd", [
       keys.events,
       "MAXLEN",
       "~",
@@ -505,54 +496,68 @@ export class RedisBackend implements Taskora.Adapter {
       jobId,
       "value",
       value,
-    );
+    ]);
   }
 
   async addLog(task: string, jobId: string, entry: string): Promise<void> {
     const keys = buildKeys(task, this.prefix);
-    await this.client.rpush(`${keys.jobPrefix}${jobId}:logs`, entry);
+    await this.driver.command("rpush", [`${keys.jobPrefix}${jobId}:logs`, entry]);
   }
 
   async getState(task: string, jobId: string): Promise<Taskora.JobState | null> {
     const keys = buildKeys(task, this.prefix);
-    const state = await this.client.hget(`${keys.jobPrefix}${jobId}`, "state");
+    const state = (await this.driver.command("hget", [
+      `${keys.jobPrefix}${jobId}`,
+      "state",
+    ])) as string | null;
     return (state as Taskora.JobState) ?? null;
   }
 
   async getResult(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
-    return this.client.get(`${keys.jobPrefix}${jobId}:result`);
+    return (await this.driver.command("get", [`${keys.jobPrefix}${jobId}:result`])) as
+      | string
+      | null;
   }
 
   async getError(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
-    return this.client.hget(`${keys.jobPrefix}${jobId}`, "error");
+    return (await this.driver.command("hget", [
+      `${keys.jobPrefix}${jobId}`,
+      "error",
+    ])) as string | null;
   }
 
   async getProgress(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
-    return this.client.hget(`${keys.jobPrefix}${jobId}`, "progress");
+    return (await this.driver.command("hget", [
+      `${keys.jobPrefix}${jobId}`,
+      "progress",
+    ])) as string | null;
   }
 
   async getLogs(task: string, jobId: string): Promise<string[]> {
     const keys = buildKeys(task, this.prefix);
-    return this.client.lrange(`${keys.jobPrefix}${jobId}:logs`, 0, -1);
+    return (await this.driver.command("lrange", [
+      `${keys.jobPrefix}${jobId}:logs`,
+      0,
+      -1,
+    ])) as string[];
   }
 
   async subscribe(
     tasks: string[],
     handler: (event: Taskora.StreamEvent) => void,
   ): Promise<() => Promise<void>> {
-    const subClient = this.client.duplicate();
-    await subClient.connect();
+    const subDriver = await this.driver.duplicate();
 
-    const reader = new EventReader(subClient, this.prefix);
+    const reader = new EventReader(subDriver, this.prefix);
     await reader.start(tasks, handler);
 
     return async () => {
-      reader.stop();
+      await reader.stop();
       try {
-        await subClient.quit();
+        await subDriver.close();
       } catch {
         // Already disconnected by reader.stop()
       }
@@ -565,7 +570,7 @@ export class RedisBackend implements Taskora.Adapter {
     timeoutMs?: number,
   ): Promise<Taskora.AwaitJobResult | null> {
     if (!this.jobWaiter) {
-      this.jobWaiter = new JobWaiter(this.client, this.prefix);
+      this.jobWaiter = new JobWaiter(this.driver, this.prefix);
     }
     return this.jobWaiter.wait(task, jobId, timeoutMs);
   }
@@ -721,13 +726,13 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const jobKey = `${keys.jobPrefix}${jobId}`;
 
-    const pipe = this.client.pipeline();
-    pipe.hgetall(jobKey);
-    pipe.get(`${jobKey}:data`);
-    pipe.get(`${jobKey}:result`);
-    pipe.lrange(`${jobKey}:logs`, 0, -1);
-
-    const results = (await pipe.exec()) as [Error | null, unknown][];
+    const results = await this.driver
+      .pipeline()
+      .add("hgetall", [jobKey])
+      .add("get", [`${jobKey}:data`])
+      .add("get", [`${jobKey}:result`])
+      .add("lrange", [`${jobKey}:logs`, 0, -1])
+      .exec();
     const fields = results[0][1] as Record<string, string>;
 
     if (!fields || Object.keys(fields).length === 0) return null;
@@ -743,24 +748,24 @@ export class RedisBackend implements Taskora.Adapter {
   async getQueueStats(task: string): Promise<Taskora.QueueStats> {
     const keys = buildKeys(task, this.prefix);
 
-    const pipe = this.client.pipeline();
-    pipe.llen(keys.wait);
-    pipe.llen(keys.active);
-    pipe.zcard(keys.delayed);
-    pipe.zcard(keys.completed);
-    pipe.zcard(keys.failed);
-    pipe.zcard(keys.expired);
-    pipe.zcard(keys.cancelled);
-
-    const results = (await pipe.exec()) as [Error | null, number][];
+    const results = await this.driver
+      .pipeline()
+      .add("llen", [keys.wait])
+      .add("llen", [keys.active])
+      .add("zcard", [keys.delayed])
+      .add("zcard", [keys.completed])
+      .add("zcard", [keys.failed])
+      .add("zcard", [keys.expired])
+      .add("zcard", [keys.cancelled])
+      .exec();
     return {
-      waiting: results[0][1],
-      active: results[1][1],
-      delayed: results[2][1],
-      completed: results[3][1],
-      failed: results[4][1],
-      expired: results[5][1],
-      cancelled: results[6][1],
+      waiting: results[0][1] as number,
+      active: results[1][1] as number,
+      delayed: results[2][1] as number,
+      completed: results[3][1] as number,
+      failed: results[4][1] as number,
+      expired: results[5][1] as number,
+      cancelled: results[6][1] as number,
     };
   }
 
@@ -826,31 +831,33 @@ export class RedisBackend implements Taskora.Adapter {
 
   async addSchedule(name: string, config: string, nextRun: number): Promise<void> {
     const keys = buildScheduleKeys(this.prefix);
-    await this.client
+    await this.driver
       .pipeline()
-      .hset(keys.schedules, name, config)
-      .zadd(keys.schedulesNext, String(nextRun), name)
+      .add("hset", [keys.schedules, name, config])
+      .add("zadd", [keys.schedulesNext, String(nextRun), name])
       .exec();
   }
 
   async removeSchedule(name: string): Promise<void> {
     const keys = buildScheduleKeys(this.prefix);
-    await this.client.pipeline().hdel(keys.schedules, name).zrem(keys.schedulesNext, name).exec();
+    await this.driver
+      .pipeline()
+      .add("hdel", [keys.schedules, name])
+      .add("zrem", [keys.schedulesNext, name])
+      .exec();
   }
 
   async getSchedule(
     name: string,
   ): Promise<{ config: string; nextRun: number | null; paused: boolean } | null> {
     const keys = buildScheduleKeys(this.prefix);
-    const [config, score] = await this.client
+    const results = await this.driver
       .pipeline()
-      .hget(keys.schedules, name)
-      .zscore(keys.schedulesNext, name)
-      .exec()
-      .then((results) => [
-        (results as [Error | null, unknown][])[0][1] as string | null,
-        (results as [Error | null, unknown][])[1][1] as string | null,
-      ]);
+      .add("hget", [keys.schedules, name])
+      .add("zscore", [keys.schedulesNext, name])
+      .exec();
+    const config = results[0][1] as string | null;
+    const score = results[1][1] as string | null;
 
     if (!config) return null;
 
@@ -864,8 +871,8 @@ export class RedisBackend implements Taskora.Adapter {
   async listSchedules(): Promise<Taskora.ScheduleRecord[]> {
     const keys = buildScheduleKeys(this.prefix);
     const [all, scores] = await Promise.all([
-      this.client.hgetall(keys.schedules),
-      this.client.zrange(keys.schedulesNext, 0, -1, "WITHSCORES"),
+      this.driver.command("hgetall", [keys.schedules]) as Promise<Record<string, string>>,
+      this.driver.command("zrange", [keys.schedulesNext, 0, -1, "WITHSCORES"]) as Promise<string[]>,
     ]);
 
     const scoreMap = new Map<string, number>();
@@ -899,21 +906,21 @@ export class RedisBackend implements Taskora.Adapter {
 
   async updateScheduleNextRun(name: string, config: string, nextRun: number): Promise<void> {
     const keys = buildScheduleKeys(this.prefix);
-    await this.client
+    await this.driver
       .pipeline()
-      .hset(keys.schedules, name, config)
-      .zadd(keys.schedulesNext, String(nextRun), name)
+      .add("hset", [keys.schedules, name, config])
+      .add("zadd", [keys.schedulesNext, String(nextRun), name])
       .exec();
   }
 
   async pauseSchedule(name: string): Promise<void> {
     const keys = buildScheduleKeys(this.prefix);
-    await this.client.zrem(keys.schedulesNext, name);
+    await this.driver.command("zrem", [keys.schedulesNext, name]);
   }
 
   async resumeSchedule(name: string, nextRun: number): Promise<void> {
     const keys = buildScheduleKeys(this.prefix);
-    await this.client.zadd(keys.schedulesNext, String(nextRun), name);
+    await this.driver.command("zadd", [keys.schedulesNext, String(nextRun), name]);
   }
 
   async acquireSchedulerLock(token: string, ttl: number): Promise<boolean> {
@@ -982,15 +989,15 @@ export class RedisBackend implements Taskora.Adapter {
 
   async onCancel(task: string, handler: (jobId: string) => void): Promise<() => void> {
     const keys = buildKeys(task, this.prefix);
-    const sub = this.client.duplicate();
-    await sub.connect();
-    await sub.subscribe(keys.cancelChannel);
-    sub.on("message", (_channel: string, message: string) => {
+    const subDriver = await this.driver.duplicate();
+    const unsubscribe = await subDriver.subscribe(keys.cancelChannel, (message) => {
       handler(message);
     });
     return () => {
-      sub.unsubscribe();
-      sub.disconnect(false);
+      // Fire-and-forget cleanup — callers don't await this and it's safe to detach.
+      unsubscribe()
+        .then(() => subDriver.close())
+        .catch(() => {});
     };
   }
 
@@ -1066,7 +1073,12 @@ export class RedisBackend implements Taskora.Adapter {
 
   async getWorkflowState(workflowId: string): Promise<string | null> {
     const key = this.wfKey(workflowId);
-    const [state, result, error] = await this.client.hmget(key, "state", "result", "error");
+    const [state, result, error] = (await this.driver.command("hmget", [
+      key,
+      "state",
+      "result",
+      "error",
+    ])) as (string | null)[];
     if (!state) return null;
     return JSON.stringify({ state, result: result ?? undefined, error: error ?? undefined });
   }
@@ -1089,7 +1101,11 @@ export class RedisBackend implements Taskora.Adapter {
   ): Promise<{ workflowId: string; nodeIndex: number } | null> {
     const keys = buildKeys(task, this.prefix);
     const jobKey = keys.jobPrefix + jobId;
-    const [wf, wfNode] = await this.client.hmget(jobKey, "_wf", "_wfNode");
+    const [wf, wfNode] = (await this.driver.command("hmget", [
+      jobKey,
+      "_wf",
+      "_wfNode",
+    ])) as (string | null)[];
     if (!wf) return null;
     return { workflowId: wf, nodeIndex: Number(wfNode ?? 0) };
   }
@@ -1133,12 +1149,12 @@ export class RedisBackend implements Taskora.Adapter {
     dbSize: number;
     connectedClients: number;
   }> {
-    const [serverInfo, memInfo, clientInfo, dbSize] = await Promise.all([
-      this.client.info("server"),
-      this.client.info("memory"),
-      this.client.info("clients"),
-      this.client.dbsize(),
-    ]);
+    const [serverInfo, memInfo, clientInfo, dbSize] = (await Promise.all([
+      this.driver.command("info", ["server"]),
+      this.driver.command("info", ["memory"]),
+      this.driver.command("info", ["clients"]),
+      this.driver.command("dbsize", []),
+    ])) as [string, string, string, number];
 
     const match = (text: string, key: string) => {
       const m = text.match(new RegExp(`${key}:(.+)`));
@@ -1151,7 +1167,7 @@ export class RedisBackend implements Taskora.Adapter {
       usedMemoryBytes: Number(match(memInfo, "used_memory")) || 0,
       peakMemory: match(memInfo, "used_memory_peak_human") || "0B",
       uptime: Number(match(serverInfo, "uptime_in_seconds")) || 0,
-      connected: this.client.status === "ready",
+      connected: this.connected,
       dbSize,
       connectedClients: Number(match(clientInfo, "connected_clients")) || 0,
     };
@@ -1186,14 +1202,20 @@ export class RedisBackend implements Taskora.Adapter {
     const collected: string[] = [];
 
     do {
-      const [next, keys] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 200);
+      const [next, keys] = (await this.driver.command("scan", [
+        cursor,
+        "MATCH",
+        pattern,
+        "COUNT",
+        200,
+      ])) as [string, string[]];
       cursor = next;
       collected.push(...keys);
     } while (cursor !== "0");
 
-    const pipe = this.client.pipeline();
+    const pipe = this.driver.pipeline();
     for (const key of collected) {
-      pipe.hmget(key, "state", "createdAt", "graph");
+      pipe.add("hmget", [key, "state", "createdAt", "graph"]);
     }
     const pipeResults = (await pipe.exec()) as [Error | null, (string | null)[]][];
 
@@ -1237,7 +1259,7 @@ export class RedisBackend implements Taskora.Adapter {
 
   async getWorkflowDetail(workflowId: string): Promise<Taskora.WorkflowDetail | null> {
     const key = this.wfKey(workflowId);
-    const raw = await this.client.hgetall(key);
+    const raw = (await this.driver.command("hgetall", [key])) as Record<string, string>;
     if (!raw || !raw.state) return null;
 
     let graph: Taskora.WorkflowDetail["graph"] = { nodes: [], terminal: [] };
@@ -1278,7 +1300,13 @@ export class RedisBackend implements Taskora.Adapter {
     let keyCount = 0;
     let cursor = "0";
     do {
-      const [next, found] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 500);
+      const [next, found] = (await this.driver.command("scan", [
+        cursor,
+        "MATCH",
+        pattern,
+        "COUNT",
+        500,
+      ])) as [string, string[]];
       cursor = next;
       keyCount += found.length;
     } while (cursor !== "0");
@@ -1290,9 +1318,9 @@ export class RedisBackend implements Taskora.Adapter {
       keys.completed, keys.failed, keys.expired,
       keys.cancelled, keys.events, keys.stalled, keys.marker,
     ];
-    const pipe = this.client.pipeline();
+    const pipe = this.driver.pipeline();
     for (const k of structKeys) {
-      pipe.call("MEMORY", "USAGE", k);
+      pipe.add("memory", ["USAGE", k]);
     }
     const results = (await pipe.exec()) as [Error | null, number | null][];
     for (const [, bytes] of results) {
@@ -1300,15 +1328,21 @@ export class RedisBackend implements Taskora.Adapter {
     }
 
     // Sample a few job keys for memory estimate
-    let sampleCursor = "0";
+    const sampleCursor = "0";
     const sampleKeys: string[] = [];
-    const [, firstBatch] = await this.client.scan(sampleCursor, "MATCH", `${base}:*`, "COUNT", 20);
+    const [, firstBatch] = (await this.driver.command("scan", [
+      sampleCursor,
+      "MATCH",
+      `${base}:*`,
+      "COUNT",
+      20,
+    ])) as [string, string[]];
     sampleKeys.push(...firstBatch.slice(0, 10));
 
     if (sampleKeys.length > 0) {
-      const samplePipe = this.client.pipeline();
+      const samplePipe = this.driver.pipeline();
       for (const k of sampleKeys) {
-        samplePipe.call("MEMORY", "USAGE", k);
+        samplePipe.add("memory", ["USAGE", k]);
       }
       const sampleResults = (await samplePipe.exec()) as [Error | null, number | null][];
       let sampleTotal = 0;
@@ -1341,10 +1375,10 @@ export class RedisBackend implements Taskora.Adapter {
 
     if (task) {
       // Per-task: read directly
-      const pipe = this.client.pipeline();
+      const pipe = this.driver.pipeline();
       for (const ts of timestamps) {
-        pipe.get(`${metricBase}:metrics:${task}:completed:${ts}`);
-        pipe.get(`${metricBase}:metrics:${task}:failed:${ts}`);
+        pipe.add("get", [`${metricBase}:metrics:${task}:completed:${ts}`]);
+        pipe.add("get", [`${metricBase}:metrics:${task}:failed:${ts}`]);
       }
       const results = (await pipe.exec()) as [Error | null, string | null][];
       return timestamps.map((ts, i) => ({
@@ -1358,7 +1392,13 @@ export class RedisBackend implements Taskora.Adapter {
     const taskNames = new Set<string>();
     let cursor = "0";
     do {
-      const [next, keys] = await this.client.scan(cursor, "MATCH", `${metricBase}:metrics:*:completed:*`, "COUNT", 200);
+      const [next, keys] = (await this.driver.command("scan", [
+        cursor,
+        "MATCH",
+        `${metricBase}:metrics:*:completed:*`,
+        "COUNT",
+        200,
+      ])) as [string, string[]];
       cursor = next;
       for (const key of keys) {
         // key format: taskora:metrics:TASK:completed:BUCKET
@@ -1372,12 +1412,12 @@ export class RedisBackend implements Taskora.Adapter {
     }
 
     // Pipeline all reads
-    const pipe = this.client.pipeline();
+    const pipe = this.driver.pipeline();
     const tasks = [...taskNames];
     for (const ts of timestamps) {
       for (const t of tasks) {
-        pipe.get(`${metricBase}:metrics:${t}:completed:${ts}`);
-        pipe.get(`${metricBase}:metrics:${t}:failed:${ts}`);
+        pipe.add("get", [`${metricBase}:metrics:${t}:completed:${ts}`]);
+        pipe.add("get", [`${metricBase}:metrics:${t}:failed:${ts}`]);
       }
     }
     const results = (await pipe.exec()) as [Error | null, string | null][];
@@ -1392,13 +1432,11 @@ export class RedisBackend implements Taskora.Adapter {
       }
       return { timestamp: ts, completed, failed };
     });
-
-    return throughput;
   }
 
   private async loadScripts(): Promise<void> {
     for (const [name, source] of Object.entries(SCRIPT_MAP)) {
-      const sha = (await this.client.script("LOAD", source)) as string;
+      const sha = await this.driver.scriptLoad(source);
       this.shas.set(name, sha);
     }
   }
@@ -1412,18 +1450,7 @@ export class RedisBackend implements Taskora.Adapter {
     if (!sha) {
       throw new Error(`Script "${scriptName}" not loaded — call connect() first`);
     }
-
-    try {
-      return await this.client.evalsha(sha, numkeys, ...args);
-    } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes("NOSCRIPT")) {
-        const source = SCRIPT_MAP[scriptName];
-        const result = await this.client.eval(source, numkeys, ...args);
-        const newSha = (await this.client.script("LOAD", source)) as string;
-        this.shas.set(scriptName, newSha);
-        return result;
-      }
-      throw err;
-    }
+    // NOSCRIPT recovery is handled inside the driver.
+    return this.driver.evalSha(sha, numkeys, args, SCRIPT_MAP[scriptName]);
   }
 }
