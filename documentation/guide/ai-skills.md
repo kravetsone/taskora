@@ -35,14 +35,53 @@ curl -o .claude/skills/using-taskora/SKILL.md \
 
 ### Other AI assistants
 
-Taskora generates machine-readable documentation compatible with any LLM:
+Taskora's documentation site publishes machine-readable variants for any LLM, following the [llmstxt.org](https://llmstxt.org) standard. These are generated at build time by [`vitepress-plugin-llms`](https://github.com/okineadev/vitepress-plugin-llms) — no manual curation, the plugin scans the VitePress source tree and produces the files automatically.
 
 | File | Description |
 |---|---|
-| [`/llms.txt`](/llms.txt) | Table of contents with links to all documentation pages |
-| [`/llms-full.txt`](/llms-full.txt) | Complete documentation as a single text file |
+| [`/llms.txt`](/llms.txt) | Index file — table of contents with a link + frontmatter description for every documentation page. Small, low-token, ideal for RAG systems to pick what to fetch. |
+| [`/llms-full.txt`](/llms-full.txt) | Full site concatenated into one plain-text file. Paste the whole thing into an LLM's context window for comprehensive grounding. |
+| `/<any-page>.md` | Per-page raw markdown. Append `.md` to any documentation URL (e.g. [`/features/workflows.md`](/features/workflows.md)) to fetch the source markdown without the VitePress chrome. |
 
-Append `.md` to any documentation URL to get raw markdown.
+**How to use them:**
+
+::: code-group
+```bash [curl — download once]
+# Get the entire documentation as one file
+curl -O https://kravetsone.github.io/taskora/llms-full.txt
+
+# Or just the index to decide what pages to fetch
+curl -O https://kravetsone.github.io/taskora/llms.txt
+```
+
+```ts [Programmatic fetch]
+// Load taskora docs into your own AI tool's context
+const docs = await fetch("https://kravetsone.github.io/taskora/llms-full.txt")
+  .then(r => r.text())
+
+// Or fetch a single page as markdown
+const workflowsDoc = await fetch(
+  "https://kravetsone.github.io/taskora/features/workflows.md"
+).then(r => r.text())
+```
+
+```text [ChatGPT / Claude Desktop]
+Paste this into your prompt:
+
+"Here is the complete taskora documentation:
+<paste contents of llms-full.txt>
+
+Now help me build a task that..."
+```
+:::
+
+**What gets included:**
+
+The plugin walks every `.md` file under `documentation/` and respects frontmatter. Each page entry in `llms.txt` uses the page's title and `description` frontmatter field. Content inside `<llm-only>` tags appears **only** in the generated LLM files; content in `<llm-exclude>` is stripped from LLM output but still shown to human readers.
+
+**Why this matters:**
+
+Unlike training-data knowledge (which is frozen at a cutoff date and often hallucinated), these files are **regenerated on every docs build** — they always match the current taskora version. Point any LLM at `llms-full.txt` and you get an up-to-date, authoritative reference.
 
 ## What the skill covers
 
