@@ -1,5 +1,5 @@
 import { describe, expectTypeOf, it } from "vitest";
-import { z } from "zod";
+import * as z from "zod";
 import { createTaskora } from "../src/index.js";
 import type { Task } from "../src/task.js";
 

@@ -84,6 +84,23 @@ export interface BunRedisClient {
 export class BunDriver implements RedisDriver {
   private readonly client: BunRedisClient;
   private connected = false;
+  // Tracks whether `HELLO 2` has been negotiated on this connection.
+  //
+  // Sending `HELLO 2` on a subscriber client BREAKS Bun's pub/sub push-message
+  // delivery: the subscribe() handler simply never fires. Verified empirically
+  // against Bun 1.3.9 — without HELLO 2 pub/sub works, with it the published
+  // messages count ok (num subscribers = 1) but the handler is never called.
+  //
+  // So we make HELLO 2 lazy: it is sent on the first command-ish operation
+  // (command, scriptLoad, evalSha, blockingZPopMin, blockingXRead, pipeline
+  // exec) but NOT inside subscribe(). A duplicated client used purely as a
+  // subscriber never receives HELLO 2 and so keeps pub/sub working; a
+  // duplicated client used for blocking dequeue / XREAD receives it on its
+  // first blocking call, before any response-shape-sensitive data comes back.
+  private helloSent = false;
+  // Serializes concurrent HELLO calls — without this, racing command() /
+  // blockingZPopMin() invocations can each try to send HELLO in parallel.
+  private helloInFlight: Promise<void> | null = null;
 
   constructor(client: BunRedisClient) {
     this.client = client;
@@ -94,7 +111,33 @@ export class BunDriver implements RedisDriver {
     return this.client;
   }
 
+  /**
+   * Idempotently negotiate RESP2 on the underlying connection. Safe to call
+   * concurrently — the first caller races the HELLO send, all others await
+   * the same Promise.
+   */
+  private async ensureHello(): Promise<void> {
+    if (this.helloSent) return;
+    if (this.helloInFlight) {
+      await this.helloInFlight;
+      return;
+    }
+    this.helloInFlight = (async () => {
+      try {
+        // Force RESP2 so HGETALL returns flat-array (parsed by
+        // `flatArrayToRecord`) and Lua return values pass through unmodified.
+        // Critical — see PoC notes.
+        await this.client.send("HELLO", ["2"]);
+        this.helloSent = true;
+      } finally {
+        this.helloInFlight = null;
+      }
+    })();
+    await this.helloInFlight;
+  }
+
   async command(name: string, args: RedisArg[]): Promise<unknown> {
+    await this.ensureHello();
     const stringArgs = coerceArgs(args);
     const result = await this.client.send(name, stringArgs);
 
@@ -109,10 +152,11 @@ export class BunDriver implements RedisDriver {
   }
 
   pipeline(): PipelineBuilder {
-    return new BunPipelineBuilder(this.client);
+    return new BunPipelineBuilder(this.client, () => this.ensureHello());
   }
 
   async scriptLoad(source: string): Promise<string> {
+    await this.ensureHello();
     const sha = await this.client.send("SCRIPT", ["LOAD", source]);
     return String(sha);
   }
@@ -123,6 +167,7 @@ export class BunDriver implements RedisDriver {
     args: RedisArg[],
     fallbackSource: string,
   ): Promise<unknown> {
+    await this.ensureHello();
     const stringArgs = coerceArgs(args);
     try {
       return await this.client.send("EVALSHA", [sha, String(numKeys), ...stringArgs]);
@@ -145,10 +190,8 @@ export class BunDriver implements RedisDriver {
     }
   }
 
-  async blockingZPopMin(
-    key: string,
-    timeoutSec: number,
-  ): Promise<[string, string, string] | null> {
+  async blockingZPopMin(key: string, timeoutSec: number): Promise<[string, string, string] | null> {
+    await this.ensureHello();
     // Verified in PoC: Bun's `.send("BZPOPMIN", ...)` actually blocks the JS
     // promise for the requested timeout, and parallel commands on duplicated
     // clients are NOT starved.
@@ -166,24 +209,16 @@ export class BunDriver implements RedisDriver {
     blockMs: number,
     count: number,
   ): Promise<XReadResult | null> {
-    const args = [
-      "BLOCK",
-      String(blockMs),
-      "COUNT",
-      String(count),
-      "STREAMS",
-      ...streams,
-      ...ids,
-    ];
+    await this.ensureHello();
+    const args = ["BLOCK", String(blockMs), "COUNT", String(count), "STREAMS", ...streams, ...ids];
     const result = await this.client.send("XREAD", args);
     if (!result) return null;
     return result as XReadResult;
   }
 
-  async subscribe(
-    channel: string,
-    handler: (message: string) => void,
-  ): Promise<Unsubscribe> {
+  async subscribe(channel: string, handler: (message: string) => void): Promise<Unsubscribe> {
+    // Intentionally NO `ensureHello()` here — HELLO 2 breaks Bun's pub/sub
+    // push delivery. This client must stay on Bun's default protocol.
     await this.client.subscribe(channel, (message) => {
       handler(message);
     });
@@ -198,10 +233,11 @@ export class BunDriver implements RedisDriver {
 
   async duplicate(): Promise<RedisDriver> {
     const dup = await this.client.duplicate();
+    // The duplicated driver starts with `helloSent = false`. It will send
+    // HELLO 2 lazily on the first command-ish call, or never at all if it
+    // is only used as a subscribe() client (which is exactly what we need
+    // for the onCancel pub/sub path).
     const driver = new BunDriver(dup);
-    // Force RESP2 on the duplicated connection too. Bun's `duplicate()` may
-    // return a client that's already connected; the HELLO call is idempotent.
-    await driver.client.send("HELLO", ["2"]).catch(() => undefined);
     driver.connected = true;
     return driver;
   }
@@ -209,9 +245,10 @@ export class BunDriver implements RedisDriver {
   async connect(): Promise<void> {
     if (this.connected) return;
     await this.client.connect();
-    // Force RESP2 so HGETALL returns flat-array (parsed by `flatArrayToRecord`)
-    // and Lua return values pass through unmodified. Critical — see PoC notes.
-    await this.client.send("HELLO", ["2"]);
+    // The main driver negotiates HELLO 2 eagerly — we know it will issue
+    // command-ish operations, and eager negotiation keeps the first real
+    // command latency free of a hidden round trip.
+    await this.ensureHello();
     this.connected = true;
   }
 
@@ -254,10 +291,12 @@ export class BunDriver implements RedisDriver {
  */
 class BunPipelineBuilder implements PipelineBuilder {
   private readonly client: BunRedisClient;
+  private readonly ensureHello: () => Promise<void>;
   private readonly items: Array<{ name: string; args: string[] }> = [];
 
-  constructor(client: BunRedisClient) {
+  constructor(client: BunRedisClient, ensureHello: () => Promise<void>) {
     this.client = client;
+    this.ensureHello = ensureHello;
   }
 
   add(command: string, args: RedisArg[]): this {
@@ -267,6 +306,10 @@ class BunPipelineBuilder implements PipelineBuilder {
 
   async exec(): Promise<PipelineResult> {
     if (this.items.length === 0) return [];
+    // Negotiate HELLO 2 before dispatching pipeline commands — pipeline
+    // results depend on RESP2 shape (HGETALL normalization, Lua return
+    // passthrough).
+    await this.ensureHello();
     const promises = this.items.map((i) => this.client.send(i.name, i.args));
     const settled = await Promise.allSettled(promises);
     return settled.map((r, idx): [Error | null, unknown] => {
@@ -290,18 +333,28 @@ class BunPipelineBuilder implements PipelineBuilder {
  * Coerce taskora's `RedisArg` (string | number | Uint8Array) to the `string[]`
  * shape Bun.RedisClient.send() requires.
  *
+ * Defensive against `undefined`/`null`: the `RedisArg` type excludes them, but
+ * upstream code (e.g. worker.ack() passing `JSON.stringify(undefined)` → actual
+ * undefined for void handlers) can still leak them in. ioredis silently coerces
+ * these to empty strings; we match that behavior so both drivers are
+ * interchangeable at call-sites.
+ *
  * Uint8Array is allowed by the type but not currently used by any taskora
  * call-site; pass-through here is for future-proofing. If a binary arg ever
  * does flow through, Bun's `.send()` will reject — at which point we can
  * encode (base64? raw?) here.
+ *
+ * Verified: tests/integration/scheduler.test.ts — scheduler dispatches void
+ * tasks whose ack() call passes `undefined` as the result.
  */
 function coerceArgs(args: RedisArg[]): string[] {
   const out: string[] = new Array(args.length);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (typeof a === "string") out[i] = a;
+    if (a === undefined || a === null) out[i] = "";
+    else if (typeof a === "string") out[i] = a;
     else if (typeof a === "number") out[i] = String(a);
-    else out[i] = Buffer.from(a).toString();
+    else out[i] = Buffer.from(a as Uint8Array).toString();
   }
   return out;
 }
@@ -331,9 +384,10 @@ function flatArrayToRecord(flat: string[]): Record<string, string> {
  * Synchronous on purpose — keeps the factory API consistent with the ioredis
  * factory so users don't have to remember which one to await.
  */
-export function createBunDriver(
-  connection: string | Record<string, unknown> | BunRedisClient,
-): { driver: BunDriver; ownsClient: boolean } {
+export function createBunDriver(connection: string | Record<string, unknown> | BunRedisClient): {
+  driver: BunDriver;
+  ownsClient: boolean;
+} {
   // Detect a pre-built client by duck-typing on the methods we care about.
   // We can't `instanceof` against Bun.RedisClient without importing the type.
   if (
@@ -348,7 +402,9 @@ export function createBunDriver(
   // Pull the constructor from the global Bun namespace at call time. This
   // avoids any module-level reference to "bun" so Node bundlers don't choke
   // on the import.
-  const bunGlobal = (globalThis as { Bun?: { RedisClient: new (url?: string, opts?: unknown) => BunRedisClient } }).Bun;
+  const bunGlobal = (
+    globalThis as { Bun?: { RedisClient: new (url?: string, opts?: unknown) => BunRedisClient } }
+  ).Bun;
   if (!bunGlobal || typeof bunGlobal.RedisClient !== "function") {
     throw new Error(
       "taskora/redis/bun requires the Bun runtime (https://bun.sh). " +

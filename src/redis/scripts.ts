@@ -37,7 +37,8 @@ redis.call('HSET', jobKey,
   'attempt', 1,
   'maxAttempts', ARGV[7],
   'state', 'waiting',
-  'priority', ARGV[6])
+  'priority', ARGV[6],
+  'seq', ARGV[13])
 
 if tonumber(ARGV[8]) > 0 then
   redis.call('HSET', jobKey, 'expireAt', ARGV[8])
@@ -726,7 +727,32 @@ local mode = ARGV[4]
 
 local ids
 if mode == 'lrange' then
-  ids = redis.call('LRANGE', KEYS[1], offset, offset + limit - 1)
+  -- The wait list is physically LPUSH-ordered (newest at head), and parallel
+  -- dispatches can land in a race-order that depends on the driver's pipeline
+  -- semantics (ioredis reorders; BunDriver preserves). To give the inspector
+  -- a deterministic FIFO view regardless of driver, sort by (ts, seq) —
+  -- 'ts' gives wall-clock display order, and 'seq' disambiguates dispatches
+  -- that land in the same millisecond.
+  --
+  -- Verified under BunDriver via tests/integration/inspector-dlq.test.ts >
+  -- waiting() returns enqueued jobs. 'seq' is populated by enqueue.lua
+  -- (ARGV[13]) from a process-monotonic counter in RedisBackend.
+  local all = redis.call('LRANGE', KEYS[1], 0, -1)
+  local sortable = {}
+  for i = 1, #all do
+    local meta = redis.call('HMGET', prefix .. all[i], 'ts', 'seq')
+    local ts = tonumber(meta[1] or '0')
+    local seq = tonumber(meta[2] or '0')
+    sortable[#sortable + 1] = { all[i], ts, seq }
+  end
+  table.sort(sortable, function(a, b)
+    if a[2] ~= b[2] then return a[2] < b[2] end
+    return a[3] < b[3]
+  end)
+  ids = {}
+  local from = offset + 1
+  local to = math.min(#sortable, offset + limit)
+  for i = from, to do ids[#ids + 1] = sortable[i][1] end
 elseif mode == 'zrange' then
   ids = redis.call('ZRANGE', KEYS[1], offset, offset + limit - 1)
 else

@@ -37,6 +37,18 @@ const SCRIPT_MAP: Record<string, string> = {
 };
 
 export class RedisBackend implements Taskora.Adapter {
+  // Process-monotonic dispatch counter. Stored alongside `ts` in every enqueued
+  // job hash as the `seq` field. The inspector's `waiting()` query sorts by
+  // `(ts, seq)` — `ts` gives wall-clock display order, `seq` disambiguates
+  // dispatches within the same millisecond so ordering stays deterministic
+  // across drivers.
+  //
+  // Verified: tests/integration/inspector-dlq.test.ts > waiting() returns
+  // enqueued jobs — under BunDriver without this field, two dispatches in the
+  // same millisecond landed in pure LPUSH (LIFO) order, while ioredis's
+  // pipeline reordering happened to put them in FIFO order by luck.
+  private static dispatchSeq = 0;
+
   private driver: RedisDriver;
   private ownsDriver: boolean;
   private prefix?: string;
@@ -84,10 +96,17 @@ export class RedisBackend implements Taskora.Adapter {
       expireAt?: number;
       concurrencyKey?: string;
       concurrencyLimit?: number;
+      ts?: number;
+      seq?: number;
     } & Taskora.JobOptions,
   ): Promise<void> {
     const keys = buildKeys(task, this.prefix);
-    const now = String(Date.now());
+    // Prefer caller-supplied ts/seq (captured synchronously at task.dispatch()
+    // call site) so parallel dispatches keep their original call order in the
+    // hash, regardless of which driver's command pipeline serializes them
+    // first. Fall back to local generation for legacy callers.
+    const now = String(options.ts ?? Date.now());
+    const seq = String(options.seq ?? ++RedisBackend.dispatchSeq);
     const maxAttempts = String(options.maxAttempts ?? 1);
     const expireAt = String(options.expireAt ?? 0);
     const concurrencyKey = options.concurrencyKey ?? "";
@@ -133,6 +152,7 @@ export class RedisBackend implements Taskora.Adapter {
       concurrencyLimit,
       (options as { _wf?: string })._wf ?? "",
       String((options as { _wfNode?: number })._wfNode ?? ""),
+      seq,
     );
   }
 
@@ -504,10 +524,9 @@ export class RedisBackend implements Taskora.Adapter {
 
   async getState(task: string, jobId: string): Promise<Taskora.JobState | null> {
     const keys = buildKeys(task, this.prefix);
-    const state = (await this.driver.command("hget", [
-      `${keys.jobPrefix}${jobId}`,
-      "state",
-    ])) as string | null;
+    const state = (await this.driver.command("hget", [`${keys.jobPrefix}${jobId}`, "state"])) as
+      | string
+      | null;
     return (state as Taskora.JobState) ?? null;
   }
 
@@ -520,18 +539,16 @@ export class RedisBackend implements Taskora.Adapter {
 
   async getError(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
-    return (await this.driver.command("hget", [
-      `${keys.jobPrefix}${jobId}`,
-      "error",
-    ])) as string | null;
+    return (await this.driver.command("hget", [`${keys.jobPrefix}${jobId}`, "error"])) as
+      | string
+      | null;
   }
 
   async getProgress(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
-    return (await this.driver.command("hget", [
-      `${keys.jobPrefix}${jobId}`,
-      "progress",
-    ])) as string | null;
+    return (await this.driver.command("hget", [`${keys.jobPrefix}${jobId}`, "progress"])) as
+      | string
+      | null;
   }
 
   async getLogs(task: string, jobId: string): Promise<string[]> {
@@ -1103,11 +1120,10 @@ export class RedisBackend implements Taskora.Adapter {
   ): Promise<{ workflowId: string; nodeIndex: number } | null> {
     const keys = buildKeys(task, this.prefix);
     const jobKey = keys.jobPrefix + jobId;
-    const [wf, wfNode] = (await this.driver.command("hmget", [
-      jobKey,
-      "_wf",
-      "_wfNode",
-    ])) as (string | null)[];
+    const [wf, wfNode] = (await this.driver.command("hmget", [jobKey, "_wf", "_wfNode"])) as (
+      | string
+      | null
+    )[];
     if (!wf) return null;
     return { workflowId: wf, nodeIndex: Number(wfNode ?? 0) };
   }
@@ -1252,7 +1268,14 @@ export class RedisBackend implements Taskora.Adapter {
         }
       }
 
-      results.push({ id, state: wfState, createdAt: Number(values[1] ?? 0), nodeCount, name, tasks });
+      results.push({
+        id,
+        state: wfState,
+        createdAt: Number(values[1] ?? 0),
+        nodeCount,
+        name,
+        tasks,
+      });
     }
 
     results.sort((a, b) => b.createdAt - a.createdAt);
@@ -1316,9 +1339,16 @@ export class RedisBackend implements Taskora.Adapter {
     // Sum MEMORY USAGE on main structures (cheap — these are metadata keys)
     let memoryBytes = 0;
     const structKeys = [
-      keys.wait, keys.active, keys.delayed,
-      keys.completed, keys.failed, keys.expired,
-      keys.cancelled, keys.events, keys.stalled, keys.marker,
+      keys.wait,
+      keys.active,
+      keys.delayed,
+      keys.completed,
+      keys.failed,
+      keys.expired,
+      keys.cancelled,
+      keys.events,
+      keys.stalled,
+      keys.marker,
     ];
     const pipe = this.driver.pipeline();
     for (const k of structKeys) {
@@ -1350,7 +1380,10 @@ export class RedisBackend implements Taskora.Adapter {
       let sampleTotal = 0;
       let sampleCount = 0;
       for (const [, bytes] of sampleResults) {
-        if (bytes) { sampleTotal += bytes; sampleCount++; }
+        if (bytes) {
+          sampleTotal += bytes;
+          sampleCount++;
+        }
       }
       if (sampleCount > 0) {
         const avgPerKey = sampleTotal / sampleCount;

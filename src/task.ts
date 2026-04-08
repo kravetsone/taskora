@@ -7,10 +7,22 @@ import { ResultHandle } from "./result.js";
 import { parseDuration } from "./scheduler/duration.js";
 import { validateSchema } from "./schema.js";
 import type { Taskora } from "./types.js";
-import { Signature, type AnySignature } from "./workflow/signature.js";
 import { chain as chainFn } from "./workflow/chain.js";
 import { group as groupFn } from "./workflow/group.js";
 import type { WorkflowHandle } from "./workflow/handle.js";
+import { type AnySignature, Signature } from "./workflow/signature.js";
+
+// Process-monotonic dispatch counter. Captured synchronously at each
+// `task.dispatch()` call site, before the async enqueue IIFE starts — so
+// parallel dispatches that race inside the async path still carry the
+// original call order in their `seq` field. This is what the inspector sorts
+// by for deterministic FIFO display.
+//
+// Verified: tests/integration/inspector-dlq.test.ts > waiting() returns
+// enqueued jobs. Without synchronous capture, ioredis's internal command
+// ordering and BunDriver's pure LPUSH semantics produced different raw orders
+// for the same dispatch sequence.
+let _dispatchSeq = 0;
 
 type MigrationFn = (data: unknown) => unknown;
 
@@ -150,6 +162,14 @@ export class Task<TInput, TOutput> {
   dispatch(data: TInput, options?: Taskora.DispatchOptions): ResultHandle<TOutput> {
     const id = randomUUID();
 
+    // Capture dispatch wall-clock and monotonic sequence SYNCHRONOUSLY, before
+    // the async IIFE yields. This guarantees that `inspector.waiting()` can
+    // display jobs in dispatch call order even when multiple dispatches race
+    // through the async pipeline (connect, validate, serialize) and arrive at
+    // the Redis server in a driver-dependent order.
+    const dispatchTs = Date.now();
+    const dispatchSeq = ++_dispatchSeq;
+
     // Collect tasks use a simplified dispatch path
     if (this.config.collect) {
       const collect = this.config.collect;
@@ -212,6 +232,8 @@ export class Task<TInput, TOutput> {
           expireAt: expireAt || undefined,
           concurrencyKey,
           concurrencyLimit: concurrencyLimit || undefined,
+          ts: dispatchTs,
+          seq: dispatchSeq,
         };
 
         if (options?.debounce) {
