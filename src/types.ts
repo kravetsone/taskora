@@ -2,6 +2,19 @@ import type { RetryError } from "./errors.js";
 import type { Duration as DurationType } from "./scheduler/duration.js";
 
 export namespace Taskora {
+  // ── Contracts ───────────────────────────────────────────────────────
+
+  /**
+   * A task contract — a pure declaration of a task's name, schemas, and
+   * defaults, with no runtime dependency on `App`/`Worker`/`Adapter`.
+   *
+   * Created via `defineTask()` or `staticContract()`. See the
+   * `TaskContract` export from `taskora` for the full documentation.
+   */
+  export type TaskContract<TInput = unknown, TOutput = unknown> = import(
+    "./contract.js",
+  ).TaskContract<TInput, TOutput>;
+
   // ── Event payloads ──────────────────────────────────────────────────
 
   export interface CompletedEvent<TOutput> {

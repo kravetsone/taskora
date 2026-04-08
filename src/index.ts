@@ -14,6 +14,14 @@ export {
 export { json } from "./serializer.js";
 export { type TaskoraOptions, App } from "./app.js";
 export { Task } from "./task.js";
+export {
+  type TaskContract,
+  type DefineTaskConfig,
+  type StaticContractConfig,
+  defineTask,
+  staticContract,
+  isTaskContract,
+} from "./contract.js";
 export { ResultHandle } from "./result.js";
 export { Inspector } from "./inspector.js";
 export { DeadLetterManager } from "./dlq.js";
