@@ -34,6 +34,14 @@ jobs:
             - name: Install modules
               run: bun install
 
+            - name: Build package
+              # pkgroll emits dist/ — required by `bun publish` because package.json
+              # "files" points at dist. Without this step the published tarball is
+              # ~13KB (README + LICENSE + package.json only) and every import fails.
+              # JSR publishes from src/ via deno.json, so it's unaffected either way,
+              # but npm absolutely needs this.
+              run: bun run build
+
             - name: Prepare to JSR publish
               run: bun scripts/prepare-jsr.ts
 
