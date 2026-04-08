@@ -76,6 +76,13 @@
     "build": "pkgroll",
     "build:ui": "cd ui && bun run build",
     "test": "vitest",
+    "test:node": "vitest run",
+    "test:node:unit": "vitest run --project unit",
+    "test:node:integration": "vitest run --project integration",
+    "test:bun": "TASKORA_TEST_DRIVER=bun bunx --bun vitest run",
+    "test:bun:ioredis": "bunx --bun vitest run",
+    "test:deno": "deno run -A --node-modules-dir=auto npm:vitest/vitest.mjs run",
+    "test:all": "npm run test:node && npm run test:bun:ioredis && npm run test:bun && npm run test:deno",
     "lint": "biome check .",
     "format": "biome format --write ."
   },
