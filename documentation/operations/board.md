@@ -175,6 +175,8 @@ Throughput is backed by per-minute `INCR` counters stamped in `ack.lua` / `fail.
 
 Per-task view with state tabs (waiting / active / delayed / retrying / failed / completed / cancelled / expired), a paginated job table, and bulk actions — retry-all and clean-by-age.
 
+![Task detail view for send-email — stat cards, throughput chart, state tabs, and a job table showing completed jobs and retry errors](/board/task-detail.jpg)
+
 ### Job detail
 
 Everything about a single job on one screen:
