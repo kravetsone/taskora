@@ -2,18 +2,25 @@ name: Test
 
 on:
   push:
-    branches: [main]
   pull_request:
     branches: [main]
+  # Callable from publish.yml so a release is gated on green tests.
+  workflow_call:
 
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint-build:
     name: Lint + build (Node 20)
     runs-on: ubuntu-latest
+    # Skip duplicate runs: for same-repo PRs the `push` trigger already covers
+    # this commit. Only run the pull_request event for PRs originating from
+    # forks (external contributors, whose pushes don't reach this repo).
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -29,6 +36,9 @@ jobs:
   test:
     name: ${{ matrix.runtime }} + ${{ matrix.driver }}
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
