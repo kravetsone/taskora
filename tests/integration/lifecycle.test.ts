@@ -1,7 +1,7 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTaskora } from "../../src/index.js";
-import { redisAdapter } from "../../src/redis/index.js";
+import { isIoredis, redisAdapter } from "../create-adapter.js";
 import { url, waitFor } from "../helpers.js";
 
 let redis: Redis;
@@ -251,7 +251,10 @@ describe("connection modes", () => {
     await app.close();
   });
 
-  it("accepts a RedisOptions object", async () => {
+  // The RedisOptions-object and pre-built-ioredis-instance constructor forms
+  // are ioredis-specific — the Bun driver takes `Bun.RedisClient`-shaped
+  // options and client instances. Skip both under TASKORA_TEST_DRIVER=bun.
+  it.skipIf(!isIoredis)("accepts a RedisOptions object", async () => {
     // Parse URL to get host/port
     const u = new URL(url());
     const app = createTaskora({
@@ -266,7 +269,7 @@ describe("connection modes", () => {
     await app.close();
   });
 
-  it("accepts an existing ioredis instance", async () => {
+  it.skipIf(!isIoredis)("accepts an existing ioredis instance", async () => {
     const client = new Redis(url());
     const app = createTaskora({ adapter: redisAdapter(client) });
     const task = app.task("instance-test", async () => null);

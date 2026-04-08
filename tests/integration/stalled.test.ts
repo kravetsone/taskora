@@ -1,7 +1,7 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTaskora } from "../../src/index.js";
-import { redisAdapter } from "../../src/redis/index.js";
+import { redisAdapter } from "../create-adapter.js";
 import type { Taskora } from "../../src/types.js";
 import { url, waitFor } from "../helpers.js";
 

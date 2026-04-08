@@ -1,7 +1,7 @@
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { JobFailedError, TimeoutError, createTaskora } from "../../src/index.js";
-import { redisAdapter } from "../../src/redis/index.js";
+import { redisAdapter } from "../create-adapter.js";
 import { ResultHandle } from "../../src/result.js";
 import { url, waitFor as poll } from "../helpers.js";
 

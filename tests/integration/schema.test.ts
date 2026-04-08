@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as z from "zod";
 import { ValidationError } from "../../src/errors.js";
 import { createTaskora } from "../../src/index.js";
-import { redisAdapter } from "../../src/redis/index.js";
+import { redisAdapter } from "../create-adapter.js";
 import { url, waitFor } from "../helpers.js";
 
 let redis: Redis;
