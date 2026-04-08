@@ -72,18 +72,13 @@ await taskora.start()
 
 ## Battle-Tested Across Runtimes
 
-Taskora is new, but it is not untested. Every commit and every pull request runs the **complete 300-test integration suite** against every supported runtime and every supported Redis driver — in parallel, in CI, on GitHub Actions:
+[![Test](https://github.com/kravetsone/taskora/actions/workflows/test.yml/badge.svg)](https://github.com/kravetsone/taskora/actions/workflows/test.yml)
 
-| Runtime | Driver | Status |
-|---|---|---|
-| **Node 20** (LTS) | `taskora/redis` (ioredis) | 300 / 300 |
-| **Bun 1.3+** | `taskora/redis/ioredis` | 300 / 300 |
-| **Bun 1.3+** | `taskora/redis/bun` (native `Bun.RedisClient`) | 300 / 300 |
-| **Deno 2.x** | `taskora/redis` (ioredis via `npm:` specifier) | 300 / 300 |
+Taskora is new, but it is not untested. Every commit and every pull request runs the **complete 300-test integration suite** against every supported runtime and every supported Redis driver — in parallel, in CI, on GitHub Actions.
 
-That is **1,200 real integration test runs against a live Redis on every push** — spanning Lua scripts, blocking dequeues, stream subscribers, pub/sub cancellation, distributed leader election, workflow DAG execution, schedulers, debounce / throttle / dedup flow control, and retention-aware DLQ management.
+<img src="/testing-matrix.svg" alt="Taskora cross-runtime test matrix: Node 20 + ioredis, Bun 1.3+ + ioredis, Bun 1.3+ + Bun.RedisClient, Deno 2.x + ioredis — all 300 / 300 — totaling 1,200 integration test runs per push" style="width: 100%; max-width: 720px; margin: 1.5rem auto; display: block;" />
 
-The matrix is not cosmetic. Turning it on exposed **five real bugs** that the old single-cell CI had been silently papering over — from a subtle `HELLO 2` + pub/sub interaction in Bun's native Redis client (filed upstream as [oven-sh/bun#29042](https://github.com/oven-sh/bun/issues/29042)) to a latent inspector-ordering flake that only happened to pass under ioredis because of pipeline timing luck. See [Cross-runtime CI](/testing/cross-runtime) for the full story.
+That is **1,200 real integration test runs against a live Redis on every push** — spanning Lua scripts, blocking dequeues, stream subscribers, pub/sub cancellation, distributed leader election, workflow DAG execution, schedulers, debounce / throttle / dedup flow control, and retention-aware DLQ management. See [Cross-runtime CI](/testing/cross-runtime) for the full matrix and how to reproduce any cell locally.
 
 **What this means for you:**
 
