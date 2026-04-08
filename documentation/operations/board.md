@@ -9,6 +9,8 @@ description: taskora/board — batteries-included admin UI for inspecting tasks,
 
 Unlike bull-board (which focuses on queues) or Flower (Celery-only), the taskora board is **task-centric** and exposes everything taskora actually does: workflow DAGs, schedules, migrations, flow control, retention, DLQ.
 
+![taskora/board per-task view — stat cards, hourly throughput chart, state tabs, and a jobs table with a real retry error surfaced inline](/board/task-detail.jpg)
+
 ## Why a dashboard?
 
 `taskora.inspect()` gives you programmatic access to every job, but during development and incident response you want eyes on the system. The board covers:
