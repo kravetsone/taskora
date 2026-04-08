@@ -17,6 +17,7 @@ import MiddlewarePipelineVisualizer from "../components/MiddlewarePipelineVisual
 import FlowControlVisualizer from "../components/FlowControlVisualizer.vue";
 import CollectBatchVisualizer from "../components/CollectBatchVisualizer.vue";
 import SchedulerVisualizer from "../components/SchedulerVisualizer.vue";
+import TestingMatrix from "../components/TestingMatrix.vue";
 
 export default {
   extends: DefaultTheme,
@@ -32,5 +33,6 @@ export default {
     app.component("FlowControlVisualizer", FlowControlVisualizer);
     app.component("CollectBatchVisualizer", CollectBatchVisualizer);
     app.component("SchedulerVisualizer", SchedulerVisualizer);
+    app.component("TestingMatrix", TestingMatrix);
   },
 } satisfies Theme;

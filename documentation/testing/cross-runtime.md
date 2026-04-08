@@ -4,7 +4,7 @@
 
 Taskora officially supports **three JavaScript runtimes** (Node.js, Bun, Deno) and **two Redis client implementations** (ioredis and Bun's native `Bun.RedisClient`). Every commit and every pull request runs the complete integration suite against every valid combination — in parallel on GitHub Actions — before any code can land, and again before any version can ship.
 
-<img src="/testing-matrix.svg" alt="Taskora cross-runtime test matrix: Node 20 + ioredis, Bun 1.3+ + ioredis, Bun 1.3+ + Bun.RedisClient, Deno 2.x + ioredis — all 300 / 300 — totaling 1,200 integration test runs per push" style="width: 100%; max-width: 720px; margin: 1.5rem auto; display: block;" />
+<TestingMatrix />
 
 This page documents what is tested, how, and why the matrix exists.
 
