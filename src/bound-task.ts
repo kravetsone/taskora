@@ -2,6 +2,8 @@ import type { TaskContract } from "./contract.js";
 import type { ResultHandle } from "./result.js";
 import type { Task } from "./task.js";
 import type { Taskora } from "./types.js";
+import type { WorkflowHandle } from "./workflow/handle.js";
+import type { Signature } from "./workflow/signature.js";
 
 /**
  * A dispatchable view of a task that was declared via a {@link TaskContract}.
@@ -52,5 +54,43 @@ export class BoundTask<TInput, TOutput> {
     handler: (data: Taskora.TaskEventMap<TOutput>[K]) => void,
   ): () => void {
     return this._task.on(event, handler);
+  }
+
+  /**
+   * Create a {@link Signature} — a composable snapshot of this task
+   * invocation for use in `chain()`, `group()`, or `chord()` workflows.
+   *
+   * Contracts must be `register()`ed before composition: the returned
+   * signature carries a reference back to the underlying `Task`, which
+   * is how the workflow dispatcher resolves adapter and serializer at
+   * dispatch time.
+   *
+   * @example
+   * ```ts
+   * import { chain } from "taskora"
+   * const fetchUser = taskora.register(fetchUserContract)
+   * const sendEmail = taskora.register(sendEmailContract)
+   * await chain(fetchUser.s({ id: "42" }), sendEmail.s()).dispatch()
+   * ```
+   */
+  s(data?: TInput): Signature<TInput, TOutput> {
+    return this._task.s(data);
+  }
+
+  /**
+   * Dispatch one job per item in parallel. Sugar for
+   * `group(...items.map(i => this.s(i)))`. Returns a {@link WorkflowHandle}
+   * that resolves when all jobs complete.
+   */
+  map(items: TInput[]): WorkflowHandle<TOutput[]> {
+    return this._task.map(items);
+  }
+
+  /**
+   * Split items into chunks. Each chunk runs in parallel; chunks run
+   * sequentially. Useful for rate-limited batch processing.
+   */
+  chunk(items: TInput[], options: { size: number }): WorkflowHandle<TOutput[]> {
+    return this._task.chunk(items, options);
   }
 }
