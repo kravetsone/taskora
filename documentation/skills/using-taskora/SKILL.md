@@ -1,10 +1,17 @@
 ---
 name: taskora
 description: >
-  Use when working with taskora, task queues in TypeScript/Node.js,
-  background jobs, job scheduling, workflows/pipelines, Redis-backed queues,
-  or building distributed task processing systems with taskora.
-  Not for BullMQ, Agenda, Bee-Queue, or other task queue libraries.
+  taskora — TypeScript-first distributed task queue for Node.js with Redis backend.
+  Use when building background job systems, scheduling recurring tasks, composing
+  type-safe workflows (chain/group/chord), handling retries with backoff, rate
+  limiting, debouncing/throttling/deduplicating dispatches, cancelling running jobs,
+  validating job schemas, versioning job payloads, inspecting queue state, managing
+  dead-letter queues, or running the admin dashboard. Not for BullMQ, Agenda,
+  Bee-Queue, or other task queue libraries.
+metadata:
+  author: Taskora
+  version: "0.1.0"
+  source: https://github.com/kravetsone/taskora
 ---
 
 # taskora — Task Queue for Node.js
