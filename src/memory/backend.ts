@@ -1430,6 +1430,10 @@ export class MemoryBackend implements Taskora.Adapter {
     this.throughputCounters.set(key, (this.throughputCounters.get(key) ?? 0) + 1);
   }
 
+  async getTaskKeyStats(_task: string): Promise<{ keyCount: number; memoryBytes: number }> {
+    return { keyCount: this.jobStore.size, memoryBytes: 0 };
+  }
+
   async cleanJobs(
     task: string,
     state: Taskora.JobState,

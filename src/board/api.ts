@@ -386,6 +386,17 @@ export function createApi(app: App, options: BoardOptions = {}): Hono {
     return c.json(status);
   });
 
+  // ── Task key stats ──────────────────────────────────────────────
+
+  api.get("/api/tasks/:task/stats", async (c) => {
+    const taskName = c.req.param("task");
+    const [queueStats, keyStats] = await Promise.all([
+      app.adapter.getQueueStats(taskName),
+      app.adapter.getTaskKeyStats(taskName),
+    ]);
+    return c.json({ ...queueStats, ...keyStats });
+  });
+
   // ── Throughput ──────────────────────────────────────────────────
 
   api.get("/api/throughput", async (c) => {

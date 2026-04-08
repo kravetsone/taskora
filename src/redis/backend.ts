@@ -1271,6 +1271,62 @@ export class RedisBackend implements Taskora.Adapter {
     };
   }
 
+  async getTaskKeyStats(task: string): Promise<{ keyCount: number; memoryBytes: number }> {
+    const keys = buildKeys(task, this.prefix);
+    const base = this.prefix ? `taskora:${this.prefix}:{${task}}` : `taskora:{${task}}`;
+    const pattern = `${base}:*`;
+
+    // Count keys via SCAN
+    let keyCount = 0;
+    let cursor = "0";
+    do {
+      const [next, found] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 500);
+      cursor = next;
+      keyCount += found.length;
+    } while (cursor !== "0");
+
+    // Sum MEMORY USAGE on main structures (cheap — these are metadata keys)
+    let memoryBytes = 0;
+    const structKeys = [
+      keys.wait, keys.active, keys.delayed,
+      keys.completed, keys.failed, keys.expired,
+      keys.cancelled, keys.events, keys.stalled, keys.marker,
+    ];
+    const pipe = this.client.pipeline();
+    for (const k of structKeys) {
+      pipe.call("MEMORY", "USAGE", k);
+    }
+    const results = (await pipe.exec()) as [Error | null, number | null][];
+    for (const [, bytes] of results) {
+      if (bytes) memoryBytes += bytes;
+    }
+
+    // Sample a few job keys for memory estimate
+    let sampleCursor = "0";
+    const sampleKeys: string[] = [];
+    const [, firstBatch] = await this.client.scan(sampleCursor, "MATCH", `${base}:*`, "COUNT", 20);
+    sampleKeys.push(...firstBatch.slice(0, 10));
+
+    if (sampleKeys.length > 0) {
+      const samplePipe = this.client.pipeline();
+      for (const k of sampleKeys) {
+        samplePipe.call("MEMORY", "USAGE", k);
+      }
+      const sampleResults = (await samplePipe.exec()) as [Error | null, number | null][];
+      let sampleTotal = 0;
+      let sampleCount = 0;
+      for (const [, bytes] of sampleResults) {
+        if (bytes) { sampleTotal += bytes; sampleCount++; }
+      }
+      if (sampleCount > 0) {
+        const avgPerKey = sampleTotal / sampleCount;
+        memoryBytes += Math.round(avgPerKey * Math.max(0, keyCount - structKeys.length));
+      }
+    }
+
+    return { keyCount, memoryBytes };
+  }
+
   async getThroughput(
     task: string | null,
     bucketSize: number,

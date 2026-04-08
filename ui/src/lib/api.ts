@@ -213,6 +213,10 @@ export const api = {
   // Migrations
   getMigrations: (task: string) => fetchApi<MigrationStatus>(`/api/tasks/${task}/migrations`),
 
+  // Task stats (keys + memory)
+  getTaskStats: (task: string) =>
+    fetchApi<QueueStats & { keyCount: number; memoryBytes: number }>(`/api/tasks/${task}/stats`),
+
   // Throughput
   getThroughput: (bucket = 60000, count = 60, task?: string) =>
     fetchApi<ThroughputPoint[]>(

@@ -415,6 +415,7 @@ export namespace Taskora {
       }>
     >;
     getWorkflowDetail(workflowId: string): Promise<WorkflowDetail | null>;
+    getTaskKeyStats(task: string): Promise<{ keyCount: number; memoryBytes: number }>;
     getThroughput(
       task: string | null,
       bucketSize: number,
