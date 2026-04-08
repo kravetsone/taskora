@@ -6,6 +6,14 @@ import { buildKeys, buildScheduleKeys } from "./keys.js";
 import * as scripts from "./scripts.js";
 import * as wfScripts from "./workflow-scripts.js";
 
+// Hard cap on entries kept in a single job's `:logs` list. `addLog()` pairs
+// every RPUSH with an `LTRIM -N -1` so a runaway handler (tight loop +
+// `ctx.log.info`) can't balloon one list to hundreds of MB before the retention
+// sweep finally deletes the whole key on job completion. The cap is generous
+// by design — real jobs should need far fewer, and the LTRIM is an O(1)
+// no-op when the list is already below the limit.
+const MAX_LOGS_PER_JOB = 10_000;
+
 const SCRIPT_MAP: Record<string, string> = {
   enqueue: scripts.ENQUEUE,
   enqueueDelayed: scripts.ENQUEUE_DELAYED,
@@ -478,9 +486,16 @@ export class RedisBackend implements Taskora.Adapter {
     const bucket = Math.floor(Date.now() / 60000) * 60000;
     const key = `${base}:metrics:${task}:${type}:${bucket}`;
     // Fire-and-forget — failures are non-critical (metrics are best-effort).
+    //
+    // INCR and EXPIRE MUST ride the same pipeline: a prior implementation chained
+    // the two commands and let EXPIRE fall off `.then()` on connection hiccups,
+    // leaking TTL-less metric keys forever. Pipeline collapses that window — both
+    // commands are sent in one round trip and either both succeed or both fail.
     this.driver
-      .command("incr", [key])
-      .then(() => this.driver.command("expire", [key, 86400]))
+      .pipeline()
+      .add("incr", [key])
+      .add("expire", [key, 86400])
+      .exec()
       .catch(() => {});
   }
 
@@ -519,7 +534,14 @@ export class RedisBackend implements Taskora.Adapter {
 
   async addLog(task: string, jobId: string, entry: string): Promise<void> {
     const keys = buildKeys(task, this.prefix);
-    await this.driver.command("rpush", [`${keys.jobPrefix}${jobId}:logs`, entry]);
+    const logKey = `${keys.jobPrefix}${jobId}:logs`;
+    // RPUSH + LTRIM in one round trip. LTRIM is O(1) while the list is under
+    // the cap; once exceeded it trims from the head so the newest entries win.
+    await this.driver
+      .pipeline()
+      .add("rpush", [logKey, entry])
+      .add("ltrim", [logKey, -MAX_LOGS_PER_JOB, -1])
+      .exec();
   }
 
   async getState(task: string, jobId: string): Promise<Taskora.JobState | null> {

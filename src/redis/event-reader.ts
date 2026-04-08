@@ -1,6 +1,20 @@
 import type { Taskora } from "../types.js";
-import type { RedisDriver } from "./driver.js";
+import type { PipelineBuilder, PipelineResult, RedisDriver } from "./driver.js";
 import { buildKeys } from "./keys.js";
+
+// Per-event plan for second-pass enrichment. `start` is the index of this
+// event's first command inside the shared pipeline; `count` tells the parser
+// how many slots it owns. A `count` of 0 means "no enrichment needed — emit as-is".
+type EnrichKind = "completed" | "failed" | "retrying" | "active" | "none";
+
+interface PendingEvent {
+  task: string;
+  event: string;
+  jobId: string;
+  fields: Record<string, string>;
+  kind: EnrichKind;
+  start: number;
+}
 
 export class EventReader {
   private readonly driver: RedisDriver;
@@ -61,11 +75,24 @@ export class EventReader {
 
         if (!result) continue;
 
+        // Two-pass batching: parse every entry in the XREAD response, queue all
+        // enrichment commands into a SINGLE pipeline, then distribute results
+        // and invoke the handler in stream order. A prior implementation awaited
+        // one enrich() per event (1–2 RTTs each) — with COUNT=100 that's up to
+        // 200 sequential round trips per poll tick. One shared pipeline collapses
+        // that to a single RTT per tick.
+        const pending: PendingEvent[] = [];
+        const pipe = this.driver.pipeline();
+        let cmdIdx = 0;
+
         for (const [streamKey, entries] of result) {
           const task = taskByStream.get(streamKey);
           if (!task) continue;
+          const keys = buildKeys(task, this.prefix);
 
           for (const [entryId, fieldArr] of entries) {
+            // Advance lastId unconditionally — even if the entry is malformed
+            // or enrichment later fails, we don't want to replay it forever.
             this.lastIds.set(streamKey, entryId);
 
             const fields: Record<string, string> = {};
@@ -77,12 +104,26 @@ export class EventReader {
             const jobId = fields.jobId;
             if (!event || !jobId) continue;
 
-            try {
-              await this.enrich(task, jobId, event, fields);
-              handler({ task, event, jobId, fields });
-            } catch {
-              // Individual event processing error — skip this event, continue with next
-            }
+            const jobKey = `${keys.jobPrefix}${jobId}`;
+            const added = this.queueEnrichment(pipe, jobKey, event);
+            pending.push({ task, event, jobId, fields, kind: added.kind, start: cmdIdx });
+            cmdIdx += added.count;
+          }
+        }
+
+        if (pending.length === 0) continue;
+
+        // Only exec the pipeline if at least one event needs enrichment. This
+        // keeps the fast path for "progress" / "stalled" / other enrichment-less
+        // events free of a wasted round trip.
+        const results: PipelineResult = cmdIdx > 0 ? await pipe.exec() : [];
+
+        for (const p of pending) {
+          try {
+            applyEnrichment(p, results);
+            handler({ task: p.task, event: p.event, jobId: p.jobId, fields: p.fields });
+          } catch {
+            // Individual event processing error — skip this event, continue with next
           }
         }
       } catch {
@@ -92,52 +133,64 @@ export class EventReader {
     }
   }
 
-  private async enrich(
-    task: string,
-    jobId: string,
+  private queueEnrichment(
+    pipe: PipelineBuilder,
+    jobKey: string,
     event: string,
-    fields: Record<string, string>,
-  ): Promise<void> {
-    const keys = buildKeys(task, this.prefix);
-    const jobKey = `${keys.jobPrefix}${jobId}`;
-
+  ): { kind: EnrichKind; count: number } {
     switch (event) {
-      case "completed": {
-        const results = await this.driver
-          .pipeline()
-          .add("hmget", [jobKey, "attempt", "processedOn", "finishedOn"])
-          .add("get", [`${jobKey}:result`])
-          .exec();
-        const meta = results[0]?.[1] as (string | null)[] | null;
-        if (meta) {
-          if (meta[0]) fields.attempt = meta[0];
-          if (meta[1] && meta[2]) {
-            fields.duration = String(Number(meta[2]) - Number(meta[1]));
-          }
+      case "completed":
+        pipe.add("hmget", [jobKey, "attempt", "processedOn", "finishedOn"]);
+        pipe.add("get", [`${jobKey}:result`]);
+        return { kind: "completed", count: 2 };
+      case "failed":
+        pipe.add("hmget", [jobKey, "attempt", "error"]);
+        return { kind: "failed", count: 1 };
+      case "retrying":
+        pipe.add("hget", [jobKey, "error"]);
+        return { kind: "retrying", count: 1 };
+      case "active":
+        pipe.add("hget", [jobKey, "attempt"]);
+        return { kind: "active", count: 1 };
+      default:
+        return { kind: "none", count: 0 };
+    }
+  }
+}
+
+function applyEnrichment(p: PendingEvent, results: PipelineResult): void {
+  if (p.kind === "none") return;
+
+  switch (p.kind) {
+    case "completed": {
+      const meta = results[p.start]?.[1] as (string | null)[] | null;
+      if (meta) {
+        if (meta[0]) p.fields.attempt = meta[0];
+        if (meta[1] && meta[2]) {
+          p.fields.duration = String(Number(meta[2]) - Number(meta[1]));
         }
-        const resultVal = results[1]?.[1] as string | null;
-        if (resultVal) fields.result = resultVal;
-        break;
       }
-      case "failed": {
-        const meta = (await this.driver.command("hmget", [jobKey, "attempt", "error"])) as (
-          | string
-          | null
-        )[];
-        if (meta[0]) fields.attempt = meta[0];
-        if (meta[1]) fields.error = meta[1];
-        break;
+      const resultVal = results[p.start + 1]?.[1] as string | null;
+      if (resultVal) p.fields.result = resultVal;
+      return;
+    }
+    case "failed": {
+      const meta = results[p.start]?.[1] as (string | null)[] | null;
+      if (meta) {
+        if (meta[0]) p.fields.attempt = meta[0];
+        if (meta[1]) p.fields.error = meta[1];
       }
-      case "retrying": {
-        const error = (await this.driver.command("hget", [jobKey, "error"])) as string | null;
-        if (error) fields.error = error;
-        break;
-      }
-      case "active": {
-        const attempt = (await this.driver.command("hget", [jobKey, "attempt"])) as string | null;
-        if (attempt) fields.attempt = attempt;
-        break;
-      }
+      return;
+    }
+    case "retrying": {
+      const error = results[p.start]?.[1] as string | null;
+      if (error) p.fields.error = error;
+      return;
+    }
+    case "active": {
+      const attempt = results[p.start]?.[1] as string | null;
+      if (attempt) p.fields.attempt = attempt;
+      return;
     }
   }
 }
