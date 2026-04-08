@@ -381,20 +381,41 @@ export namespace Taskora {
       nodeIndex: number,
       result: string,
     ): Promise<WorkflowAdvanceResult>;
-    failWorkflow(
-      workflowId: string,
-      nodeIndex: number,
-      error: string,
-    ): Promise<WorkflowFailResult>;
+    failWorkflow(workflowId: string, nodeIndex: number, error: string): Promise<WorkflowFailResult>;
     getWorkflowState(workflowId: string): Promise<string | null>;
-    cancelWorkflow(
-      workflowId: string,
-      reason?: string,
-    ): Promise<WorkflowCancelResult>;
+    cancelWorkflow(workflowId: string, reason?: string): Promise<WorkflowCancelResult>;
     getWorkflowMeta(
       task: string,
       jobId: string,
     ): Promise<{ workflowId: string; nodeIndex: number } | null>;
+
+    // Board / observability
+    cleanJobs(task: string, state: JobState, before: number, limit: number): Promise<number>;
+    getServerInfo(): Promise<{
+      version: string;
+      usedMemory: string;
+      uptime: number;
+      connected: boolean;
+    }>;
+    listWorkflows(
+      state?: WorkflowState,
+      offset?: number,
+      limit?: number,
+    ): Promise<
+      Array<{
+        id: string;
+        state: WorkflowState;
+        createdAt: number;
+        nodeCount: number;
+        terminalTasks: string[];
+      }>
+    >;
+    getWorkflowDetail(workflowId: string): Promise<WorkflowDetail | null>;
+    getThroughput(
+      task: string | null,
+      bucketSize: number,
+      count: number,
+    ): Promise<Array<{ timestamp: number; completed: number; failed: number }>>;
   }
 
   export interface AwaitJobResult {
@@ -511,6 +532,31 @@ export namespace Taskora {
   // ── Workflows ────────────────────────────────────────────────────
 
   export type WorkflowState = "running" | "completed" | "failed" | "cancelled";
+
+  export interface WorkflowDetail {
+    id: string;
+    state: WorkflowState;
+    createdAt: number;
+    graph: {
+      nodes: Array<{
+        taskName: string;
+        data?: string;
+        deps: number[];
+        jobId: string;
+        _v: number;
+      }>;
+      terminal: number[];
+    };
+    nodes: Array<{
+      index: number;
+      state: string;
+      result: string | null;
+      error: string | null;
+      jobId: string;
+    }>;
+    result: string | null;
+    error: string | null;
+  }
 
   export interface WorkflowAdvanceResult {
     toDispatch: Array<{

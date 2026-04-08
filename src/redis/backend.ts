@@ -34,6 +34,7 @@ const SCRIPT_MAP: Record<string, string> = {
   advanceWorkflow: wfScripts.ADVANCE_WORKFLOW,
   failWorkflow: wfScripts.FAIL_WORKFLOW,
   cancelWorkflow: wfScripts.CANCEL_WORKFLOW,
+  cleanJobs: scripts.CLEAN_JOBS,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -1080,6 +1081,214 @@ export class RedisBackend implements Taskora.Adapter {
     const [wf, wfNode] = await this.client.hmget(jobKey, "_wf", "_wfNode");
     if (!wf) return null;
     return { workflowId: wf, nodeIndex: Number(wfNode ?? 0) };
+  }
+
+  // ── Board / observability ──────────────────────────────────────────
+
+  async cleanJobs(
+    task: string,
+    state: Taskora.JobState,
+    before: number,
+    limit: number,
+  ): Promise<number> {
+    const keys = buildKeys(task, this.prefix);
+    const stateMap: Record<string, string> = {
+      completed: keys.completed,
+      failed: keys.failed,
+      expired: keys.expired,
+      cancelled: keys.cancelled,
+    };
+    const setKey = stateMap[state];
+    if (!setKey) return 0;
+
+    const result = await this.eval(
+      "cleanJobs",
+      1,
+      setKey,
+      keys.jobPrefix,
+      String(before),
+      String(limit),
+    );
+    return result as number;
+  }
+
+  async getServerInfo(): Promise<{
+    version: string;
+    usedMemory: string;
+    uptime: number;
+    connected: boolean;
+  }> {
+    const info = await this.client.info("server");
+    const memInfo = await this.client.info("memory");
+
+    const versionMatch = info.match(/redis_version:(.+)/);
+    const uptimeMatch = info.match(/uptime_in_seconds:(\d+)/);
+    const memMatch = memInfo.match(/used_memory_human:(.+)/);
+
+    return {
+      version: versionMatch?.[1]?.trim() ?? "unknown",
+      usedMemory: memMatch?.[1]?.trim() ?? "0B",
+      uptime: Number(uptimeMatch?.[1] ?? 0),
+      connected: this.client.status === "ready",
+    };
+  }
+
+  async listWorkflows(
+    state?: Taskora.WorkflowState,
+    offset = 0,
+    limit = 20,
+  ): Promise<
+    Array<{
+      id: string;
+      state: Taskora.WorkflowState;
+      createdAt: number;
+      nodeCount: number;
+      terminalTasks: string[];
+    }>
+  > {
+    const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
+    const pattern = `${base}:wf:{*}`;
+    const results: Array<{
+      id: string;
+      state: Taskora.WorkflowState;
+      createdAt: number;
+      nodeCount: number;
+      terminalTasks: string[];
+    }> = [];
+
+    let cursor = "0";
+    const collected: string[] = [];
+
+    do {
+      const [next, keys] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 200);
+      cursor = next;
+      collected.push(...keys);
+    } while (cursor !== "0");
+
+    // Pipeline HMGET for state, createdAt, graph
+    const pipe = this.client.pipeline();
+    for (const key of collected) {
+      pipe.hmget(key, "state", "createdAt", "graph");
+    }
+    const pipeResults = (await pipe.exec()) as [Error | null, (string | null)[]][];
+
+    for (let i = 0; i < collected.length; i++) {
+      const [, values] = pipeResults[i];
+      const wfState = values[0] as Taskora.WorkflowState | null;
+      if (!wfState) continue;
+      if (state && wfState !== state) continue;
+
+      const key = collected[i];
+      // Extract workflow ID from key: base:wf:{id}
+      const idMatch = key.match(/wf:\{(.+)\}$/);
+      const id = idMatch?.[1] ?? key;
+
+      let nodeCount = 0;
+      const terminalTasks: string[] = [];
+      if (values[2]) {
+        try {
+          const graph = JSON.parse(values[2]);
+          nodeCount = graph.nodes?.length ?? 0;
+          if (graph.terminal && graph.nodes) {
+            for (const ti of graph.terminal) {
+              terminalTasks.push(graph.nodes[ti]?.taskName ?? "unknown");
+            }
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      results.push({
+        id,
+        state: wfState,
+        createdAt: Number(values[1] ?? 0),
+        nodeCount,
+        terminalTasks,
+      });
+    }
+
+    // Sort by createdAt desc
+    results.sort((a, b) => b.createdAt - a.createdAt);
+    return results.slice(offset, offset + limit);
+  }
+
+  async getWorkflowDetail(workflowId: string): Promise<Taskora.WorkflowDetail | null> {
+    const key = this.wfKey(workflowId);
+    const raw = await this.client.hgetall(key);
+    if (!raw || !raw.state) return null;
+
+    let graph: Taskora.WorkflowDetail["graph"] = { nodes: [], terminal: [] };
+    try {
+      graph = JSON.parse(raw.graph);
+    } catch {
+      // ignore
+    }
+
+    const nodes: Taskora.WorkflowDetail["nodes"] = [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      nodes.push({
+        index: i,
+        state: raw[`n:${i}:state`] ?? "pending",
+        result: raw[`n:${i}:result`] ?? null,
+        error: raw[`n:${i}:error`] ?? null,
+        jobId: graph.nodes[i].jobId,
+      });
+    }
+
+    return {
+      id: workflowId,
+      state: raw.state as Taskora.WorkflowState,
+      createdAt: Number(raw.createdAt ?? 0),
+      graph,
+      nodes,
+      result: raw.result ?? null,
+      error: raw.error ?? null,
+    };
+  }
+
+  async getThroughput(
+    task: string | null,
+    bucketSize: number,
+    count: number,
+  ): Promise<Array<{ timestamp: number; completed: number; failed: number }>> {
+    const base = task
+      ? this.prefix
+        ? `taskora:${this.prefix}:{${task}}:`
+        : `taskora:{${task}}:`
+      : this.prefix
+        ? `taskora:${this.prefix}:{`
+        : "taskora:{";
+
+    // For simplicity, use the global prefix (non-task-specific) metric keys
+    const metricBase = this.prefix ? `taskora:${this.prefix}:` : "taskora:";
+    const now = Date.now();
+    const bucketMs = bucketSize;
+    const currentBucket = Math.floor(now / bucketMs) * bucketMs;
+
+    const pipe = this.client.pipeline();
+    const timestamps: number[] = [];
+
+    for (let i = count - 1; i >= 0; i--) {
+      const ts = currentBucket - i * bucketMs;
+      timestamps.push(ts);
+      // Metric keys use per-minute buckets stored in ack/fail Lua
+      pipe.get(`${metricBase}metrics:completed:${ts}`);
+      pipe.get(`${metricBase}metrics:failed:${ts}`);
+    }
+
+    const results = (await pipe.exec()) as [Error | null, string | null][];
+    const throughput: Array<{ timestamp: number; completed: number; failed: number }> = [];
+
+    for (let i = 0; i < timestamps.length; i++) {
+      throughput.push({
+        timestamp: timestamps[i],
+        completed: Number(results[i * 2][1] ?? 0),
+        failed: Number(results[i * 2 + 1][1] ?? 0),
+      });
+    }
+
+    return throughput;
   }
 
   private async loadScripts(): Promise<void> {

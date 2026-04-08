@@ -28,6 +28,7 @@ Task queue library for Node.js. TypeScript-first, Celery-inspired, BullMQ replac
 ```
 taskora              — core engine, types, task API (zero DB deps)
 taskora/redis        — Redis adapter (peer dep: ioredis)
+taskora/board        — admin dashboard (peer dep: hono)
 taskora/postgres     — future
 taskora/memory       — in-memory adapter (zero DB deps)
 taskora/test         — test runner (wraps memory adapter)
@@ -69,6 +70,12 @@ src/
 │   └── backend.ts        — MemoryBackend (in-memory Adapter)
 ├── test/
 │   └── index.ts          — createTestRunner(), TestRunner, ExecutionResult
+├── board/
+│   ├── index.ts          — createBoard() factory, Board interface
+│   ├── api.ts            — Hono REST routes + SSE endpoint
+│   ├── redact.ts         — deep field redaction utility
+│   ├── types.ts          — BoardOptions, Board, response types
+│   └── static/           — pre-built React SPA (git-ignored)
 ├── workflow/
 │   ├── index.ts          — re-exports + dispatch init
 │   ├── signature.ts      — Signature, ChainSignature, GroupSignature, ChordSignature
@@ -105,7 +112,32 @@ bun run format           # biome format --write
 
 ## Implementation phases
 
-Phases 1–14 and Phase 17a complete. Phases 15 (OpenTelemetry) and 16 (React Hooks) deferred. Next: Phase 17b (Durable Steps, Wait-for-Event). See `docs/IMPLEMENTATION.md` for full phase breakdown.
+Phases 1–14, 17a, and 18 complete. Phases 15 (OpenTelemetry) and 16 (React Hooks) deferred. Next: Phase 17b (Durable Steps, Wait-for-Event). See `docs/IMPLEMENTATION.md` for full phase breakdown.
+
+Phase 18 delivered:
+- `taskora/board` entrypoint: `createBoard(app, options)` — admin dashboard for taskora
+- Hono-based REST API server: overview, jobs, schedules, workflows, DLQ, migrations, throughput endpoints
+- SSE real-time events: bridges `adapter.subscribe()` to SSE stream with periodic `stats:update`
+- React SPA (Vite + Tailwind): pre-built at publish time, served as static files from the package
+- **Overview Dashboard**: global stat cards, throughput chart (Recharts), task table, Redis health
+- **Task Detail**: state tabs, job table with pagination, bulk retry/clean actions
+- **Job Detail**: timeline, data/result/error/logs tabs, progress bar, retry/cancel actions, workflow link
+- **Workflow DAG Visualization**: @xyflow/react with auto-layout (BFS layering), node state colors, animated edges, cancel workflow
+- **Schedule Management**: pause/resume/trigger/delete, relative time display
+- **DLQ View**: error frequency grouping, per-job retry, retry-all
+- **Migrations View**: version distribution bar chart, canBumpSince indicator
+- `Board` interface: `.app` (Hono), `.fetch` (Web standard), `.handler` (Node.js), `.listen(port)` (standalone)
+- Framework integration: works with Express, Fastify, Hono, Bun.serve, Deno.serve
+- Auth: `auth(req)` middleware hook, `readOnly` mode
+- Field redaction: deep key-based redaction (`password`, `secret`, `token`, etc.)
+- Dark/light/auto theme via CSS custom properties
+- Keyboard shortcuts: 1-5 for navigation, `/` for global search
+- Global job ID search bar
+- New Adapter methods: `cleanJobs`, `getServerInfo`, `listWorkflows`, `getWorkflowDetail`, `getThroughput`
+- Throughput metric counters: `INCR` per-minute buckets in `ack.lua`/`fail.lua`, 24h TTL auto-expire
+- `CLEAN_JOBS` Lua script: bulk clean sorted set by timestamp
+- `hono` optional peer dep (required only for `taskora/board`)
+- Design doc: `docs/BOARD_DESIGN.md`
 
 Phase 14 delivered:
 - `taskora/memory` entrypoint: `memoryAdapter()` — in-memory `Taskora.Adapter` implementation

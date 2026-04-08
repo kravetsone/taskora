@@ -326,6 +326,15 @@ end
 redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
   'event', 'completed', 'jobId', jobId)
 
+-- Throughput counter: INCR per-minute bucket, TTL 24h
+local task = redis.call('HGET', jobKey, 'task') or ''
+local bucket = math.floor(tonumber(now) / 60000) * 60000
+local metricKey = prefix .. 'metrics:completed:' .. tostring(bucket)
+redis.call('INCR', metricKey)
+if redis.call('TTL', metricKey) == -1 then
+  redis.call('EXPIRE', metricKey, 86400)
+end
+
 return 1
 `;
 
@@ -390,6 +399,14 @@ else
   local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
   if dedupKey then
     redis.call('DEL', dedupKey)
+  end
+
+  -- Throughput counter: INCR per-minute bucket, TTL 24h
+  local bucket = math.floor(tonumber(now) / 60000) * 60000
+  local metricKey = prefix .. 'metrics:failed:' .. tostring(bucket)
+  redis.call('INCR', metricKey)
+  if redis.call('TTL', metricKey) == -1 then
+    redis.call('EXPIRE', metricKey, 86400)
   end
 
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
@@ -1387,4 +1404,31 @@ redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
   'event', 'cancelled', 'jobId', jobId, 'reason', reason)
 
 return 1
+`;
+
+// ── cleanJobs ──────────────────────────────────────────────────────
+// KEYS[1] = sorted set for the state (completed/failed/expired/cancelled)
+// ARGV[1] = jobPrefix
+// ARGV[2] = cutoff timestamp
+// ARGV[3] = max items to clean
+// Returns: number of cleaned jobs
+export const CLEAN_JOBS = `
+local prefix = ARGV[1]
+local cutoff = tonumber(ARGV[2])
+local maxClean = tonumber(ARGV[3])
+local cleaned = 0
+
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', tostring(cutoff), 'LIMIT', 0, maxClean)
+for _, jobId in ipairs(ids) do
+  redis.call('ZREM', KEYS[1], jobId)
+  local jobKey = prefix .. jobId
+  redis.call('DEL', jobKey,
+    jobKey .. ':data',
+    jobKey .. ':result',
+    jobKey .. ':lock',
+    jobKey .. ':logs')
+  cleaned = cleaned + 1
+end
+
+return cleaned
 `;

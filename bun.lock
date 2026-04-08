@@ -10,6 +10,7 @@
         "@testcontainers/redis": "^10.18.0",
         "@types/node": "^22.0.0",
         "cron-parser": "^5.0.3",
+        "hono": "^4.7.0",
         "ioredis": "^5.4.1",
         "pkgroll": "^2.5.1",
         "typescript": "^5.7.2",
@@ -18,10 +19,12 @@
       },
       "peerDependencies": {
         "cron-parser": ">=5",
+        "hono": ">=4",
         "ioredis": ">=5",
       },
       "optionalPeers": [
         "cron-parser",
+        "hono",
         "ioredis",
       ],
     },
@@ -392,6 +395,8 @@
     "graceful-fs": ["graceful-fs@4.2.11", "", {}, "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ=="],
 
     "hasown": ["hasown@2.0.2", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ=="],
+
+    "hono": ["hono@4.12.12", "", {}, "sha512-p1JfQMKaceuCbpJKAPKVqyqviZdS0eUxH9v82oWo1kb9xjQ5wA6iP3FNVAPDFlz5/p7d45lO+BpSk1tuSZMF4Q=="],
 
     "ieee754": ["ieee754@1.2.1", "", {}, "sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA=="],
 

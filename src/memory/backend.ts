@@ -92,7 +92,19 @@ export class MemoryBackend implements Taskora.Adapter {
   private schedulerLock: { token: string; expiresAt: number } | null = null;
 
   // ── Workflows ──
-  private workflows = new Map<string, { graph: string; state: string; createdAt: number; result?: string; error?: string; nodeStates: Map<number, string>; nodeResults: Map<number, string>; nodeErrors: Map<number, string> }>();
+  private workflows = new Map<
+    string,
+    {
+      graph: string;
+      state: string;
+      createdAt: number;
+      result?: string;
+      error?: string;
+      nodeStates: Map<number, string>;
+      nodeResults: Map<number, string>;
+      nodeErrors: Map<number, string>;
+    }
+  >();
 
   // ── Events ──
   private streamHandlers: Array<(event: Taskora.StreamEvent) => void> = [];
@@ -1279,9 +1291,7 @@ export class MemoryBackend implements Taskora.Adapter {
       const node = graph.nodes[i];
       if (!node.deps.includes(nodeIndex)) continue;
 
-      const allDepsCompleted = node.deps.every(
-        (d: number) => wf.nodeStates.get(d) === "completed",
-      );
+      const allDepsCompleted = node.deps.every((d: number) => wf.nodeStates.get(d) === "completed");
       if (!allDepsCompleted) continue;
 
       // Compute input data
@@ -1370,10 +1380,7 @@ export class MemoryBackend implements Taskora.Adapter {
     });
   }
 
-  async cancelWorkflow(
-    workflowId: string,
-    reason?: string,
-  ): Promise<Taskora.WorkflowCancelResult> {
+  async cancelWorkflow(workflowId: string, reason?: string): Promise<Taskora.WorkflowCancelResult> {
     const wf = this.workflows.get(workflowId);
     if (!wf || wf.state !== "running") {
       return { activeJobIds: [] };
@@ -1410,5 +1417,150 @@ export class MemoryBackend implements Taskora.Adapter {
       workflowId: job.fields._wf,
       nodeIndex: Number(job.fields._wfNode ?? 0),
     };
+  }
+
+  // ── Board / observability ──────────────────────────────────────────
+
+  private throughputCounters = new Map<string, number>();
+
+  /** @internal — called by ack/fail to record throughput */
+  _recordThroughput(type: "completed" | "failed"): void {
+    const bucket = Math.floor(this.now() / 60000) * 60000;
+    const key = `${type}:${bucket}`;
+    this.throughputCounters.set(key, (this.throughputCounters.get(key) ?? 0) + 1);
+  }
+
+  async cleanJobs(
+    task: string,
+    state: Taskora.JobState,
+    before: number,
+    limit: number,
+  ): Promise<number> {
+    const q = this.q(task);
+    const setMap: Record<string, ZEntry[] | undefined> = {
+      completed: q.completed,
+      failed: q.failed,
+      expired: q.expired,
+      cancelled: q.cancelled,
+    };
+    const set = setMap[state];
+    if (!set) return 0;
+
+    let cleaned = 0;
+    const toRemove: string[] = [];
+    for (const entry of set) {
+      if (entry.score <= before && cleaned < limit) {
+        toRemove.push(entry.member);
+        cleaned++;
+      }
+    }
+    for (const id of toRemove) {
+      zRem(set, id);
+      this.jobStore.delete(id);
+      this.jobTask.delete(id);
+    }
+    return cleaned;
+  }
+
+  async getServerInfo(): Promise<{
+    version: string;
+    usedMemory: string;
+    uptime: number;
+    connected: boolean;
+  }> {
+    return {
+      version: "memory",
+      usedMemory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+      uptime: Math.round(process.uptime()),
+      connected: true,
+    };
+  }
+
+  async listWorkflows(
+    state?: Taskora.WorkflowState,
+    offset = 0,
+    limit = 20,
+  ): Promise<
+    Array<{
+      id: string;
+      state: Taskora.WorkflowState;
+      createdAt: number;
+      nodeCount: number;
+      terminalTasks: string[];
+    }>
+  > {
+    const results: Array<{
+      id: string;
+      state: Taskora.WorkflowState;
+      createdAt: number;
+      nodeCount: number;
+      terminalTasks: string[];
+    }> = [];
+
+    for (const [id, wf] of this.workflows) {
+      if (state && wf.state !== state) continue;
+      const graph = JSON.parse(wf.graph);
+      const terminalTasks = (graph.terminal ?? []).map(
+        (i: number) => graph.nodes[i]?.taskName ?? "unknown",
+      );
+      results.push({
+        id,
+        state: wf.state as Taskora.WorkflowState,
+        createdAt: wf.createdAt,
+        nodeCount: graph.nodes.length,
+        terminalTasks,
+      });
+    }
+
+    results.sort((a, b) => b.createdAt - a.createdAt);
+    return results.slice(offset, offset + limit);
+  }
+
+  async getWorkflowDetail(workflowId: string): Promise<Taskora.WorkflowDetail | null> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return null;
+
+    const graph = JSON.parse(wf.graph);
+    const nodes: Taskora.WorkflowDetail["nodes"] = [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      nodes.push({
+        index: i,
+        state: wf.nodeStates.get(i) ?? "pending",
+        result: wf.nodeResults.get(i) ?? null,
+        error: wf.nodeErrors.get(i) ?? null,
+        jobId: graph.nodes[i].jobId,
+      });
+    }
+
+    return {
+      id: workflowId,
+      state: wf.state as Taskora.WorkflowState,
+      createdAt: wf.createdAt,
+      graph,
+      nodes,
+      result: wf.result ?? null,
+      error: wf.error ?? null,
+    };
+  }
+
+  async getThroughput(
+    _task: string | null,
+    bucketSize: number,
+    count: number,
+  ): Promise<Array<{ timestamp: number; completed: number; failed: number }>> {
+    const now = this.now();
+    const currentBucket = Math.floor(now / bucketSize) * bucketSize;
+    const results: Array<{ timestamp: number; completed: number; failed: number }> = [];
+
+    for (let i = count - 1; i >= 0; i--) {
+      const ts = currentBucket - i * bucketSize;
+      results.push({
+        timestamp: ts,
+        completed: this.throughputCounters.get(`completed:${ts}`) ?? 0,
+        failed: this.throughputCounters.get(`failed:${ts}`) ?? 0,
+      });
+    }
+
+    return results;
   }
 }
