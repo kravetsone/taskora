@@ -1,10 +1,31 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createBoard } from "../../src/board/index.js";
 import type { Board } from "../../src/board/index.js";
 import { createTaskora } from "../../src/index.js";
 import { memoryAdapter } from "../../src/memory/index.js";
 
 const COOKIE_PASSWORD = "x".repeat(48);
+
+// The board's static SPA is gitignored (`src/board/static/` is built by
+// `bun run build:ui` or the publish workflow). These tests exercise the SPA
+// redirect/guard path, which requires the static handler to be registered —
+// which requires `src/board/static/index.html` to exist. Seed a minimal stub
+// so the tests work in CI (where the build hasn't run yet) and locally.
+beforeAll(() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const staticDir = resolve(here, "../../src/board/static");
+  const indexHtml = resolve(staticDir, "index.html");
+  if (!existsSync(indexHtml)) {
+    mkdirSync(staticDir, { recursive: true });
+    writeFileSync(
+      indexHtml,
+      "<!doctype html><html><head><title>taskora board (test stub)</title></head><body><div id=\"root\"></div></body></html>",
+    );
+  }
+});
 
 function makeApp() {
   return createTaskora({ adapter: memoryAdapter() });
