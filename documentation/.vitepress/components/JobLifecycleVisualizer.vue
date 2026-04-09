@@ -21,14 +21,14 @@ interface StateNode {
 }
 
 const nodes: StateNode[] = [
-  { id: "waiting", label: "Waiting", x: 100, y: 120, color: "#3b82f6" },
-  { id: "delayed", label: "Delayed", x: 100, y: 30, color: "#6366f1" },
-  { id: "active", label: "Active", x: 280, y: 120, color: "#f59e0b" },
-  { id: "completed", label: "Completed", x: 460, y: 40, color: "#22c55e" },
-  { id: "failed", label: "Failed", x: 460, y: 120, color: "#ef4444" },
-  { id: "retrying", label: "Retrying", x: 460, y: 200, color: "#a855f7" },
-  { id: "cancelled", label: "Cancelled", x: 280, y: 230, color: "#6b7280" },
-  { id: "expired", label: "Expired", x: 100, y: 230, color: "#dc2626" },
+  { id: "waiting", label: "Waiting", x: 100, y: 135, color: "#3b82f6" },
+  { id: "delayed", label: "Delayed", x: 280, y: 225, color: "#6366f1" },
+  { id: "active", label: "Active", x: 280, y: 135, color: "#f59e0b" },
+  { id: "completed", label: "Completed", x: 460, y: 45, color: "#22c55e" },
+  { id: "failed", label: "Failed", x: 460, y: 135, color: "#ef4444" },
+  { id: "retrying", label: "Retrying", x: 460, y: 225, color: "#a855f7" },
+  { id: "cancelled", label: "Cancelled", x: 280, y: 45, color: "#6b7280" },
+  { id: "expired", label: "Expired", x: 100, y: 225, color: "#dc2626" },
 ];
 
 interface Edge {
