@@ -116,3 +116,40 @@ export class CancelledError extends TaskoraError {
     this.reason = reason;
   }
 }
+
+/**
+ * Thrown by {@link App.ensureConnected} when the wire-format version compiled
+ * into this process is incompatible with the meta record the storage backend
+ * already has. Stops the process before any worker, scheduler, or dispatch
+ * can touch incompatible data.
+ *
+ * See `src/wire-version.ts` for the full compatibility rule and the policy
+ * for bumping `WIRE_VERSION` / `MIN_COMPAT_VERSION`.
+ */
+export class SchemaVersionMismatchError extends TaskoraError {
+  readonly code: "theirs_too_new" | "theirs_too_old" | "invalid_meta";
+  readonly ours: {
+    wireVersion: number;
+    minCompat: number;
+    writtenBy: string;
+  };
+  readonly theirs: {
+    wireVersion: number;
+    minCompat: number;
+    writtenBy: string;
+    writtenAt: number;
+  };
+
+  constructor(
+    code: "theirs_too_new" | "theirs_too_old" | "invalid_meta",
+    message: string,
+    ours: { wireVersion: number; minCompat: number; writtenBy: string },
+    theirs: { wireVersion: number; minCompat: number; writtenBy: string; writtenAt: number },
+  ) {
+    super(message);
+    this.name = "SchemaVersionMismatchError";
+    this.code = code;
+    this.ours = ours;
+    this.theirs = theirs;
+  }
+}

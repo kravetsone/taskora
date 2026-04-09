@@ -26,3 +26,14 @@ export function buildScheduleKeys(prefix?: string) {
     schedulerLock: `${base}:schedules:lock`,
   };
 }
+
+/**
+ * The wire-format meta hash. One key per `(redis, prefix)` pair — writing is
+ * atomic via a small Lua script (see `HANDSHAKE` in `scripts.ts`).
+ *
+ * Not wrapped in a `{hash tag}` because it is a single-key operation and
+ * never participates in a multi-key Lua script, so there is nothing to group.
+ */
+export function buildMetaKey(prefix?: string): string {
+  return prefix ? `taskora:${prefix}:meta` : "taskora:meta";
+}

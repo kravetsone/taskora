@@ -10,7 +10,17 @@ export {
   DuplicateJobError,
   ExpiredError,
   CancelledError,
+  SchemaVersionMismatchError,
 } from "./errors.js";
+export {
+  WIRE_VERSION,
+  MIN_COMPAT_VERSION,
+  type SchemaMeta,
+  type CompatResult,
+  currentMeta,
+  checkCompat,
+  writtenByForWireVersion,
+} from "./wire-version.js";
 export { json } from "./serializer.js";
 export { type TaskoraOptions, App } from "./app.js";
 export { Task } from "./task.js";

@@ -2,7 +2,7 @@ import type { Taskora } from "../types.js";
 import type { RedisDriver } from "./driver.js";
 import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
-import { buildKeys, buildScheduleKeys } from "./keys.js";
+import { buildKeys, buildMetaKey, buildScheduleKeys } from "./keys.js";
 import * as scripts from "./scripts.js";
 import * as wfScripts from "./workflow-scripts.js";
 
@@ -42,6 +42,7 @@ const SCRIPT_MAP: Record<string, string> = {
   failWorkflow: wfScripts.FAIL_WORKFLOW,
   cancelWorkflow: wfScripts.CANCEL_WORKFLOW,
   cleanJobs: scripts.CLEAN_JOBS,
+  handshake: scripts.HANDSHAKE,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -92,6 +93,29 @@ export class RedisBackend implements Taskora.Adapter {
     if (this.ownsDriver) {
       await this.driver.close();
     }
+  }
+
+  async handshake(ours: Taskora.SchemaMeta): Promise<Taskora.SchemaMeta> {
+    const metaKey = buildMetaKey(this.prefix);
+    const raw = (await this.eval(
+      "handshake",
+      1,
+      metaKey,
+      String(ours.wireVersion),
+      String(ours.minCompat),
+      ours.writtenBy,
+      String(ours.writtenAt),
+    )) as [string, string, string, string];
+
+    // The Lua script normalizes every slot to a string; core's `checkCompat`
+    // will flag any NaN/out-of-range values as `invalid_meta` so operators
+    // get a clear error instead of a silent zero.
+    return {
+      wireVersion: Number(raw[0]),
+      minCompat: Number(raw[1]),
+      writtenBy: raw[2] || "",
+      writtenAt: Number(raw[3]),
+    };
   }
 
   async enqueue(

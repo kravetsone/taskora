@@ -79,6 +79,13 @@ export class MemoryBackend implements Taskora.Adapter {
   private jobStore = new Map<string, Job>();
   private jobTask = new Map<string, string>();
 
+  // ── Wire-format meta ──
+  // In-memory adapter is single-process by definition, so the handshake only
+  // catches a caller that connects, disconnects, and reconnects with a
+  // differently-versioned build against the *same instance* — mainly useful
+  // for tests that exercise the check without Redis.
+  private schemaMeta: Taskora.SchemaMeta | null = null;
+
   // ── Flow control ──
   private debounceKeys = new Map<string, string>();
   private throttleWindows = new Map<string, number[]>();
@@ -345,6 +352,14 @@ export class MemoryBackend implements Taskora.Adapter {
 
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
+
+  async handshake(ours: Taskora.SchemaMeta): Promise<Taskora.SchemaMeta> {
+    if (this.schemaMeta === null) {
+      this.schemaMeta = { ...ours };
+      return this.schemaMeta;
+    }
+    return this.schemaMeta;
+  }
 
   // ── Enqueue variants ──
 

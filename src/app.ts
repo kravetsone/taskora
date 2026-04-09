@@ -3,6 +3,7 @@ import { BoundTask } from "./bound-task.js";
 import type { TaskContract } from "./contract.js";
 import { DeadLetterManager } from "./dlq.js";
 import { TypedEmitter } from "./emitter.js";
+import { SchemaVersionMismatchError } from "./errors.js";
 import { Inspector } from "./inspector.js";
 import type { Duration } from "./scheduler/duration.js";
 import { parseDuration } from "./scheduler/duration.js";
@@ -10,6 +11,7 @@ import { Scheduler } from "./scheduler/scheduler.js";
 import { json } from "./serializer.js";
 import { Task, type TaskConfig, type TaskDeps, type TaskMigrationConfig } from "./task.js";
 import type { Taskora } from "./types.js";
+import { checkCompat, currentMeta } from "./wire-version.js";
 import { Worker } from "./worker.js";
 
 export interface TaskoraOptions {
@@ -560,10 +562,39 @@ export class App {
   }
 
   async ensureConnected(): Promise<void> {
-    if (!this.connected) {
-      await this.adapter.connect();
-      this.connected = true;
+    if (this.connected) return;
+    await this.adapter.connect();
+
+    // Wire-format handshake: refuse to proceed if the backend is already
+    // occupied by an incompatible taskora version. This runs before workers,
+    // scheduler, and even dispatch, so a misconfigured process fails fast
+    // with a clear error instead of silently corrupting job state.
+    const ours = currentMeta();
+    const theirs = await this.adapter.handshake(ours);
+    const verdict = checkCompat(ours, theirs);
+    if (!verdict.ok) {
+      // Don't leave the adapter half-connected when we refuse to proceed.
+      // Otherwise the caller has no way to release blocking clients / sockets
+      // the Redis backend opened inside `connect()`.
+      try {
+        await this.adapter.disconnect();
+      } catch {
+        // Best-effort cleanup — the original mismatch is the interesting error.
+      }
+      throw new SchemaVersionMismatchError(
+        verdict.code,
+        verdict.message,
+        { wireVersion: ours.wireVersion, minCompat: ours.minCompat, writtenBy: ours.writtenBy },
+        {
+          wireVersion: theirs.wireVersion,
+          minCompat: theirs.minCompat,
+          writtenBy: theirs.writtenBy,
+          writtenAt: theirs.writtenAt,
+        },
+      );
     }
+
+    this.connected = true;
   }
 
   async start(): Promise<void> {

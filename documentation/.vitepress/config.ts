@@ -175,6 +175,7 @@ export default defineConfig({
             { text: "Stall Detection", link: "/operations/stall-detection" },
             { text: "Monitoring", link: "/operations/monitoring" },
             { text: "Board (Admin UI)", link: "/operations/board" },
+            { text: "Upgrading", link: "/operations/upgrading" },
           ],
         },
       ],

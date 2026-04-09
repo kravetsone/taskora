@@ -1441,3 +1441,39 @@ end
 
 return cleaned
 `;
+
+// ── handshake ────────────────────────────────────────────────────────
+// Atomically read-or-initialize the wire-format meta hash.
+//
+// KEYS[1] = meta key                 (e.g. "taskora:meta" or "taskora:<prefix>:meta")
+// ARGV[1] = ours wireVersion
+// ARGV[2] = ours minCompat
+// ARGV[3] = ours writtenBy
+// ARGV[4] = now (ms)
+// Returns: flat array [wireVersion, minCompat, writtenBy, writtenAt]
+//
+// The meta key is created (with ours values) only if it does not already
+// exist. If it does exist, the stored values are returned unchanged — core
+// then runs the compat check and decides whether to proceed or throw.
+// Core intentionally never triggers an in-place upgrade from here: bumping
+// stored meta forward is a privileged operation we will add (behind a
+// pre-1.0 feature flag) only once we need real rolling upgrades.
+export const HANDSHAKE = `
+local metaKey = KEYS[1]
+local ourWire = tonumber(ARGV[1])
+local ourMinCompat = tonumber(ARGV[2])
+local ourWrittenBy = ARGV[3]
+local now = ARGV[4]
+
+if redis.call('EXISTS', metaKey) == 0 then
+  redis.call('HSET', metaKey,
+    'wireVersion', tostring(ourWire),
+    'minCompat', tostring(ourMinCompat),
+    'writtenBy', ourWrittenBy,
+    'writtenAt', now)
+  return {tostring(ourWire), tostring(ourMinCompat), ourWrittenBy, now}
+end
+
+local raw = redis.call('HMGET', metaKey, 'wireVersion', 'minCompat', 'writtenBy', 'writtenAt')
+return {raw[1] or '', raw[2] or '', raw[3] or '', raw[4] or '0'}
+`;

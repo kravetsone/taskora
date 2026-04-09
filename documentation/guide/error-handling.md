@@ -107,6 +107,26 @@ Stored as the error when a job's TTL expires before processing.
 
 Stored as the error when a job exceeds `maxStalledCount` and is moved to failed.
 
+### `SchemaVersionMismatchError`
+
+A library-internal safety net for taskora upgrades that you will almost never see — we've built CI snapshot tests, a decoupled bump policy, and rolling-upgrade semantics specifically so this error doesn't fire in practice. If something ever does slip through all of that, `app.start()` / `app.ensureConnected()` throws **before** any worker, scheduler, or dispatch touches Redis, so your data is never in an ambiguous state.
+
+```ts
+try {
+  await app.start()
+} catch (err) {
+  if (err instanceof SchemaVersionMismatchError) {
+    console.error(err.code)     // "theirs_too_new" | "theirs_too_old" | "invalid_meta"
+    console.error(err.ours)     // { wireVersion, minCompat, writtenBy }
+    console.error(err.theirs)   // same + writtenAt
+    process.exit(1)
+  }
+  throw err
+}
+```
+
+This is **not** the same as task payload versioning — it protects taskora's own storage layout against incompatible library upgrades, not your task input schemas. See [Upgrading](../operations/upgrading) for the full story, including what each `code` means and the automated tests that make sure a breaking release can't slip through unnoticed.
+
 ## Default Error Logging
 
 When a task handler throws and **no** `failed` listener is registered (neither `task.on("failed")` nor `taskora.on("task:failed")`), taskora logs the error to `console.error` automatically:

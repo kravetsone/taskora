@@ -228,9 +228,35 @@ export namespace Taskora {
     next: () => Promise<void>,
   ) => Promise<void> | void;
 
+  /**
+   * Persisted wire-format meta record. See `src/wire-version.ts` for the
+   * compatibility rule and bump policy.
+   */
+  export interface SchemaMeta {
+    wireVersion: number;
+    minCompat: number;
+    writtenBy: string;
+    writtenAt: number;
+  }
+
   export interface Adapter {
     connect(): Promise<void>;
     disconnect(): Promise<void>;
+    /**
+     * Atomically persist-or-read the wire-format meta record.
+     *
+     * Contract:
+     *   • If no meta is currently stored in this backend (+ prefix), the adapter
+     *     writes `ours` verbatim and returns `ours`.
+     *   • Otherwise, the adapter returns whatever meta is already stored,
+     *     UNTOUCHED — the check/upgrade decision belongs to core.
+     *
+     * Called exactly once per `App.ensureConnected()`, immediately after
+     * `connect()` and before any worker/scheduler/dispatch runs. Core calls
+     * `checkCompat(ours, returned)` and throws `SchemaVersionMismatchError` on
+     * any incompatibility.
+     */
+    handshake(ours: SchemaMeta): Promise<SchemaMeta>;
     enqueue(
       task: string,
       jobId: string,

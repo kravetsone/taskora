@@ -1,0 +1,72 @@
+# Upgrading Taskora
+
+**Upgrade taskora the way you'd upgrade any other dependency — bump the version, redeploy, carry on.** We've thought hard about this and built several layers of machinery specifically so you don't have to worry about it. This page explains what's in place, not what you have to do.
+
+## Why you can just upgrade
+
+Taskora's storage layout (keys, Lua scripts, job hash fields, stream events) is treated as a load-bearing contract. We've put a belt-and-suspenders system in place to make sure a release that would silently break your production queues cannot land. Here's what's protecting you:
+
+**A frozen wire-format snapshot runs on every CI build.** `tests/unit/wire-format-snapshot.test.ts` pins down every Redis key the library constructs, the SHA-256 of every Lua script we ship, and both version constants. Any PR that drifts a single character of the persistence surface — a key rename, a comment tweak in a Lua script, a new stable hash field — fails CI with a clear "you are touching the wire format" reminder. A drive-by edit cannot sneak through review.
+
+**The version constants are decoupled from `package.json`.** A bug-fix release that never touches storage doesn't move `WIRE_VERSION` or `MIN_COMPAT_VERSION`. The identifier stored in your Redis (`taskora-wire-<N>`) stays stable across every release that doesn't change the format, so there is no "did I remember to bump the version on release day" failure mode.
+
+**Rolling upgrades work by default for the common case.** When a new version adds a field or a new event that older code simply ignores, both versions can run against the same Redis simultaneously — their compatibility windows overlap automatically. No coordination, no downtime, no staged rollout required.
+
+**A runtime handshake runs before workers touch anything.** On `app.start()`, taskora does one small atomic read-or-init against a `taskora:meta` record in your Redis, compares the stored wire version against the running build's own, and stops the process dead before any worker, scheduler, or dispatch runs if they don't line up. The worst case is a clean exit with a clear error — your data is never in an ambiguous state.
+
+**Breaking wire changes are reserved for major releases, if we do them at all.** Cosmetic renames and "while I'm in here" cleanups will never change the format. The actual bar for a breaking change is "we couldn't fix a real correctness bug any other way," and even then we'd prefer to ship an additive escape hatch first.
+
+**A built-in wire-format upgrader is on the roadmap.** The long-term goal is that a future taskora release can read the previous format, transparently rewrite persisted data to the new layout on first connect, and carry on — no downtime, no error, nothing for you to catch. Once that lands, even a breaking wire change becomes invisible at upgrade time.
+
+Put together: the compatibility error documented below should not happen to you in practice. It's the last line of defense, present so that **if** something ever does slip through the combination of CI snapshot tests, bump policy, rolling-upgrade semantics, and code review, the failure mode is a clean fail-fast at startup — not silently corrupted queues.
+
+## What it looks like if you do hit it
+
+`app.start()` throws `SchemaVersionMismatchError`. No data is mutated, no jobs are lost. The error carries structured fields you can feed into logs and alerts:
+
+```ts
+import { SchemaVersionMismatchError } from "taskora"
+
+try {
+  await app.start()
+} catch (err) {
+  if (err instanceof SchemaVersionMismatchError) {
+    // err.code: "theirs_too_new" | "theirs_too_old" | "invalid_meta"
+    // err.ours:   { wireVersion, minCompat, writtenBy }
+    // err.theirs: { wireVersion, minCompat, writtenBy, writtenAt }
+    console.error(err.message)
+    process.exit(1)
+  }
+  throw err
+}
+```
+
+The `code` field tells you what's going on and how to resolve it:
+
+| Code | Meaning | Resolution |
+|---|---|---|
+| `theirs_too_new` | A newer taskora build already wrote to this Redis | Upgrade this process to match, or point it at a different Redis keyspace |
+| `theirs_too_old` | This Redis was written by a much older taskora | Upgrade in smaller steps, or drain the old queues first |
+| `invalid_meta` | The `taskora:meta` hash is corrupt or written by something else | Investigate who wrote it; if it's garbage, delete the key and retry |
+
+You should never have to use this table, but it's here in case you do.
+
+## Not to be confused with task payload versioning
+
+There are two independent versioning systems in taskora. They solve different problems and you'll interact with them at very different frequencies.
+
+| | Wire format (this page) | Task payload ([Versioning & Migrations](../features/versioning)) |
+|---|---|---|
+| **Protects** | taskora's own Redis layout | your task's input data shape |
+| **Bumped by** | taskora maintainers, rarely | you, whenever you evolve a task schema |
+| **Configured in** | taskora source (internal) | `app.task({ version, since, migrate })` |
+| **How often it matters** | almost never — we made sure | every time you change task input |
+
+If you're looking for "how do I change my task's input schema without breaking in-flight jobs," that's the second column and it's covered in [Versioning & Migrations](../features/versioning).
+
+## TL;DR
+
+- Upgrade taskora, redeploy, done.
+- The compatibility machinery is there so you don't have to think about it.
+- `SchemaVersionMismatchError` is the last-resort safety net — in practice our CI snapshot tests, bump policy, and rolling-upgrade semantics mean you shouldn't see it.
+- Wire-format versioning is the library's own internal safety net. Task payload versioning is the separate, user-facing mechanism for evolving your own tasks.
