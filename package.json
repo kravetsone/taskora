@@ -1,6 +1,6 @@
 {
   "name": "taskora",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Task queue for Node.js. TypeScript-first, Celery-inspired, batteries-included.",
   "author": "kravetsone",
