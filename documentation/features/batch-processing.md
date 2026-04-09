@@ -73,6 +73,56 @@ const batchByRegionTask = taskora.task("batch-by-region", {
 })
 ```
 
+## Peeking the Buffer
+
+Sometimes you need to read what's sitting in the buffer *without* draining it — for example, to surface unflushed data alongside already-processed data in a live query path.
+
+```ts
+// Read-only snapshot of the current buffer — returns items in dispatch
+// order (oldest → newest). Does not drain, does not reset the debounce
+// timer, does not change when the flush fires.
+const pending = await ingestMessagesTask.peekCollect(`chat:${chatId}`)
+
+// Stats-only view — cheaper than peekCollect because it doesn't read
+// payloads. Returns null when no buffer exists for the key.
+const info = await ingestMessagesTask.inspectCollect(`chat:${chatId}`)
+// → { count: 12, oldestAt: 1712678400000, newestAt: 1712678520000 } | null
+```
+
+### Live-context use case
+
+A chat ingestion pipeline buffers group messages via `collect` and batches them into an LLM extraction job that writes decisions, risks, and todos into long-term project memory. The same pipeline also answers user questions in the same chat ("what did Kolya just say about auth?") and needs to include the most recent minutes of chat in the prompt.
+
+The challenge: messages from the current collect cycle haven't been extracted yet — they're not in long-term memory. But they're sitting in the collect buffer. `peekCollect` gives the Q&A path read-only access to that unflushed window without double-writing to a parallel Redis list, without a separate TTL to keep in sync, and without any risk of disturbing the pending flush:
+
+```ts
+async function answerWithLiveContext(chatId: string, question: string) {
+  const [longTerm, pending] = await Promise.all([
+    memory.search(chatId, question),
+    ingestMessagesTask.peekCollect(`chat:${chatId}`),
+  ])
+  return llm.complete(buildPrompt({ longTerm, pending, question }))
+}
+```
+
+### Semantics
+
+- **Non-destructive.** Peek never alters buffer state — no `LPOP`, no TTL reset, no side effects that would change when the flush fires.
+- **Snapshot consistency.** The underlying read is a single atomic command (Redis `LRANGE` / memory `slice`), so the returned array always reflects a coherent point in time, even under concurrent dispatches or a flush running in parallel.
+- **Ownership boundary.** Once the handler has claimed the batch — i.e. `moveToActive` has drained the items list into the job — `peekCollect` returns `[]` and `inspectCollect` returns `null`. This preserves the invariant that items belong to *either* the buffer *or* the handler, never both.
+- **Empty array on any "no buffer" state.** Never dispatched to, already flushed, or the buffer was just drained — callers don't need to distinguish these cases.
+- **Throws on non-collect tasks.** Calling `peekCollect` / `inspectCollect` on a task without a `collect` config throws a `TaskoraError` — silently returning `[]` would mask a config bug.
+- **Deserialized.** Items come back as `TInput[]` (via the task's serializer), not raw serialized blobs. Individual deserialization failures are skipped so one bad item can't hide the rest of the snapshot.
+- **Dynamic `collect.key`.** When `key` is a function, pass the already-resolved string to `peekCollect` — same as what you'd compute for logging or tracing.
+
+### What about retaining flushed history?
+
+A tempting-looking knob would be `collect: { retain: { size, ttl } }` — keep the last N drained items around so callers can peek them after the flush. **Taskora deliberately doesn't offer this.**
+
+Once a batch has been drained, those items are the handler's responsibility — they've been processed, extracted, and written to whatever downstream storage the handler owns. A retain list would duplicate that data with a looser TTL, creating overlap where the same items appear in both "raw retained" and "persisted derivative" forms, forcing consumers to de-duplicate.
+
+The right boundary is: **`collect` holds items that haven't been processed yet; once processed, they belong to the handler's output storage.** `peekCollect` preserves that boundary. `retain` would violate it.
+
 ## Limitations
 
 - Collect tasks are **mutually exclusive** with debounce, throttle, and deduplicate dispatch options

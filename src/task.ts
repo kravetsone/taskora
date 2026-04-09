@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { TypedEmitter } from "./emitter.js";
-import { DuplicateJobError, ThrottledError } from "./errors.js";
+import { DuplicateJobError, TaskoraError, ThrottledError } from "./errors.js";
 import { type ResolvedVersion, normalizeMigrations, resolveVersion } from "./migration.js";
 import { ResultHandle } from "./result.js";
 import { parseDuration } from "./scheduler/duration.js";
@@ -356,5 +356,73 @@ export class Task<TInput, TOutput> {
     jobs: Array<{ data: TInput; options?: Taskora.DispatchOptions }>,
   ): ResultHandle<TOutput>[] {
     return jobs.map((job) => this.dispatch(job.data, job.options));
+  }
+
+  /**
+   * Read the current collect buffer for `collectKey` as a deserialized array
+   * of input items. Non-destructive: does not drain the buffer, reset the
+   * debounce timer, or alter any flush-trigger state.
+   *
+   * Items are returned in dispatch order (oldest → newest). Returns an empty
+   * array if the buffer is empty, was just flushed, or the key was never
+   * dispatched to — callers do not need to distinguish these cases.
+   *
+   * **Snapshot consistency:** the underlying read is a single atomic command
+   * (Redis `LRANGE` / memory `slice`), so the returned array always reflects
+   * a coherent point in time, even under concurrent dispatches or a flush
+   * running in parallel.
+   *
+   * **Throws** if this task was not declared with `collect: { ... }`. A task
+   * without collect has no buffer, and silently returning `[]` would mask a
+   * config bug.
+   *
+   * **Deserialization failures** on individual items are skipped rather than
+   * thrown — peek is a read/debugging tool, and partial corruption in one
+   * item should not poison the whole snapshot.
+   *
+   * @example
+   * ```ts
+   * const pending = await ingestMessagesTask.peekCollect(`chat:${chatId}`)
+   * const prompt = buildPrompt(longTermMemory, pending)
+   * ```
+   */
+  async peekCollect(collectKey: string): Promise<TInput[]> {
+    if (!this.config.collect) {
+      throw new TaskoraError(
+        `Task "${this.name}" was not declared with collect — peekCollect is only available on collect tasks.`,
+      );
+    }
+    await this.deps.ensureConnected();
+    const raw = await this.deps.adapter.peekCollect(this.name, collectKey);
+    const out: TInput[] = [];
+    for (const item of raw) {
+      try {
+        out.push(this.deps.serializer.deserialize(item) as TInput);
+      } catch {
+        // Skip malformed items. Rationale: peek is a read-only debugging
+        // tool; a single corrupt item should not break the whole snapshot.
+        // The handler path still fails loud on the full batch — this just
+        // prevents one bad item from hiding the other (good) items from a
+        // live-context reader.
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Stats-only view of the current collect buffer for `collectKey`. Returns
+   * `null` if no active buffer exists. Cheaper than {@link peekCollect} —
+   * reads only the meta hash, not the item payloads.
+   *
+   * **Throws** if this task was not declared with `collect: { ... }`.
+   */
+  async inspectCollect(collectKey: string): Promise<Taskora.CollectBufferInfo | null> {
+    if (!this.config.collect) {
+      throw new TaskoraError(
+        `Task "${this.name}" was not declared with collect — inspectCollect is only available on collect tasks.`,
+      );
+    }
+    await this.deps.ensureConnected();
+    return this.deps.adapter.inspectCollect(this.name, collectKey);
   }
 }

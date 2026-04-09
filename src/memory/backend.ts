@@ -30,6 +30,7 @@ interface CollectBuffer {
   items: string[];
   sentinelId: string | null;
   firstPushAt: number;
+  lastPushAt: number;
   maxWaitDeadline: number;
 }
 
@@ -546,11 +547,13 @@ export class MemoryBackend implements Taskora.Adapter {
         items: [],
         sentinelId: null,
         firstPushAt: now,
+        lastPushAt: now,
         maxWaitDeadline: options.maxWaitMs > 0 ? now + options.maxWaitMs : 0,
       };
       this.collectBuffers.set(bufferKey, buffer);
     }
     buffer.items.push(item);
+    buffer.lastPushAt = now;
 
     // maxSize flush — immediate
     if (options.maxSize > 0 && buffer.items.length >= options.maxSize) {
@@ -605,6 +608,25 @@ export class MemoryBackend implements Taskora.Adapter {
     buffer.sentinelId = jobId;
 
     return { flushed: false, count: buffer.items.length };
+  }
+
+  async peekCollect(task: string, collectKey: string): Promise<string[]> {
+    const buffer = this.collectBuffers.get(`${task}:${collectKey}`);
+    // Slice so callers mutating the returned array can't corrupt our state.
+    return buffer ? buffer.items.slice() : [];
+  }
+
+  async inspectCollect(
+    task: string,
+    collectKey: string,
+  ): Promise<Taskora.CollectBufferInfo | null> {
+    const buffer = this.collectBuffers.get(`${task}:${collectKey}`);
+    if (!buffer || buffer.items.length === 0) return null;
+    return {
+      count: buffer.items.length,
+      oldestAt: buffer.firstPushAt,
+      newestAt: buffer.lastPushAt,
+    };
   }
 
   // ── Dequeue ──

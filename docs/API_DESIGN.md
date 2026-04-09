@@ -1186,6 +1186,29 @@ const trackEvents = app.task("analytics", {
 })
 ```
 
+**Peek API** — read the current buffer without draining it. Essential for live-context use cases where unflushed items need to be surfaced in a read path (e.g. chat ingestion: the Q&A path wants to include messages that haven't been extracted into long-term memory yet).
+
+```typescript
+interface Task<TInput, TOutput> {
+  // Non-destructive read. Returns deserialized items in dispatch order.
+  // Throws on non-collect tasks (silent [] would mask config bugs).
+  // Returns [] for: empty buffer, just-flushed, never-dispatched.
+  peekCollect(collectKey: string): Promise<TInput[]>
+
+  // Stats-only view — one HGETALL, cheaper than peekCollect.
+  // Returns null when no active buffer exists for the key.
+  inspectCollect(collectKey: string): Promise<Taskora.CollectBufferInfo | null>
+}
+
+interface CollectBufferInfo {
+  count: number      // items currently buffered
+  oldestAt: number   // epoch ms of first dispatch in current buffer
+  newestAt: number   // epoch ms of most recent dispatch
+}
+```
+
+Semantics: single-command atomic snapshot (Redis `LRANGE` / memory `slice`); the buffer-vs-handler ownership boundary is preserved — once `moveToActive` drains the items into the job, peek returns `[]` and inspect returns `null`. No `retain` knob is offered — once items are drained, they belong to the handler's output storage, not the buffer.
+
 ---
 
 ## 12. Lifecycle

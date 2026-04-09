@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.3.2"
+  version: "0.4.0"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -774,6 +774,27 @@ await indexTask.dispatch({ id: "2", title: "World" })
 ```
 
 Three flush triggers (whichever comes first): debounce delay, maxSize, maxWait.
+
+**Peek the buffer (non-destructive read)** — for live-context use cases where unflushed items need to be surfaced in a read path without disturbing the flush cycle:
+
+```typescript
+// Read current buffer as deserialized input items (oldest → newest)
+const pending = await indexTask.peekCollect("search-index")
+
+// Stats-only — cheaper (no payloads), returns null when no buffer exists
+const info = await indexTask.inspectCollect("search-index")
+// → { count: 12, oldestAt: 1712678400000, newestAt: 1712678520000 } | null
+```
+
+Semantics:
+- Non-destructive — never drains, never resets the debounce timer
+- Snapshot-consistent — single atomic `LRANGE` / `slice`
+- Returns `[]` / `null` once the handler has drained the batch (ownership boundary preserved — items belong to either the buffer or the handler, never both)
+- Throws `TaskoraError` on tasks without `collect` (silent `[]` would mask config bugs)
+- Dynamic `collect.key`: pass the already-resolved key string
+- No `retain` option is offered — flushed items belong to the handler's output storage
+
+Use it when you need to read unflushed data (e.g. a chat ingestion pipeline where a Q&A path must surface messages still sitting in the collect buffer alongside data already written to long-term memory).
 
 ## Cancellation
 

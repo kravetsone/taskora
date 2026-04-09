@@ -359,6 +359,47 @@ export class RedisBackend implements Taskora.Adapter {
     return { flushed: result[0] === 1, count: result[1] };
   }
 
+  async peekCollect(task: string, collectKey: string): Promise<string[]> {
+    // Non-destructive read of the accumulator list. LRANGE is atomic, so the
+    // caller gets a coherent snapshot even if `collectPush` / `moveToActive`
+    // is concurrently mutating the buffer. Collect buffer keys share the
+    // task's `{hash tag}` via `jobPrefix`, so this is safe under Cluster.
+    const keys = buildKeys(task, this.prefix);
+    const itemsKey = `${keys.jobPrefix}collect:${collectKey}:items`;
+    const result = (await this.driver.command("LRANGE", [itemsKey, "0", "-1"])) as string[];
+    return result ?? [];
+  }
+
+  async inspectCollect(
+    task: string,
+    collectKey: string,
+  ): Promise<Taskora.CollectBufferInfo | null> {
+    // Single HGETALL — cheaper than LRANGE when the caller only needs stats.
+    // `count`/`firstAt`/`lastAt` are maintained in lockstep with RPUSH inside
+    // the COLLECT_PUSH Lua script, so they reflect the same atomic push as
+    // the items list. Empty hash means "no active buffer" (never created or
+    // already drained by moveToActive/maxSize flush).
+    //
+    // Driver-shape normalization: Bun driver returns a `Record<string, string>`
+    // for HGETALL, but `ioredis.call("HGETALL", ...)` returns the raw RESP2
+    // flat array `[k, v, k, v, ...]`. We normalize here rather than in the
+    // ioredis driver to keep that change scoped to this feature — the rest
+    // of the backend uses Lua scripts or `command()` for list/string ops
+    // where the shapes already match.
+    const keys = buildKeys(task, this.prefix);
+    const metaKey = `${keys.jobPrefix}collect:${collectKey}:meta`;
+    const raw = await this.driver.command("HGETALL", [metaKey]);
+    const meta = toHashRecord(raw);
+    if (!meta || !meta.count) return null;
+    const count = Number(meta.count);
+    if (!Number.isFinite(count) || count <= 0) return null;
+    return {
+      count,
+      oldestAt: Number(meta.firstAt),
+      newestAt: Number(meta.lastAt),
+    };
+  }
+
   async dequeue(
     task: string,
     lockTtl: number,
@@ -1534,4 +1575,35 @@ export class RedisBackend implements Taskora.Adapter {
     // NOSCRIPT recovery is handled inside the driver.
     return this.driver.evalSha(sha, numkeys, args, SCRIPT_MAP[scriptName]);
   }
+}
+
+/**
+ * Normalize an HGETALL reply to `Record<string, string>`.
+ *
+ * Different `RedisDriver` implementations return different shapes here:
+ *   - Bun driver: already normalized to `Record<string, string>` (the driver
+ *     does the flat-array conversion internally so that RESP2 and RESP3
+ *     replies look the same to call-sites).
+ *   - ioredis driver: `client.call("HGETALL", key)` returns the raw RESP2
+ *     flat array `[k, v, k, v, ...]`. (`client.hgetall()` would normalize,
+ *     but the generic `command()` passthrough does not.)
+ *
+ * Returns `null` on an empty/missing hash so callers can distinguish
+ * "no entry" from "entry with empty values".
+ */
+function toHashRecord(raw: unknown): Record<string, string> | null {
+  if (raw == null) return null;
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return null;
+    const out: Record<string, string> = {};
+    for (let i = 0; i < raw.length; i += 2) {
+      out[String(raw[i])] = String(raw[i + 1]);
+    }
+    return out;
+  }
+  if (typeof raw === "object") {
+    const obj = raw as Record<string, string>;
+    return Object.keys(obj).length === 0 ? null : obj;
+  }
+  return null;
 }

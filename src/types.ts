@@ -143,6 +143,24 @@ export namespace Taskora {
     maxWait?: DurationType;
   }
 
+  /**
+   * Snapshot of an active collect buffer's meta (no payloads). Returned by
+   * `Task.inspectCollect` / `BoundTask.inspectCollect`. `null` is returned
+   * when no buffer exists for the key — use that as the "empty" signal
+   * rather than checking `count === 0`.
+   */
+  export interface CollectBufferInfo {
+    /** Number of items currently buffered. */
+    count: number;
+    /**
+     * Epoch ms of the first dispatch in the current buffer generation.
+     * Reset on every flush — a new buffer starts on the next push.
+     */
+    oldestAt: number;
+    /** Epoch ms of the most recent dispatch in the current buffer. */
+    newestAt: number;
+  }
+
   export interface DispatchOptions {
     delay?: number;
     priority?: number;
@@ -332,6 +350,23 @@ export namespace Taskora {
         maxWaitMs: number;
       },
     ): Promise<{ flushed: boolean; count: number }>;
+    /**
+     * Read the current collect buffer for `(task, collectKey)` as raw
+     * serialized items. Non-destructive: never drains, never resets TTLs,
+     * never alters flush-trigger state. Returns items in dispatch order
+     * (oldest → newest). Empty array if the buffer has no items, was just
+     * flushed, or was never created.
+     *
+     * Called by `Task.peekCollect` / `BoundTask.peekCollect`; deserialization
+     * is done at the Task layer so the adapter stays schema-agnostic.
+     */
+    peekCollect(task: string, collectKey: string): Promise<string[]>;
+    /**
+     * Stats-only view of the current collect buffer for `(task, collectKey)`.
+     * Cheaper than {@link peekCollect} — reads only the meta hash, not the
+     * item payloads. Returns `null` if there is no active buffer for the key.
+     */
+    inspectCollect(task: string, collectKey: string): Promise<CollectBufferInfo | null>;
     dequeue(
       task: string,
       lockTtl: number,

@@ -93,4 +93,22 @@ export class BoundTask<TInput, TOutput> {
   chunk(items: TInput[], options: { size: number }): WorkflowHandle<TOutput[]> {
     return this._task.chunk(items, options);
   }
+
+  /**
+   * Non-destructive read of the current collect buffer for `collectKey`.
+   * Returns deserialized input items in dispatch order. Throws if the
+   * underlying task was not declared with `collect`. See {@link Task.peekCollect}.
+   */
+  peekCollect(collectKey: string): Promise<TInput[]> {
+    return this._task.peekCollect(collectKey);
+  }
+
+  /**
+   * Stats-only view of the current collect buffer for `collectKey`. Returns
+   * `null` if no active buffer exists. Throws if the underlying task was not
+   * declared with `collect`. See {@link Task.inspectCollect}.
+   */
+  inspectCollect(collectKey: string): Promise<Taskora.CollectBufferInfo | null> {
+    return this._task.inspectCollect(collectKey);
+  }
 }
