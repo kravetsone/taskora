@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.3.0"
+  version: "0.3.1"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -944,10 +944,12 @@ import { createBoard } from "taskora/board"
 const board = createBoard(taskora, {
   basePath: "/board",                  // default "/board"
   readOnly: false,                     // hides mutation UI + rejects POST/PUT/DELETE
-  auth: async (req) => {               // runs on every API request
-    const token = req.headers.get("authorization")
-    if (!token) return new Response("Unauthorized", { status: 401 })
-    // return undefined to allow the request through
+  auth: {                              // batteries-included session auth (see below)
+    cookiePassword: process.env.BOARD_COOKIE_SECRET!,  // min 32 chars
+    authenticate: async ({ username, password }) =>
+      username === "admin" && password === process.env.BOARD_PASSWORD
+        ? { id: "admin" }
+        : null,
   },
   title: "My Queue",
   theme: "auto",                       // "light" | "dark" | "auto"
@@ -956,6 +958,60 @@ const board = createBoard(taskora, {
   formatters: {
     data: (data, taskName) => data,    // per-task render preprocessing
     result: (result, taskName) => result,
+  },
+})
+```
+
+### Auth
+
+Two shapes, pick one — they're a discriminated union. The board detects which form you passed at `createBoard` time.
+
+**Session auth (recommended)** — drop in a config object, the board mounts a server-rendered login page, signs a session cookie, and guards everything (SPA HTML + API + SSE). Inspired by AdminJS.
+
+```typescript
+createBoard(taskora, {
+  auth: {
+    // HMAC-SHA256 signing secret, min 32 chars
+    // generate: openssl rand -base64 48
+    cookiePassword: process.env.BOARD_COOKIE_SECRET!,
+
+    // Return a truthy user to accept, null to reject
+    authenticate: async ({ username, password }, req) => {
+      if (username === "admin" && password === process.env.BOARD_PASSWORD) {
+        return { id: "admin" }
+      }
+      return null
+    },
+
+    cookieName: "taskora_board_session",  // default
+    // sessionTtl defaults to `false` — no expiry, browser-session cookie.
+    // Opt into rolling expiry with a Duration: "30s" | "5m" | "2h" | "1d" | ms number.
+    // sessionTtl: "7d",
+  },
+})
+```
+
+Routes mounted automatically under `${basePath}`:
+- `GET  /login`        — server-rendered login form (no SPA rebuild required)
+- `POST /auth/login`   — verifies via `authenticate`, sets signed `HttpOnly SameSite=Lax` cookie, 302 redirect
+- `POST /auth/logout`  — clears cookie, 302 to `/login`. Sidebar shows a `[ logout ]` button automatically when session auth is on.
+
+Unauthenticated requests get:
+- `401 {"error":"Unauthorized"}` on `/api/*`
+- `302 → /login?redirect=<path>` on SPA paths
+
+`createBoard` throws synchronously if `cookiePassword` is shorter than 32 characters. The session is a stateless signed cookie — no Redis session store, works with every adapter including memory. Password hashing / rate limiting / lockout are the caller's responsibility inside `authenticate`. No separate CSRF token is needed — `SameSite=Lax` + `HttpOnly` cover the mutation endpoints.
+
+**Custom auth hook (legacy / BYO JWT)** — pass a function instead if you already ship JWT, OAuth, or your framework's session middleware. Runs per-request on `/api/*` only. The SPA HTML remains public in this mode, matching the pre-session-auth behavior:
+
+```typescript
+createBoard(taskora, {
+  auth: async (req) => {
+    const token = req.headers.get("authorization")?.replace("Bearer ", "")
+    if (!token || !(await verifyJwt(token))) {
+      return new Response("Unauthorized", { status: 401 })
+    }
+    // return undefined → request proceeds
   },
 })
 ```
@@ -1037,7 +1093,7 @@ POST   /api/dlq/:jobId/retry
 POST   /api/dlq/retry-all
 GET    /api/throughput                  — 24h per-minute buckets
 GET    /api/events                      — Server-Sent Events stream
-GET    /api/config                      — static config (title, logo, theme, readOnly)
+GET    /api/config                      — static config (title, logo, theme, readOnly, authEnabled)
 ```
 
 All mutation endpoints honor `readOnly` and the `auth` hook.

@@ -5,10 +5,17 @@ import type { App } from "../app.js";
 import type { Inspector } from "../inspector.js";
 import type { Task } from "../task.js";
 import type { Taskora } from "../types.js";
+import { createAuthGuard } from "./auth/guard.js";
 import { createRedactor } from "./redact.js";
-import type { BoardOptions, JobDetailResponse, OverviewResponse, TaskInfo } from "./types.js";
+import {
+  type BoardOptions,
+  type JobDetailResponse,
+  type OverviewResponse,
+  type TaskInfo,
+  isBoardAuthConfig,
+} from "./types.js";
 
-export function createApi(app: App, options: BoardOptions = {}): Hono {
+export function createApi(app: App, options: BoardOptions = {}, basePath = "/board"): Hono {
   const api = new Hono();
   const readOnly = options.readOnly ?? false;
   const refreshInterval = options.refreshInterval ?? 2000;
@@ -21,16 +28,22 @@ export function createApi(app: App, options: BoardOptions = {}): Hono {
     api.use("/*", cors({ origin: options.cors.origin ?? "*" }));
   }
 
-  // Auth middleware
+  // Auth middleware — session config or legacy function hook.
+  // Scoped to /api/* so unauthenticated GET /board/ falls through to the static
+  // handler (which carries its own html-mode guard when session auth is enabled).
   if (options.auth) {
-    const authFn = options.auth;
-    api.use("/*", async (c, next) => {
-      const result = await authFn(c.req.raw);
-      if (result instanceof Response) {
-        return result;
-      }
-      await next();
-    });
+    if (isBoardAuthConfig(options.auth)) {
+      api.use("/api/*", createAuthGuard(options.auth, basePath, "api"));
+    } else {
+      const authFn = options.auth;
+      api.use("/api/*", async (c, next) => {
+        const result = await authFn(c.req.raw);
+        if (result instanceof Response) {
+          return result;
+        }
+        await next();
+      });
+    }
   }
 
   // Read-only guard
@@ -480,6 +493,7 @@ export function createApi(app: App, options: BoardOptions = {}): Hono {
       theme: options.theme ?? "auto",
       readOnly,
       refreshInterval,
+      authEnabled: isBoardAuthConfig(options.auth),
     });
   });
 

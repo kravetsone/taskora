@@ -153,6 +153,7 @@ export interface BoardConfig {
   theme: "light" | "dark" | "auto";
   readOnly: boolean;
   refreshInterval: number;
+  authEnabled: boolean;
 }
 
 // ── API functions ────────────────────────────────────────────────

@@ -41,6 +41,7 @@ function Layout() {
           theme: "auto",
           readOnly: false,
           refreshInterval: 2000,
+          authEnabled: false,
         });
       });
   }, []);
@@ -70,10 +71,11 @@ function Layout() {
   }, [config?.theme]);
 
   const title = config?.title ?? "taskora board";
+  const authEnabled = config?.authEnabled ?? false;
 
   return (
     <div className="flex min-h-screen bg-board-bg">
-      <Sidebar title={title} />
+      <Sidebar title={title} authEnabled={authEnabled} />
       <main className="flex-1 min-w-0 overflow-auto">
         <div className="flex justify-end p-3 border-b border-board-border">
           <SearchBar />

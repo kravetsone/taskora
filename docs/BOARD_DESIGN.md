@@ -701,7 +701,62 @@ If SSE is unavailable (corporate proxy issues), the UI falls back to Tanstack Qu
 
 ## 9. Authentication & Security
 
-### Approach: Middleware hook (no built-in auth)
+Two shapes for `auth` (discriminated union, not combinable):
+
+1. **Session config** — batteries-included login/password flow with server-rendered login page and signed session cookie. Added in the Phase 18 follow-up after the initial board ship.
+2. **Legacy function hook** — per-request middleware for callers that ship their own JWT / OAuth / framework session. Unchanged, preserved for backward compatibility.
+
+### Approach A — Session auth (`BoardAuthConfig`)
+
+```typescript
+const board = createBoard(app, {
+  auth: {
+    cookiePassword: process.env.BOARD_COOKIE_SECRET!,  // min 32 chars
+    authenticate: async ({ username, password }) =>
+      username === "admin" && password === process.env.BOARD_PASSWORD
+        ? { id: "admin" }
+        : null,
+    cookieName: "taskora_board_session",  // optional, shown as default
+    sessionTtl: "7d",                     // optional, shown as default
+  },
+});
+```
+
+**Design goals**: zero new dependencies, works on every adapter (including memory), no Redis session store, no React rebuild for the login page.
+
+**Cookie format**. The session payload is a plain JSON object `{ user, exp }` where `exp` is either a ms-since-epoch absolute expiry or `null` (meaning "no expiry"). The JSON is base64-encoded, then HMAC-SHA256-signed via Hono's built-in `setSignedCookie` helper (Web Crypto under the hood). On read, `getSignedCookie` verifies the signature; if `exp` is a number we double-check `exp > Date.now()`. A signed-but-expired cookie is treated as unauthenticated, not as an error.
+
+**Cookie attributes**: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` set automatically when the request URL is HTTPS. `Max-Age` is set only when `sessionTtl` is a positive Duration — otherwise the cookie is a browser-session cookie (cleared on browser close).
+
+**`sessionTtl` default: disabled.** The library used to default to `"7d"`, but disabling expiry by default matches the "admin dashboard for a small team" use case better — you sign in once and stay signed in until you explicitly log out or close the browser. Callers who need rolling expiry opt in with `sessionTtl: "7d"` (or any Duration). Passing `sessionTtl: false` is the same as omitting it.
+
+**Routes** added when session auth is enabled (all under `basePath`):
+- `GET /login` — server-rendered HTML login page (see `src/board/auth/login-page.ts`). Not a React route — a single template literal with inline CSS. This is deliberate: rebuilding the SPA to add a login screen would have forced every caller to ship a rebuilt `static/` on every auth change.
+- `POST /auth/login` — parses the form body, calls `authenticate`, sets the cookie, and redirects. Open-redirect-safe: `redirect` query param must start with `basePath` and contain no `//` or `\\`, otherwise it falls back to `basePath`.
+- `POST /auth/logout` — clears the cookie and redirects to `/login`.
+
+**Guard middleware** (`createAuthGuard`) has two modes because the API and the SPA handler need different failure responses:
+- `"api"` mode (installed on the API router, scoped to `/api/*`) → `401 {"error":"Unauthorized"}`
+- `"html"` mode (wraps the static handler) → `302 -> /board/login?redirect=<path>`
+
+Both modes share `readSession`. Auth routes (`/login`, `/auth/login`, `/auth/logout`) are excluded by path so the middleware cannot cause an infinite redirect.
+
+**Mount order** inside `createBoard`:
+1. Auth routes (unguarded)
+2. API sub-app (installs its own API-mode guard on `/api/*`)
+3. Static handler (wrapped with the HTML-mode guard)
+
+The API guard is scoped to `/api/*` — not `/*` — so an unauthenticated `GET /board/` request is not short-circuited inside the API sub-app and correctly falls through to the static handler's HTML guard, which redirects to the login page.
+
+**`cookiePassword` length check**: `createBoard` throws synchronously if the secret is shorter than 32 characters. HMAC-SHA256 can accept arbitrary-length keys but short secrets weaken the signing substantially; the explicit check makes this a loud failure instead of silent weakness.
+
+**Why no session store?** Stateless signed cookie keeps the feature dependency-free and adapter-neutral. The cost is that logout only clears the *client* cookie — a cookie that was exfiltrated before logout remains valid until its `exp`. For the "admin dashboard for the team" threat model this is acceptable; callers with stricter requirements can keep using the legacy function hook and plug their session store in themselves.
+
+**Why no CSRF token?** `SameSite=Lax` already blocks cross-site POSTs, and every mutating endpoint is POST/PUT/DELETE. Adding an explicit CSRF token would double the surface area for near-zero real gain under the assumed threat model.
+
+**Why no password hashing / rate limiting / lockout?** The caller's `authenticate` function owns credential verification. The board has no opinion on whether credentials come from an env var, bcrypt-hashed DB rows, LDAP, or an SSO IdP — layering these inside the board would either constrain the user or leak complexity. Documented explicitly as a non-goal.
+
+### Approach B — Legacy function hook (`BoardAuthLegacyFn`)
 
 ```typescript
 const board = createBoard(app, {
@@ -710,12 +765,16 @@ const board = createBoard(app, {
     if (!token || !verify(token)) {
       return new Response("Unauthorized", { status: 401 });
     }
-    // return void/true = allowed
+    // return void = allowed
   },
 });
 ```
 
-The `auth` callback runs before every request (API and static assets). If it returns a `Response`, that response is sent directly (allows custom 401/403 pages). If it returns void/true, the request proceeds.
+Unchanged from the original Phase 18 ship. Runs per-request on `/api/*` only. **Does not guard the SPA HTML or static assets** — the SPA remains publicly downloadable. The assumption is that callers using the legacy form have their own front-door auth (reverse proxy, gateway, framework middleware) and are wiring the function form as an extra per-request check. Preserved exactly to avoid breaking anyone who already shipped JWT integration.
+
+### Discriminated union
+
+`src/board/types.ts` exports an `isBoardAuthConfig(v)` type guard. `BoardOptions.auth` is `BoardAuthLegacyFn | BoardAuthConfig`. Both `createApi` and `createBoard` dispatch on the guard to pick the right code path.
 
 ### Read-only mode
 

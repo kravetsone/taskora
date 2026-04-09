@@ -129,7 +129,67 @@ createBoard(taskora, {
 
 ### Authentication
 
-The `auth` hook runs on every API request. Return `undefined` to allow, or a `Response` to short-circuit:
+The board accepts two `auth` shapes. Pick one; they cannot be combined.
+
+#### Session auth (recommended)
+
+Drop in a single config object and the board mounts a login page, signs a session cookie,
+and guards the entire dashboard — SPA HTML, API, and SSE. Inspired by AdminJS: one provider,
+username + password, nothing else to set up.
+
+```ts
+createBoard(taskora, {
+  auth: {
+    // HMAC signing secret, min 32 chars — generate with:
+    //   openssl rand -base64 48
+    cookiePassword: process.env.BOARD_COOKIE_SECRET!,
+
+    // Called on each login attempt. Return a truthy user object to accept,
+    // or null to reject. Your own code owns credential storage (env, DB, LDAP, …).
+    authenticate: async ({ username, password }) => {
+      if (username === "admin" && password === process.env.BOARD_PASSWORD) {
+        return { id: "admin" }
+      }
+      return null
+    },
+
+    // Optional
+    cookieName: "taskora_board_session",  // default
+    // sessionTtl defaults to `false` — sessions do not expire server-side
+    // and the cookie is a browser-session cookie (cleared on browser close).
+    // Pass a Duration ("30s" | "5m" | "2h" | "1d" | ms number) to opt into rolling expiry.
+    // sessionTtl: "7d",
+  },
+})
+```
+
+What you get:
+- **`GET /board/login`** — server-rendered login form (no SPA rebuild required).
+- **`POST /board/auth/login`** — verifies creds via `authenticate`, sets a signed, `HttpOnly`,
+  `SameSite=Lax` cookie, then redirects.
+- **`POST /board/auth/logout`** — clears the cookie and redirects back to the login page.
+  The sidebar shows a `[ logout ]` button automatically when session auth is enabled.
+- Unauthenticated requests to any SPA path (`/board/*`) are redirected to the login page with
+  a `?redirect=` parameter so users land back where they started.
+- Unauthenticated requests to the JSON API (`/board/api/*`) receive `401 {"error":"Unauthorized"}`.
+
+Security notes:
+- The session cookie is **stateless** — the user object (and optionally an expiry) is
+  HMAC-signed into the cookie itself. No Redis state, works with every adapter. The
+  trade-off: logout only clears the client cookie; a stolen cookie stays valid until its
+  `exp` (or forever, if `sessionTtl` is disabled). Set `sessionTtl` to a tight Duration if
+  that matters to you.
+- `SameSite=Lax` + `HttpOnly` defeats cross-site POST and prevents JS access. No separate CSRF
+  token is required.
+- The `Secure` flag is set automatically when the request reaches the board over HTTPS.
+- Password hashing, rate limiting, and lockout live inside your `authenticate` function — the
+  board has no opinion about how credentials are stored.
+
+#### Custom auth hook
+
+If you already ship JWT, OAuth, or your framework's own session middleware, pass a function
+instead. It runs on every `/board/api/*` request. Return `undefined` to allow, or a `Response`
+to short-circuit:
 
 ```ts
 createBoard(taskora, {
@@ -143,7 +203,12 @@ createBoard(taskora, {
 })
 ```
 
-Combine with your framework's own session middleware for a unified auth flow. For public demos or local dev, pair `readOnly: true` with no auth.
+The function form guards **only the API** — the SPA HTML and static assets stay public, so
+your own front door (reverse proxy, gateway, framework middleware) is expected to enforce
+access to the dashboard shell. This matches the pre-session-auth behavior and is preserved
+for backward compatibility.
+
+For public demos or local dev, pair `readOnly: true` with no auth.
 
 ### Field redaction
 

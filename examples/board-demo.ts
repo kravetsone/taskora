@@ -5,6 +5,7 @@
  *   1. Start Redis:  docker run -d -p 6379:6379 redis:7-alpine
  *   2. Run this:     bun run examples/board-demo.ts
  *   3. Open:         http://localhost:4000/board/
+ *   4. Sign in:      admin / demo
  */
 
 import { createBoard } from "../src/board/index.js";
@@ -180,12 +181,29 @@ app.schedule("sync-every-30m", {
 // Board
 // ══════════════════════════════════════════════════════════════════
 
+// Demo credentials — username "admin", password "demo".
+// In production, read these from env vars and store the cookie secret in a
+// secret manager. `openssl rand -base64 48` is a good source for cookiePassword.
+const DEMO_USERNAME = "admin";
+const DEMO_PASSWORD = "demo";
+const DEMO_COOKIE_SECRET =
+  process.env.BOARD_COOKIE_SECRET ?? "demo-demo-demo-demo-demo-demo-demo-demo-demo-demo";
+
 const board = createBoard(app, {
   basePath: "/board",
   title: "taskora demo",
   theme: "auto",
   redact: ["password", "secret", "token"],
   refreshInterval: 2000,
+  auth: {
+    cookiePassword: DEMO_COOKIE_SECRET,
+    authenticate: async ({ username, password }) => {
+      if (username === DEMO_USERNAME && password === DEMO_PASSWORD) {
+        return { id: "admin", name: "Demo admin" };
+      }
+      return null;
+    },
+  },
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -199,6 +217,7 @@ Bun.serve({ port: 4000, fetch: board.fetch });
 console.log("");
 console.log("  taskora board demo running!");
 console.log("  Board:  http://localhost:4000/board/");
+console.log(`  Login:  ${DEMO_USERNAME} / ${DEMO_PASSWORD}`);
 console.log("");
 
 // ══════════════════════════════════════════════════════════════════

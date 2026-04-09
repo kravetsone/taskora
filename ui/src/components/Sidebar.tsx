@@ -9,7 +9,22 @@ const links = [
   { to: "/dlq", label: "DLQ", icon: "!" },
 ];
 
-export function Sidebar({ title }: { title: string }) {
+function boardBasePath(): string {
+  const segments = window.location.pathname.split("/").filter(Boolean);
+  return segments.length > 0 ? `/${segments[0]}` : "";
+}
+
+async function handleLogout() {
+  const base = boardBasePath();
+  try {
+    await fetch(`${base}/auth/logout`, { method: "POST", credentials: "same-origin" });
+  } catch {
+    /* ignore — still redirect */
+  }
+  window.location.href = `${base}/login`;
+}
+
+export function Sidebar({ title, authEnabled }: { title: string; authEnabled: boolean }) {
   return (
     <aside className="w-52 shrink-0 border-r border-board-border bg-board-surface flex flex-col h-screen sticky top-0">
       <div className="p-4 border-b border-board-border">
@@ -35,8 +50,17 @@ export function Sidebar({ title }: { title: string }) {
           </NavLink>
         ))}
       </nav>
-      <div className="p-3 border-t border-board-border text-[10px] text-board-muted">
-        taskora board
+      <div className="p-3 border-t border-board-border text-[10px] text-board-muted flex items-center justify-between">
+        <span>taskora board</span>
+        {authEnabled && (
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="font-mono text-board-muted hover:text-board-text transition-colors"
+          >
+            [ logout ]
+          </button>
+        )}
       </div>
     </aside>
   );

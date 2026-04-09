@@ -1,11 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import type { App } from "../app.js";
 import { createApi } from "./api.js";
-import type { Board, BoardOptions } from "./types.js";
+import { createAuthGuard } from "./auth/guard.js";
+import { createAuthRoutes } from "./auth/routes.js";
+import { type Board, type BoardOptions, isBoardAuthConfig } from "./types.js";
 
-export type { Board, BoardOptions } from "./types.js";
+export type {
+  Board,
+  BoardAuthConfig,
+  BoardAuthLegacyFn,
+  BoardAuthUser,
+  BoardOptions,
+} from "./types.js";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -35,18 +43,29 @@ function findStaticDir(): string | null {
 
 export function createBoard(app: App, options: BoardOptions = {}): Board {
   const basePath = options.basePath ?? "/board";
+  const authCfg = isBoardAuthConfig(options.auth) ? options.auth : null;
+
+  if (authCfg && authCfg.cookiePassword.length < 32) {
+    throw new Error("board.auth.cookiePassword must be at least 32 characters");
+  }
+
   const root = new Hono();
-  const api = createApi(app, options);
+  const api = createApi(app, options, basePath);
   const staticDir = findStaticDir();
 
-  // Mount API under basePath
+  // 1. Auth routes (unguarded) — registered before API so /login and /auth/* win routing
+  if (authCfg) {
+    root.route(basePath, createAuthRoutes(authCfg, options, basePath));
+  }
+
+  // 2. API (its own guard is installed inside createApi)
   root.route(basePath, api);
 
   // Serve static files
   if (staticDir) {
     const indexHtml = readFileSync(join(staticDir, "index.html"), "utf-8");
 
-    root.get(`${basePath}/*`, (c, next) => {
+    const staticHandler: MiddlewareHandler = async (c, next) => {
       // Skip API routes — let Hono's API handler respond
       const url = new URL(c.req.url);
       const relative = url.pathname.slice(basePath.length);
@@ -77,7 +96,14 @@ export function createBoard(app: App, options: BoardOptions = {}): Board {
       return new Response(indexHtml, {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
-    });
+    };
+
+    if (authCfg) {
+      const guard = createAuthGuard(authCfg, basePath, "html");
+      root.get(`${basePath}/*`, guard, staticHandler);
+    } else {
+      root.get(`${basePath}/*`, staticHandler);
+    }
   }
 
   const honoFetch = root.fetch.bind(root);
