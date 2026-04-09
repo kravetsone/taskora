@@ -22,7 +22,7 @@ beforeAll(() => {
     mkdirSync(staticDir, { recursive: true });
     writeFileSync(
       indexHtml,
-      "<!doctype html><html><head><title>taskora board (test stub)</title></head><body><div id=\"root\"></div></body></html>",
+      '<!doctype html><html><head><title>taskora board (test stub)</title></head><body><div id="root"></div></body></html>',
     );
   }
 });
