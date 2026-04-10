@@ -29,21 +29,26 @@ jobs:
 
             - id: changelog
               name: Generate changelog
-              run: bun scripts/generate-changelog.ts
+              # Script uses `npm pkg get version` which reads cwd package.json —
+              # run from packages/taskora so it picks up the published package version.
+              run: bun ../../scripts/generate-changelog.ts
+              working-directory: packages/taskora
 
             - name: Install modules
               run: bun install
 
             - name: Build package
-              # pkgroll emits dist/ — required by `bun publish` because package.json
-              # "files" points at dist. Without this step the published tarball is
-              # ~13KB (README + LICENSE + package.json only) and every import fails.
-              # JSR publishes from src/ via deno.json, so it's unaffected either way,
-              # but npm absolutely needs this.
+              # pkgroll emits dist/ inside packages/taskora — required by
+              # `bun publish` because package.json "files" points at dist. Without
+              # this step the published tarball is ~13KB (README + LICENSE +
+              # package.json only) and every import fails. JSR publishes from
+              # src/ via deno.json, so it's unaffected either way, but npm
+              # absolutely needs this.
               #
               # MUST run before build:ui: the `prebuild` hook does `rm -rf dist`,
               # so any UI assets staged into dist/ before this step would be wiped.
               run: bun run build
+              working-directory: packages/taskora
 
             - name: Install board UI dependencies
               # ui/ is a standalone bun project, not a workspace — root `bun install`
@@ -52,29 +57,34 @@ jobs:
               working-directory: ui
 
             - name: Build board UI
-              # Builds the React SPA into src/board/static/ (see ui/vite.config.ts).
-              # That directory is git-ignored and does NOT exist in the src checkout,
-              # which means without this step `dist/board/static/` is empty in the
-              # published tarball and `createBoard()` serves a blank /board route in
-              # every consumer that installs taskora from npm.
+              # Builds the React SPA into packages/taskora/src/board/static/
+              # (see ui/vite.config.ts). That directory is git-ignored and does
+              # NOT exist in the src checkout, which means without this step
+              # `dist/board/static/` is empty in the published tarball and
+              # `createBoard()` serves a blank /board route in every consumer
+              # that installs taskora from npm.
               run: bun run build:ui
 
             - name: Stage board SPA into dist
-              # package.json `files` only ships `dist/`, so the freshly-built SPA has
-              # to be copied out of src/ into dist/ before `bun publish` packs the
-              # tarball. findStaticDir() in src/board/index.ts looks for
+              # package.json `files` only ships `dist/`, so the freshly-built SPA
+              # has to be copied out of src/ into dist/ before `bun publish` packs
+              # the tarball. findStaticDir() in src/board/index.ts looks for
               # `<import.meta.dir>/static` first, which resolves to
               # `node_modules/taskora/dist/board/static` at runtime.
               run: mkdir -p dist/board/static && cp -R src/board/static/. dist/board/static/
+              working-directory: packages/taskora
 
             - name: Prepare to JSR publish
-              run: bun scripts/prepare-jsr.ts
+              run: bun ../../scripts/prepare-jsr.ts
+              working-directory: packages/taskora
 
             - name: Publish package to JSR
               run: bunx jsr publish --allow-dirty --allow-slow-types
+              working-directory: packages/taskora
 
             - name: Publish package to NPM
               run: bun publish --access public
+              working-directory: packages/taskora
               env:
                   NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
 

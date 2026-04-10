@@ -8,10 +8,9 @@
  *   4. Sign in:      admin / demo
  */
 
-import { createBoard } from "../src/board/index.js";
-import { createTaskora } from "../src/index.js";
-import { redisAdapter } from "../src/redis/index.js";
-import { chain, chord, group } from "../src/workflow/index.js";
+import { chain, chord, createTaskora, group } from "taskora";
+import { createBoard } from "taskora/board";
+import { redisAdapter } from "taskora/redis";
 
 const app = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),

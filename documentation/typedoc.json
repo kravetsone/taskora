@@ -1,10 +1,10 @@
 {
   "$schema": "https://typedoc.org/schema.json",
   "entryPoints": [
-    "../dist/index.d.mts",
-    "../dist/redis/index.d.mts",
-    "../dist/memory/index.d.mts",
-    "../dist/test/index.d.mts"
+    "../packages/taskora/dist/index.d.mts",
+    "../packages/taskora/dist/redis/index.d.mts",
+    "../packages/taskora/dist/memory/index.d.mts",
+    "../packages/taskora/dist/test/index.d.mts"
   ],
   "entryPointStrategy": "resolve",
   "tsconfig": "tsconfig.typedoc.json",

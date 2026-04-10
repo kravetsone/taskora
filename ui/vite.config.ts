@@ -11,7 +11,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "../src/board/static",
+    outDir: "../packages/taskora/src/board/static",
     emptyOutDir: true,
   },
   server: {

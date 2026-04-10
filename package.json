@@ -1,0 +1,23 @@
+{
+  "name": "taskora-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "build:ui": "cd ui && bun run build",
+    "test": "bun run --filter '*' test",
+    "test:node": "bun run --filter '*' test:node",
+    "test:node:unit": "bun run --filter '*' test:node:unit",
+    "test:node:integration": "bun run --filter '*' test:node:integration",
+    "test:bun": "bun run --filter '*' test:bun",
+    "test:bun:ioredis": "bun run --filter '*' test:bun:ioredis",
+    "test:deno": "bun run --filter '*' test:deno",
+    "test:all": "bun run --filter '*' test:all",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4"
+  }
+}

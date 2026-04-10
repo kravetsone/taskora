@@ -6,8 +6,8 @@
     "strict": true,
     "jsx": "preserve",
     "paths": {
-      "taskora": ["../src/index.ts"],
-      "taskora/*": ["../src/*/index.ts"]
+      "taskora": ["../packages/taskora/src/index.ts"],
+      "taskora/*": ["../packages/taskora/src/*/index.ts"]
     }
   },
   "include": [".vitepress/**/*.ts", ".vitepress/**/*.vue"]

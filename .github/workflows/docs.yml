@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - "documentation/**"
-      - "src/**"
+      - "packages/taskora/src/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -33,7 +33,7 @@ jobs:
       - name: Install root deps & build library
         run: |
           bun install
-          bun run build
+          bun run --filter taskora build
 
       - name: Install docs deps
         run: bun install

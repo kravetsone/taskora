@@ -32,6 +32,7 @@ jobs:
         run: bunx biome check .
       - name: Build
         run: bunx pkgroll
+        working-directory: packages/taskora
 
   test:
     name: ${{ matrix.name }}
@@ -82,6 +83,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Run integration suite
+        working-directory: packages/taskora
         run: |
           case "${{ matrix.runtime }}" in
             node)
