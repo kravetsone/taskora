@@ -1,0 +1,64 @@
+{
+  "name": "@taskora/nestjs",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "NestJS integration for taskora — DI-first module, decorators, and consumer discovery.",
+  "author": "kravetsone",
+  "license": "MIT",
+  "homepage": "https://kravetsone.github.io/taskora",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kravetsone/taskora.git",
+    "directory": "packages/nestjs"
+  },
+  "bugs": {
+    "url": "https://github.com/kravetsone/taskora/issues"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "LICENSE"],
+  "peerDependencies": {
+    "@nestjs/common": ">=10",
+    "@nestjs/core": ">=10",
+    "reflect-metadata": ">=0.2",
+    "rxjs": ">=7",
+    "taskora": ">=0.3.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^10.4.0",
+    "@nestjs/core": "^10.4.0",
+    "@nestjs/testing": "^10.4.0",
+    "pkgroll": "^2.5.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "taskora": "workspace:*",
+    "typescript": "^5.7.2",
+    "vitest": "^3.1.1"
+  },
+  "scripts": {
+    "prebuild": "rm -rf dist",
+    "build": "pkgroll",
+    "test": "vitest",
+    "test:node": "vitest run",
+    "test:node:unit": "vitest run"
+  },
+  "keywords": [
+    "taskora",
+    "nestjs",
+    "nest",
+    "queue",
+    "jobs",
+    "background-jobs",
+    "typescript",
+    "decorator",
+    "dependency-injection"
+  ]
+}

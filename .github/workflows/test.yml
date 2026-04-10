@@ -31,8 +31,13 @@ jobs:
       - name: Lint
         run: bunx biome check .
       - name: Build
-        run: bunx pkgroll
-        working-directory: packages/taskora
+        run: bun run --filter '*' build
+      - name: Test @taskora/nestjs
+        # Fast Node-only suite — no Redis, no Docker. The cross-runtime matrix
+        # below stays focused on the core package which has the testcontainers
+        # dependency; adding @taskora/nestjs there would pay matrix cost for
+        # nothing.
+        run: bun run --filter @taskora/nestjs test:node
 
   test:
     name: ${{ matrix.name }}
