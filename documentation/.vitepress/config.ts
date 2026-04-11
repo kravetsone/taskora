@@ -92,6 +92,7 @@ export default defineConfig({
       { text: "Features", link: "/features/retry-backoff" },
       { text: "Operations", link: "/operations/inspector" },
       { text: "Testing", link: "/testing/" },
+      { text: "Integrations", link: "/integrations/nestjs/" },
       { text: "Recipes", link: "/recipes/email-queue" },
       { text: "API", link: "/api/" },
     ],
@@ -189,6 +190,26 @@ export default defineConfig({
             { text: "Virtual Time", link: "/testing/virtual-time" },
             { text: "Patterns", link: "/testing/patterns" },
             { text: "Cross-runtime CI", link: "/testing/cross-runtime" },
+          ],
+        },
+      ],
+
+      "/integrations/": [
+        {
+          text: "NestJS",
+          items: [
+            { text: "Overview", link: "/integrations/nestjs/" },
+            { text: "File Layout", link: "/integrations/nestjs/file-layout" },
+            { text: "Dispatching", link: "/integrations/nestjs/dispatching" },
+            { text: "Consumers", link: "/integrations/nestjs/consumers" },
+            { text: "Middleware", link: "/integrations/nestjs/middleware" },
+            {
+              text: "Observability",
+              link: "/integrations/nestjs/observability",
+            },
+            { text: "Admin Dashboard", link: "/integrations/nestjs/board" },
+            { text: "Testing", link: "/integrations/nestjs/testing" },
+            { text: "Deployment", link: "/integrations/nestjs/deployment" },
           ],
         },
       ],
