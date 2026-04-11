@@ -1,8 +1,12 @@
 {
-  "name": "@kravets/taskora-board",
+  "name": "@taskora/board",
   "version": "0.1.0",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "imports": {
+    "taskora": "jsr:@taskora/core@^0.4.0",
+    "taskora/": "jsr:@taskora/core@^0.4.0/"
   },
   "publish": {
     "include": ["deno.json", "src", "static", "README.md", "LICENSE"]

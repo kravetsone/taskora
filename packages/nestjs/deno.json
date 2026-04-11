@@ -1,0 +1,17 @@
+{
+  "name": "@taskora/nestjs",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "imports": {
+    "taskora": "jsr:@taskora/core@^0.4.0",
+    "taskora/": "jsr:@taskora/core@^0.4.0/",
+    "@taskora/board": "jsr:@taskora/board@^0.1.0"
+  },
+  "publish": {
+    "include": ["deno.json", "src", "README.md", "LICENSE"]
+  },
+  "nodeModulesDir": "auto"
+}

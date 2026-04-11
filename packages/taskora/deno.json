@@ -1,9 +1,12 @@
 {
-  "name": "@kravets/taskora",
+  "name": "@taskora/core",
   "version": "0.4.0",
   "exports": {
     ".": "./src/index.ts",
-    "./redis": "./src/redis/index.ts"
+    "./redis": "./src/redis/index.ts",
+    "./redis/ioredis": "./src/redis/ioredis.ts",
+    "./memory": "./src/memory/index.ts",
+    "./test": "./src/test/index.ts"
   },
   "publish": {
     "include": ["deno.json", "src", "README.md", "LICENSE"]

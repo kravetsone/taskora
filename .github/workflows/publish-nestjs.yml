@@ -57,6 +57,24 @@ jobs:
         run: bun run build
         working-directory: packages/nestjs
 
+      - name: Prepare JSR manifest
+        # Copies the package.json version into packages/nestjs/deno.json so
+        # the JSR publish ships under the same version as npm. The script
+        # only touches the `version` field — slug (`@taskora/nestjs`) stays
+        # as checked in.
+        run: bun ../../scripts/prepare-jsr.ts
+        working-directory: packages/nestjs
+
+      - name: Publish to JSR
+        # --allow-slow-types: @taskora/nestjs uses generic decorator types
+        # (InferBoundTask, TaskoraRef.for<I, O>) that JSR's type analyser
+        # flags as "slow types" because it can't fully resolve them. Real
+        # consumers get full type inference via tsc or swc; JSR just
+        # publishes the source and skips its own type materialisation.
+        # --allow-dirty: the prepare step rewrote deno.json on disk.
+        run: bunx jsr publish --allow-dirty --allow-slow-types
+        working-directory: packages/nestjs
+
       - name: Publish to NPM
         # bun publish auto-resolves `workspace:*` devDeps to concrete
         # versions at pack time, so the published tarball carries real
