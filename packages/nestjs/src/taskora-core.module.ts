@@ -6,7 +6,14 @@ import type {
   TaskoraModuleOptionsFactory,
 } from "./interfaces/module-options.js";
 import { TaskoraLifecycle } from "./lifecycle.js";
-import { DEFAULT_APP_NAME, getAppToken, getLifecycleToken, getOptionsToken } from "./tokens.js";
+import { TaskoraRef } from "./taskora-ref.js";
+import {
+  DEFAULT_APP_NAME,
+  getAppToken,
+  getLifecycleToken,
+  getOptionsToken,
+  getTaskoraRefToken,
+} from "./tokens.js";
 
 @Global()
 @Module({})
@@ -15,24 +22,21 @@ export class TaskoraCoreModule {
     const name = options.name ?? DEFAULT_APP_NAME;
     const autoStart = options.autoStart ?? true;
     const appToken = getAppToken(name);
-    const lifecycleToken = getLifecycleToken(name);
 
     const appProvider: Provider = {
       provide: appToken,
       useFactory: (): App => createTaskora(stripNestFields(options)),
     };
 
-    const lifecycleProvider: Provider = {
-      provide: lifecycleToken,
-      useFactory: (app: App) => new TaskoraLifecycle(app, autoStart),
-      inject: [appToken],
-    };
-
     return {
       module: TaskoraCoreModule,
       global: true,
-      providers: [appProvider, lifecycleProvider],
-      exports: [appProvider],
+      providers: [
+        appProvider,
+        createLifecycleProvider(name, autoStart, appToken),
+        createTaskoraRefProvider(name, appToken),
+      ],
+      exports: [appProvider, ...taskoraRefExports(name)],
     };
   }
 
@@ -41,7 +45,6 @@ export class TaskoraCoreModule {
     const autoStart = asyncOptions.autoStart ?? true;
     const appToken = getAppToken(name);
     const optionsToken = getOptionsToken(name);
-    const lifecycleToken = getLifecycleToken(name);
 
     const asyncProviders = createAsyncOptionsProviders(asyncOptions, optionsToken);
 
@@ -51,20 +54,43 @@ export class TaskoraCoreModule {
       inject: [optionsToken],
     };
 
-    const lifecycleProvider: Provider = {
-      provide: lifecycleToken,
-      useFactory: (app: App) => new TaskoraLifecycle(app, autoStart),
-      inject: [appToken],
-    };
-
     return {
       module: TaskoraCoreModule,
       global: true,
       imports: asyncOptions.imports ?? [],
-      providers: [...asyncProviders, appProvider, lifecycleProvider],
-      exports: [appProvider],
+      providers: [
+        ...asyncProviders,
+        appProvider,
+        createLifecycleProvider(name, autoStart, appToken),
+        createTaskoraRefProvider(name, appToken),
+      ],
+      exports: [appProvider, ...taskoraRefExports(name)],
     };
   }
+}
+
+function createLifecycleProvider(name: string, autoStart: boolean, appToken: string): Provider {
+  return {
+    provide: getLifecycleToken(name),
+    useFactory: (app: App) => new TaskoraLifecycle(app, autoStart),
+    inject: [appToken],
+  };
+}
+
+function createTaskoraRefProvider(name: string, appToken: string): Provider {
+  // Default slot is provided via the TaskoraRef class token so callers can
+  // write `constructor(private tasks: TaskoraRef) {}` with no decorator.
+  // Named slots use string tokens resolved by `@InjectTaskoraRef('name')`.
+  const provide = name === DEFAULT_APP_NAME ? TaskoraRef : getTaskoraRefToken(name);
+  return {
+    provide,
+    useFactory: (app: App) => new TaskoraRef(app),
+    inject: [appToken],
+  };
+}
+
+function taskoraRefExports(name: string): (typeof TaskoraRef | string)[] {
+  return [name === DEFAULT_APP_NAME ? TaskoraRef : getTaskoraRefToken(name)];
 }
 
 function stripNestFields(options: TaskoraModuleOptions): TaskoraOptions {
