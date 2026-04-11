@@ -194,6 +194,58 @@ sendEmail.dispatch(data, { skipValidation: true })
 - The producer uses `staticContract()` and has no schema to run.
 - You're profiling and have measured validation cost as a bottleneck.
 
+## Type inference helpers — `InferInput` / `InferOutput`
+
+Contracts (and tasks, and bound tasks) carry `TInput` / `TOutput` as generic parameters. Pulling those out by hand means typing out `ThingType<infer I, any> ? I : never` every time. `taskora` ships two helpers that do it for you — and they work on everything that carries a task input or output.
+
+```ts
+import { defineTask, type InferInput, type InferOutput } from "taskora"
+import { z } from "zod"
+
+export const sendEmailTask = defineTask({
+  name: "send-email",
+  input: z.object({ to: z.string(), subject: z.string() }),
+  output: z.object({ messageId: z.string() }),
+})
+
+type EmailInput = InferInput<typeof sendEmailTask>
+// { to: string; subject: string }
+
+type EmailResult = InferOutput<typeof sendEmailTask>
+// { messageId: string }
+```
+
+One helper, every carrier. `InferInput` / `InferOutput` work on:
+
+- `TaskContract<I, O>` — from `defineTask()` / `staticContract()`
+- `Task<I, O>` — from `taskora.task()`
+- `BoundTask<I, O>` — from `taskora.register()` / `taskora.implement()`
+- `ResultHandle<O>` — output only; `InferInput` resolves to `never`
+- `WorkflowHandle<O>` — output only
+- `Signature` / `ChainSignature` / `GroupSignature` / `ChordSignature` — workflow building blocks. Groups and chords resolve to `never` under `InferInput` since they have no single input type.
+
+```ts
+// Reuse the inferred type in a request handler — no duplication.
+app.post("/email", async (req, res) => {
+  const payload: InferInput<typeof sendEmailTask> = req.body
+  const handle = sendEmailTask.dispatch(payload)
+  res.json({ jobId: await handle })
+})
+```
+
+### Avoiding name collisions with other libraries
+
+`InferInput` / `InferOutput` are common names — Zod, ArkType, and other schema libraries export their own versions. If you've already imported `InferInput` from somewhere else, reach for the namespaced form:
+
+```ts
+import type { Taskora } from "taskora"
+
+type EmailInput = Taskora.InferInput<typeof sendEmailTask>
+type EmailResult = Taskora.InferOutput<typeof sendEmailTask>
+```
+
+The namespace form resolves to the same types — no functional difference, just a safer import when you're working in a project that already owns the unqualified names.
+
 ## When to pick which declaration style
 
 | | Inline `taskora.task()` | Contract-based |

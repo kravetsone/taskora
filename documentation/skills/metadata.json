@@ -1,7 +1,7 @@
 {
-	"version": "0.5.0",
+	"version": "0.5.1",
 	"organization": "Taskora",
-	"date": "09 Apr 2026",
+	"date": "11 Apr 2026",
 	"abstract": "Build distributed task queues with taskora — a TypeScript-first, Redis-backed task queue library for Node.js with type-safe workflows (chain/group/chord), producer/consumer split via task contracts, scheduling, retry/backoff, schema validation, flow control, cancellation, and a full admin dashboard.",
 	"references": ["https://kravetsone.github.io/taskora/llms.txt"]
 }

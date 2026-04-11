@@ -65,6 +65,22 @@ const processOrderTask = taskora.task("process-order", {
 
 Schema validation runs **after** migrations (if versioned) and provides clear `ValidationError` with an `issues` array on failure.
 
+### Reusing the inferred types
+
+Reach for `InferInput` / `InferOutput` when you need the types outside the handler — in a controller, a test factory, a shared DTO, anywhere:
+
+```ts
+import type { InferInput, InferOutput } from "taskora"
+
+type OrderPayload = InferInput<typeof processOrderTask>
+// { orderId: string; items: { sku: string; quantity: number }[] }
+
+type OrderResult = InferOutput<typeof processOrderTask>
+// { total: number; status: "confirmed" | "pending" }
+```
+
+They also work on `BoundTask` (from contracts), `ResultHandle`, `WorkflowHandle`, and workflow `Signature`s. Collisions with a schema library that also ships `InferInput`? Use the namespaced form — `Taskora.InferInput<typeof processOrderTask>` — see [Contracts → Type inference helpers](/guide/contracts#type-inference-helpers-inferinput-inferoutput) for the full list of supported carriers.
+
 ## Task Options Reference
 
 | Option | Type | Default | Description |

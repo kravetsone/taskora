@@ -1579,9 +1579,13 @@ namespace Taskora {
   interface RawJob { ... }              // internal job representation
   type JobState = "waiting" | "delayed" | "active" | "completed" | "failed" | "retrying"
 
-  // Schema
-  type InferInput<S> = ...              // extract input type from schema
-  type InferOutput<S> = ...             // extract output type from schema
+  // Type helpers — extract TInput/TOutput from Task/BoundTask/TaskContract,
+  // workflow Signatures, ResultHandle, WorkflowHandle. Also exported at the
+  // top level as `InferInput` / `InferOutput`; the namespaced form is there
+  // so users can sidestep collisions with libraries that export the same
+  // unqualified names (e.g. Zod).
+  type InferInput<T> = ...
+  type InferOutput<T> = ...
 
   // Scheduling
   interface ScheduleConfig { ... }
@@ -1724,6 +1728,52 @@ import {
 import type { Taskora } from "taskora"
 type Foo = Taskora.TaskContract<{ a: number }, { b: string }>
 ```
+
+### Type inference helpers — `InferInput` / `InferOutput`
+
+Pull `TInput` / `TOutput` out of anything that carries them — `Task`,
+`BoundTask`, `TaskContract`, workflow `Signature` (+ `chain`/`group`/`chord`
+variants), `ResultHandle`, and `WorkflowHandle`. One helper, every carrier.
+
+```ts
+import { defineTask, chain, type InferInput, type InferOutput } from "taskora"
+import { z } from "zod"
+
+const sendEmailTask = defineTask({
+  name: "send-email",
+  input: z.object({ to: z.string(), subject: z.string() }),
+  output: z.object({ messageId: z.string() }),
+})
+
+type EmailInput = InferInput<typeof sendEmailTask>
+// { to: string; subject: string }
+
+type EmailResult = InferOutput<typeof sendEmailTask>
+// { messageId: string }
+
+// Also works on the ResultHandle you get back from `.dispatch()`.
+const handle = sendEmailTask.dispatch({ to: "a@b.c", subject: "hi" })
+type SameResult = InferOutput<typeof handle> // { messageId: string }
+
+// And on workflow compositions — the chained output is what matters.
+type Pipeline = InferOutput<ReturnType<typeof chain<...>>>
+```
+
+Also namespaced as `Taskora.InferInput<T>` / `Taskora.InferOutput<T>` for
+projects that already import another library using the unqualified names
+(Zod, ArkType, etc.):
+
+```ts
+import type { Taskora } from "taskora"
+type Input = Taskora.InferInput<typeof sendEmailTask>
+```
+
+Helpers that only carry output (`ResultHandle`, `WorkflowHandle`,
+`GroupSignature`, `ChordSignature`) resolve to `never` under `InferInput` —
+that's a deliberate honest mismatch signal, not a special case.
+
+The old workflow-only `InferOutput` in `src/workflow/signature.ts` is now a
+re-export of the unified helper — existing workflow consumers keep working.
 
 ---
 

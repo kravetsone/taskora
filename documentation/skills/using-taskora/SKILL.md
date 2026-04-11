@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.5.0"
+  version: "0.5.1"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -385,6 +385,39 @@ const createUserTask = taskora.task("create-user", {
 ```
 
 `@standard-schema/spec` is a peer dep (types only). The library never imports Zod/Valibot directly.
+
+### Type inference — `InferInput` / `InferOutput`
+
+Pull `TInput` / `TOutput` out of anything that carries them. One pair of helpers works on every task-shaped type:
+
+```typescript
+import { defineTask, type InferInput, type InferOutput } from "taskora"
+import { z } from "zod"
+
+const sendEmailTask = defineTask({
+  name: "send-email",
+  input: z.object({ to: z.string(), subject: z.string() }),
+  output: z.object({ messageId: z.string() }),
+})
+
+type EmailInput = InferInput<typeof sendEmailTask>
+// { to: string; subject: string }
+
+type EmailResult = InferOutput<typeof sendEmailTask>
+// { messageId: string }
+```
+
+Supported carriers: `Task`, `BoundTask`, `TaskContract`, `ResultHandle`, `WorkflowHandle`, and workflow `Signature` / `ChainSignature` / `GroupSignature` / `ChordSignature`. Output-only types (`ResultHandle`, `WorkflowHandle`, groups, chords) resolve to `never` under `InferInput` — a deliberate mismatch signal.
+
+**Name collisions** with Zod / ArkType / other schema libraries that export `InferInput`? Use the namespaced form:
+
+```typescript
+import type { Taskora } from "taskora"
+type EmailInput = Taskora.InferInput<typeof sendEmailTask>
+type EmailResult = Taskora.InferOutput<typeof sendEmailTask>
+```
+
+Same types, collision-safe import.
 
 ## Schema versioning & migrations
 
