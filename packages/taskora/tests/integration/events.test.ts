@@ -433,3 +433,165 @@ describe("event edge cases", () => {
     await app.close();
   });
 });
+
+// ── Event ordering ──────────────────────────────────────────────────
+//
+// Users rely on a fixed per-job event sequence: every job starts with
+// `active`, can emit `progress` any number of times while running, then
+// terminates with exactly one of `completed`, `failed`, or `cancelled`.
+// A retrying job interleaves `failed` (with willRetry=true) and
+// `retrying` between each attempt's `active`/terminal pair. Without a
+// strict-order guard, a stream subscriber refactor could silently
+// reorder these and break downstream state machines (e.g. progress
+// bars that think a `completed` arrived before any `active`).
+//
+// These tests subscribe to the stream and collect event names in
+// arrival order for a SINGLE job, then match them against the expected
+// sequence. No timing dependence — `waitFor` on the terminal event.
+
+describe("task event ordering", () => {
+  // TODO(progress-ordering): `ctx.progress` is fire-and-forget in the worker
+  // — the setProgress adapter call is kicked off without awaiting, so
+  // progress HSET/XADD can land AFTER the handler's terminal ack XADD. This
+  // breaks strict per-job event ordering. Fix options: (a) await
+  // setProgress inside ctx.progress and make progress sync, (b) track
+  // in-flight progress promises on the worker and await them before ack.
+  // Either way, flip the two `it.fails` tests below to `it` once fixed.
+  it.fails("happy path: active → progress* → completed (progress ordering gap)", async () => {
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const sequence: string[] = [];
+
+    const myTask = app.task("order-happy", async (_data, ctx) => {
+      ctx.progress(25);
+      ctx.progress(50);
+      ctx.progress(100);
+      return "ok";
+    });
+
+    myTask.on("active", () => sequence.push("active"));
+    myTask.on("progress", () => sequence.push("progress"));
+    myTask.on("completed", () => sequence.push("completed"));
+    myTask.on("failed", () => sequence.push("failed"));
+
+    myTask.dispatch({});
+    await app.start();
+
+    await waitFor(() => sequence.includes("completed"));
+    // Allow stragglers to arrive so the assertion sees the real final order.
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Must start with active, end with completed, nothing else in terminal
+    // position, and no stray failed anywhere.
+    expect(sequence[0]).toBe("active");
+    expect(sequence[sequence.length - 1]).toBe("completed");
+    expect(sequence.includes("failed")).toBe(false);
+
+    // Every non-first, non-last event must be a progress.
+    for (let i = 1; i < sequence.length - 1; i++) {
+      expect(sequence[i]).toBe("progress");
+    }
+
+    await app.close();
+  });
+
+  it("permanent failure: active → failed, no retrying", async () => {
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const sequence: Array<{ event: string; willRetry?: boolean }> = [];
+
+    const myTask = app.task("order-fail", async () => {
+      throw new Error("boom");
+    });
+
+    myTask.on("active", () => sequence.push({ event: "active" }));
+    myTask.on("failed", (e) => sequence.push({ event: "failed", willRetry: e.willRetry }));
+    myTask.on("retrying", () => sequence.push({ event: "retrying" }));
+    myTask.on("completed", () => sequence.push({ event: "completed" }));
+
+    myTask.dispatch({});
+    await app.start();
+
+    await waitFor(() => sequence.some((e) => e.event === "failed"));
+
+    // Give any stray late events a chance to arrive so we can assert
+    // their absence.
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(sequence.map((e) => e.event)).toEqual(["active", "failed"]);
+    expect(sequence[1].willRetry).toBe(false);
+
+    await app.close();
+  });
+
+  it("retry then success: active → failed(willRetry) → retrying → active → completed", async () => {
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const sequence: Array<{ event: string; willRetry?: boolean }> = [];
+    let attempts = 0;
+
+    const myTask = app.task("order-retry", {
+      retry: { attempts: 2, delay: 50 },
+      handler: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error("transient");
+        return "ok";
+      },
+    });
+
+    myTask.on("active", () => sequence.push({ event: "active" }));
+    myTask.on("failed", (e) => sequence.push({ event: "failed", willRetry: e.willRetry }));
+    myTask.on("retrying", () => sequence.push({ event: "retrying" }));
+    myTask.on("completed", () => sequence.push({ event: "completed" }));
+
+    myTask.dispatch({});
+    await app.start();
+
+    await waitFor(() => sequence.some((e) => e.event === "completed"));
+
+    // Strict per-attempt ordering. Retrying emission sits between the
+    // first attempt's `failed` and the second attempt's `active`.
+    expect(sequence.map((e) => e.event)).toEqual([
+      "active",
+      "failed",
+      "retrying",
+      "active",
+      "completed",
+    ]);
+    // The first `failed` must carry willRetry=true.
+    expect(sequence[1].willRetry).toBe(true);
+
+    await app.close();
+  });
+
+  it.fails("progress events never arrive after the terminal event", async () => {
+    // Same progress-ordering gap (see TODO above): because setProgress is
+    // fire-and-forget, the XADD for "progress" can land after the XADD for
+    // "completed". A consumer that clears state on terminal would then
+    // receive stale progress events.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const sequence: string[] = [];
+
+    const myTask = app.task("order-progress", async (_data, ctx) => {
+      for (let i = 0; i < 5; i++) {
+        ctx.progress(i * 20);
+      }
+      return "done";
+    });
+
+    myTask.on("active", () => sequence.push("active"));
+    myTask.on("progress", () => sequence.push("progress"));
+    myTask.on("completed", () => sequence.push("completed"));
+
+    myTask.dispatch({});
+    await app.start();
+
+    await waitFor(() => sequence.includes("completed"));
+
+    // Wait a bit after the terminal event to catch any late stragglers.
+    await new Promise((r) => setTimeout(r, 200));
+
+    const terminalIdx = sequence.lastIndexOf("completed");
+    const afterTerminal = sequence.slice(terminalIdx + 1);
+    expect(afterTerminal).toEqual([]);
+
+    await app.close();
+  });
+});
