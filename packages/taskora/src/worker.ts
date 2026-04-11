@@ -207,6 +207,21 @@ export class Worker {
       let handlerResult: unknown;
       let data: unknown;
       let ctx: Taskora.Context | undefined;
+      // In-flight progress/log writes kicked off by the handler via
+      // ctx.progress / ctx.log. They are fire-and-forget from the handler's
+      // perspective (ctx.progress returns void) but the worker MUST await
+      // them before the terminal ack/fail — otherwise the "progress" XADD
+      // can land in the Redis stream after the "completed" XADD, and any
+      // consumer that clears state on the terminal event would then receive
+      // stale progress events. See events.test.ts > "task event ordering".
+      const pendingWrites: Promise<unknown>[] = [];
+      const flushPendingWrites = async () => {
+        if (pendingWrites.length === 0) return;
+        // Snapshot and clear so late writes (which shouldn't happen after
+        // the handler returns, but defensive) don't block a second flush.
+        const snapshot = pendingWrites.splice(0, pendingWrites.length);
+        await Promise.allSettled(snapshot);
+      };
       try {
         data = this.serializer.deserialize(raw.data);
 
@@ -235,10 +250,14 @@ export class Worker {
               .catch(() => {});
           },
           onProgress: (value) => {
-            this.adapter.setProgress(this.task.name, raw.id, value).catch(() => {});
+            pendingWrites.push(
+              this.adapter.setProgress(this.task.name, raw.id, value).catch(() => {}),
+            );
           },
           onLog: (entry) => {
-            this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {});
+            pendingWrites.push(
+              this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {}),
+            );
           },
         });
 
@@ -277,6 +296,7 @@ export class Worker {
       } catch (err) {
         // Check if this was a cancellation
         if (controller.signal.aborted && controller.signal.reason === "cancelled") {
+          await flushPendingWrites();
           await this.handleCancellation(raw.id, token, data, ctx);
           return;
         }
@@ -314,6 +334,7 @@ export class Worker {
           willRetry: !!retryInfo,
         });
 
+        await flushPendingWrites();
         try {
           await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
         } catch {
@@ -330,11 +351,16 @@ export class Worker {
 
       // Check if cancelled while handler was running (handler didn't check signal)
       if (controller.signal.aborted && controller.signal.reason === "cancelled") {
+        await flushPendingWrites();
         await this.handleCancellation(raw.id, token, data, ctx);
         return;
       }
 
-      // Handler succeeded — ack the job
+      // Handler succeeded — ack the job. Drain any fire-and-forget
+      // progress/log writes the handler kicked off so the stream order is
+      // (active → progress* → completed), not (active → completed →
+      // progress*).
+      await flushPendingWrites();
       const serializedResult = this.serializer.serialize(handlerResult);
       try {
         await this.adapter.ack(this.task.name, raw.id, token, serializedResult);

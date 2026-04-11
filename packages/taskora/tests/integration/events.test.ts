@@ -450,14 +450,14 @@ describe("event edge cases", () => {
 // sequence. No timing dependence — `waitFor` on the terminal event.
 
 describe("task event ordering", () => {
-  // TODO(progress-ordering): `ctx.progress` is fire-and-forget in the worker
-  // — the setProgress adapter call is kicked off without awaiting, so
-  // progress HSET/XADD can land AFTER the handler's terminal ack XADD. This
-  // breaks strict per-job event ordering. Fix options: (a) await
-  // setProgress inside ctx.progress and make progress sync, (b) track
-  // in-flight progress promises on the worker and await them before ack.
-  // Either way, flip the two `it.fails` tests below to `it` once fixed.
-  it.fails("happy path: active → progress* → completed (progress ordering gap)", async () => {
+  // Strict per-job event ordering is guaranteed by the Worker: ctx.progress
+  // and ctx.log are fire-and-forget from the handler's perspective, but the
+  // Worker tracks their in-flight promises in a local `pendingWrites` list
+  // and flushes them (Promise.allSettled) before calling adapter.ack /
+  // adapter.fail. Without that flush, progress XADDs could land in the
+  // Redis stream after the terminal XADD — see worker.ts > processJob >
+  // flushPendingWrites.
+  it("happy path: active → progress* → completed", async () => {
     const app = createTaskora({ adapter: redisAdapter(url()) });
     const sequence: string[] = [];
 
@@ -561,11 +561,11 @@ describe("task event ordering", () => {
     await app.close();
   });
 
-  it.fails("progress events never arrive after the terminal event", async () => {
-    // Same progress-ordering gap (see TODO above): because setProgress is
-    // fire-and-forget, the XADD for "progress" can land after the XADD for
-    // "completed". A consumer that clears state on terminal would then
-    // receive stale progress events.
+  it("progress events never arrive after the terminal event", async () => {
+    // Regression guard for the flushPendingWrites ordering contract:
+    // the Worker awaits all in-flight progress/log promises before ack,
+    // so a consumer that clears state on the terminal event will never
+    // see stale progress arrive afterwards.
     const app = createTaskora({ adapter: redisAdapter(url()) });
     const sequence: string[] = [];
 
