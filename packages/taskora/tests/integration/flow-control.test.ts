@@ -231,6 +231,98 @@ describe("throttle", () => {
 
     await app.close();
   });
+
+  // Exactness regression: the sequential "5 one after another with max=3"
+  // case is cheap and the existing test covers it. The interesting cases are
+  // (a) real concurrent burst — all dispatches fire synchronously and race
+  // through the Lua script, and (b) large burst where off-by-one in the Lua
+  // ZCARD/ZADD pair would leak an extra one. Both are easy to regress with
+  // an innocent "let me inline the check" refactor in throttle-enqueue.lua.
+
+  it("concurrent burst — exactly max accepted, rest rejected", async () => {
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("throttle-burst", async () => {});
+
+    // Fire 20 dispatches in parallel with max=5. All Lua script invocations
+    // race against the same `throttle:burst-key` ZSET — only 5 should win.
+    // Without `throwOnReject`, rejection sets `handle.enqueued = false` and
+    // resolves normally, so we inspect the field after awaiting.
+    const handles = Array.from({ length: 20 }, () =>
+      task.dispatch({}, { throttle: { key: "burst-key", max: 5, window: "10s" } }),
+    );
+    await Promise.all(handles.map((h) => h.ensureEnqueued()));
+
+    const accepted = handles.filter((h) => h.enqueued === true).length;
+    const rejected = handles.filter((h) => h.enqueued === false).length;
+    expect(accepted).toBe(5);
+    expect(rejected).toBe(15);
+
+    const waitingCount = await redis.llen("taskora:{throttle-burst}:wait");
+    expect(waitingCount).toBe(5);
+
+    await app.close();
+  });
+
+  it("N+1-th dispatch at the boundary — exactly one rejected", async () => {
+    // Fire max+1 in a tight synchronous loop — all dispatches enter the
+    // adapter layer in the same tick and race through the Lua script. The
+    // contract is "no more than max accepted", not "the LAST one is the one
+    // that loses" — ioredis pipelining + NOSCRIPT-fallback retries make the
+    // Lua-invocation order nondeterministic on a fresh connection. We only
+    // assert the count invariant.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("throttle-boundary", async () => {});
+
+    const max = 3;
+    const handles = Array.from({ length: max + 1 }, () =>
+      task.dispatch({}, { throttle: { key: "edge-key", max, window: "10s" } }),
+    );
+    await Promise.all(handles.map((h) => h.ensureEnqueued()));
+
+    const accepted = handles.filter((h) => h.enqueued === true).length;
+    const rejected = handles.filter((h) => h.enqueued === false).length;
+    expect(accepted).toBe(max);
+    expect(rejected).toBe(1);
+
+    const waitingCount = await redis.llen("taskora:{throttle-boundary}:wait");
+    expect(waitingCount).toBe(max);
+
+    await app.close();
+  });
+
+  it("exactness under sustained burst — no drift across multiple max-sized waves", async () => {
+    // Fill the window exactly to max, then fire another 10. All 10 rejected.
+    // Then wait for the window to fully expire, fire max + 5. Exactly max
+    // accepted, 5 rejected. Catches off-by-one drift between ZREMRANGEBYSCORE
+    // expiry and ZADD entry timestamp.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("throttle-sustained", async () => {});
+
+    const max = 4;
+    const window = 150;
+
+    const wave1 = Array.from({ length: max + 10 }, () =>
+      task.dispatch({}, { throttle: { key: "sustained-key", max, window } }),
+    );
+    await Promise.all(wave1.map((h) => h.ensureEnqueued()));
+    expect(wave1.filter((h) => h.enqueued === true).length).toBe(max);
+
+    // Wait for the window to expire — generous slack so we don't race the
+    // boundary.
+    await new Promise((r) => setTimeout(r, window + 100));
+
+    const wave2 = Array.from({ length: max + 5 }, () =>
+      task.dispatch({}, { throttle: { key: "sustained-key", max, window } }),
+    );
+    await Promise.all(wave2.map((h) => h.ensureEnqueued()));
+    expect(wave2.filter((h) => h.enqueued === true).length).toBe(max);
+
+    // Total enqueued across both waves = 2 * max.
+    const waitingCount = await redis.llen("taskora:{throttle-sustained}:wait");
+    expect(waitingCount).toBe(2 * max);
+
+    await app.close();
+  });
 });
 
 // ── Deduplication ───────────────────────────────────────────────────
