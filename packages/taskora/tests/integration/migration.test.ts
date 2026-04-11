@@ -72,7 +72,7 @@ describe("migration — old version job processes correctly", () => {
       "1",
     );
     await redis.set(`taskora:{email}:${jobId}:data`, JSON.stringify({ to: "alice@test.com" }));
-    await redis.lpush("taskora:{email}:wait", jobId);
+    await redis.zadd("taskora:{email}:wait", "0", jobId);
     // Wake marker
     await redis.zadd("taskora:{email}:marker", "0", "0");
 
@@ -132,7 +132,7 @@ describe("migration — old version job processes correctly", () => {
       "1",
     );
     await redis.set(`taskora:{sparse}:${jobId}:data`, JSON.stringify({ name: "test" }));
-    await redis.lpush("taskora:{sparse}:wait", jobId);
+    await redis.zadd("taskora:{sparse}:wait", "0", jobId);
     await redis.zadd("taskora:{sparse}:marker", "0", "0");
 
     const app = createTaskora({ adapter: redisAdapter(url()) });
@@ -192,7 +192,7 @@ describe("migration — future version nack", () => {
       "1",
     );
     await redis.set(`taskora:{future}:${jobId}:data`, JSON.stringify({ x: 1 }));
-    await redis.lpush("taskora:{future}:wait", jobId);
+    await redis.zadd("taskora:{future}:wait", "0", jobId);
     await redis.zadd("taskora:{future}:marker", "0", "0");
 
     let handlerCalled = false;
@@ -248,7 +248,7 @@ describe("migration — expired version fail", () => {
       "1",
     );
     await redis.set(`taskora:{expired}:${jobId}:data`, JSON.stringify({ x: 1 }));
-    await redis.lpush("taskora:{expired}:wait", jobId);
+    await redis.zadd("taskora:{expired}:wait", "0", jobId);
     await redis.zadd("taskora:{expired}:marker", "0", "0");
 
     const app = createTaskora({ adapter: redisAdapter(url()) });
@@ -319,7 +319,7 @@ describe("inspect().migrations()", () => {
       );
       await redis.set(`taskora:{inspect-test}:${jobId}:data`, JSON.stringify({ x: 1 }));
       if (list === "wait") {
-        await redis.lpush("taskora:{inspect-test}:wait", jobId);
+        await redis.zadd("taskora:{inspect-test}:wait", "0", jobId);
       }
     }
 

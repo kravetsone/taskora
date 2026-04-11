@@ -131,12 +131,16 @@ describe("throttle", () => {
     expect(handles[3].enqueued).toBe(false);
     expect(handles[4].enqueued).toBe(false);
 
-    const waitingCount = await redis.llen("taskora:{throttle-test}:wait");
+    const waitingCount = await redis.zcard("taskora:{throttle-test}:wait");
     expect(waitingCount).toBe(3);
 
     await app.start();
     await waitFor(() => processed.length === 3);
-    expect(processed).toEqual([1, 2, 3]);
+    // This test is about "exactly 3 accepted, rest dropped" — not about
+    // execution order. Same-millisecond dispatches within a priority
+    // band fall back to unspecified order, so we assert set equality,
+    // not array equality.
+    expect(processed.sort()).toEqual([1, 2, 3]);
 
     await app.close();
   });
@@ -257,7 +261,7 @@ describe("throttle", () => {
     expect(accepted).toBe(5);
     expect(rejected).toBe(15);
 
-    const waitingCount = await redis.llen("taskora:{throttle-burst}:wait");
+    const waitingCount = await redis.zcard("taskora:{throttle-burst}:wait");
     expect(waitingCount).toBe(5);
 
     await app.close();
@@ -284,7 +288,7 @@ describe("throttle", () => {
     expect(accepted).toBe(max);
     expect(rejected).toBe(1);
 
-    const waitingCount = await redis.llen("taskora:{throttle-boundary}:wait");
+    const waitingCount = await redis.zcard("taskora:{throttle-boundary}:wait");
     expect(waitingCount).toBe(max);
 
     await app.close();
@@ -318,7 +322,7 @@ describe("throttle", () => {
     expect(wave2.filter((h) => h.enqueued === true).length).toBe(max);
 
     // Total enqueued across both waves = 2 * max.
-    const waitingCount = await redis.llen("taskora:{throttle-sustained}:wait");
+    const waitingCount = await redis.zcard("taskora:{throttle-sustained}:wait");
     expect(waitingCount).toBe(2 * max);
 
     await app.close();
@@ -357,7 +361,7 @@ describe("deduplication", () => {
     expect(h2.existingId).toBe(h1.id);
 
     // Only 1 job in queue
-    const waitingCount = await redis.llen("taskora:{dedup-test}:wait");
+    const waitingCount = await redis.zcard("taskora:{dedup-test}:wait");
     expect(waitingCount).toBe(1);
 
     await app.start();
@@ -538,6 +542,63 @@ describe("deduplication", () => {
     );
     await h2;
     expect(h2.enqueued).toBe(true);
+
+    await app.close();
+  });
+});
+
+// ── Priority ───────────────────────────────────────────────────────
+//
+// End-to-end Redis priority ordering. Before wireVersion=2 the wait list
+// was a plain Redis LIST with LPUSH/RPOP semantics: `priority` in
+// DispatchOptions was stored on the job hash and completely ignored by
+// the dequeue path. Now the wait list is a sorted set keyed by the
+// composite score `-(priority * 1e13) + ts`, so ZPOPMIN yields the
+// highest-priority waiting job first.
+//
+// The ONLY hard guarantee is "higher priority before lower priority".
+// Within a priority band ordering is best-effort — with concurrency > 1,
+// multiple workers pop and finish jobs in parallel, so even a perfectly
+// sorted wait list does not translate into a deterministic execution
+// order. There is no "FIFO within a priority band" contract to test
+// because there is no way to make it true in a multi-worker setup.
+
+describe("priority", () => {
+  it("higher-priority jobs dispatch before lower-priority ones (Redis)", async () => {
+    const processed: number[] = [];
+
+    // concurrency 1 — so a single worker processes jobs one at a time
+    // and the observable order matches the dequeue order. With higher
+    // concurrency this test would be fundamentally non-deterministic
+    // for reasons unrelated to the wait-list ordering.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("priority-basic", {
+      concurrency: 1,
+      handler: async (data: { n: number }) => {
+        processed.push(data.n);
+      },
+    });
+
+    // Enqueue in the worst possible order — lowest priority first, highest
+    // last — to prove the wait-list ordering actually sorts.
+    await Promise.all([
+      task.dispatch({ n: 0 }, { priority: 0 }).ensureEnqueued(),
+      task.dispatch({ n: 5 }, { priority: 5 }).ensureEnqueued(),
+      task.dispatch({ n: 10 }, { priority: 10 }).ensureEnqueued(),
+    ]);
+
+    // The wait list must be a ZSET now — WRONGTYPE if the refactor missed a
+    // path.
+    const waitType = await redis.type("taskora:{priority-basic}:wait");
+    expect(waitType).toBe("zset");
+    const waitCount = await redis.zcard("taskora:{priority-basic}:wait");
+    expect(waitCount).toBe(3);
+
+    await app.start();
+    await waitFor(() => processed.length === 3);
+
+    // Dequeue order: highest priority first, lowest last.
+    expect(processed).toEqual([10, 5, 0]);
 
     await app.close();
   });

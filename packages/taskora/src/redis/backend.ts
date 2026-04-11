@@ -2,7 +2,13 @@ import type { Taskora } from "../types.js";
 import type { RedisDriver } from "./driver.js";
 import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
-import { buildKeys, buildMetaKey, buildScheduleKeys } from "./keys.js";
+import {
+  type MigrationLockPayload,
+  buildKeys,
+  buildMetaKey,
+  buildMigrationKeys,
+  buildScheduleKeys,
+} from "./keys.js";
 import * as scripts from "./scripts.js";
 import * as wfScripts from "./workflow-scripts.js";
 
@@ -43,6 +49,7 @@ const SCRIPT_MAP: Record<string, string> = {
   cancelWorkflow: wfScripts.CANCEL_WORKFLOW,
   cleanJobs: scripts.CLEAN_JOBS,
   handshake: scripts.HANDSHAKE,
+  migrateWaitV1ToV2: scripts.MIGRATE_WAIT_V1_TO_V2,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -96,6 +103,16 @@ export class RedisBackend implements Taskora.Adapter {
   }
 
   async handshake(ours: Taskora.SchemaMeta): Promise<Taskora.SchemaMeta> {
+    // Migration coordination gate. If another process is currently
+    // running a migration targeting a wire version >= ours, we halt
+    // here until it clears. If a more recent migration is in flight
+    // that only targets older versions (targetWireVersion < ours.wireVersion),
+    // we proceed — we already understand whatever format the migrator
+    // is producing. See `buildMigrationKeys` in keys.ts for the
+    // contract that every in-place migration (current and future)
+    // follows.
+    await this.awaitMigrationLock(ours.wireVersion);
+
     const metaKey = buildMetaKey(this.prefix);
     const raw = (await this.eval(
       "handshake",
@@ -107,16 +124,202 @@ export class RedisBackend implements Taskora.Adapter {
       String(ours.writtenAt),
     )) as [string, string, string, string];
 
-    // The Lua script normalizes every slot to a string; core's `checkCompat`
-    // will flag any NaN/out-of-range values as `invalid_meta` so operators
-    // get a clear error instead of a silent zero.
-    return {
+    const stored: Taskora.SchemaMeta = {
       wireVersion: Number(raw[0]),
       minCompat: Number(raw[1]),
       writtenBy: raw[2] || "",
       writtenAt: Number(raw[3]),
     };
+
+    // Auto-migration: if the backend is on wireVersion 1 and we're v2+,
+    // run the in-place wait-list migrator before anything touches the
+    // adapter. Uses the shared migration-lock protocol so a cluster of
+    // v2 instances starting simultaneously doesn't race — exactly one
+    // wins the lock and performs the migration, the losers fall back
+    // through `awaitMigrationLock` and re-handshake (now reading the
+    // freshly-bumped v2 meta, taking the fast path).
+    if (stored.wireVersion === 1 && ours.wireVersion >= 2) {
+      const lockKey = buildMigrationKeys(this.prefix).migrationLock;
+      const payload: MigrationLockPayload = {
+        by: ours.writtenBy,
+        reason: `wireVersion-${stored.wireVersion}-to-${ours.wireVersion}`,
+        startedAt: Date.now(),
+        // Pessimistic: allow up to 5 minutes for the per-key Lua scripts
+        // to process the entire keyspace. TTL below is 2× this, so a
+        // crashed migrator eventually frees the cluster.
+        expectedDurationMs: 5 * 60_000,
+        targetWireVersion: ours.wireVersion,
+      };
+      const ttlMs = 10 * 60_000;
+      const acquired = (await this.driver.command("set", [
+        lockKey,
+        JSON.stringify(payload),
+        "NX",
+        "PX",
+        String(ttlMs),
+      ])) as "OK" | null;
+
+      if (acquired !== "OK") {
+        // Another v2 process beat us to it — wait for its migration to
+        // finish, then re-handshake. The recursion terminates because
+        // after the winner releases the lock, the persisted meta is
+        // v2 and the `stored.wireVersion === 1` branch no longer fires.
+        return this.handshake(ours);
+      }
+
+      try {
+        const migrated = await this.migrateWaitV1ToV2();
+        await this.driver.command("hset", [
+          metaKey,
+          "wireVersion",
+          String(ours.wireVersion),
+          "minCompat",
+          String(ours.minCompat),
+          "writtenBy",
+          ours.writtenBy,
+          "writtenAt",
+          String(ours.writtenAt),
+        ]);
+        // biome-ignore lint/suspicious/noConsole: one-shot operator-visible upgrade signal
+        console.log(
+          `[taskora] migrated ${migrated.keys} :wait list${migrated.keys === 1 ? "" : "s"} (${migrated.jobs} jobs) to wireVersion ${ours.wireVersion}`,
+        );
+      } finally {
+        // Clear the lock + broadcast so any polling process wakes up
+        // immediately instead of waiting for its next interval tick.
+        await this.driver.command("del", [lockKey]);
+        const { migrationChannel } = buildMigrationKeys(this.prefix);
+        try {
+          await this.driver.command("publish", [migrationChannel, "migration:done"]);
+        } catch {
+          // PUBLISH failure is non-fatal — lock DEL is what actually
+          // releases the gate; the broadcast is only a wake-up hint.
+        }
+      }
+      return { ...ours };
+    }
+
+    // The Lua script normalizes every slot to a string; core's `checkCompat`
+    // will flag any NaN/out-of-range values as `invalid_meta` so operators
+    // get a clear error instead of a silent zero.
+    return stored;
   }
+
+  /**
+   * wireVersion 1 → 2 migration: convert every `taskora:*:wait` LIST
+   * into a ZSET keyed by the composite priority/ts score. Safe to run
+   * against a live Redis (atomic per-key via Lua) and idempotent —
+   * already-migrated keys are no-ops. See `scripts.MIGRATE_WAIT_V1_TO_V2`.
+   *
+   * Pacing: uses `SCAN` so the keyspace walk never blocks Redis, and
+   * invokes one Lua script per matched key so the per-key conversion
+   * window is bounded by that single task's wait-list size. Two tasks
+   * are never batched into the same script — a huge task does not
+   * hold Redis hostage while small ones pile up behind it.
+   *
+   * @internal — exposed for tests; production code goes through handshake().
+   */
+  async migrateWaitV1ToV2(): Promise<{ keys: number; jobs: number }> {
+    const pattern = this.prefix ? `taskora:${this.prefix}:{*}:wait` : "taskora:{*}:wait";
+    let cursor = "0";
+    let keys = 0;
+    let jobs = 0;
+
+    do {
+      // SCAN COUNT is a hint, not a cap — Redis returns up to ~COUNT keys
+      // per call but may return fewer. 100 is a good tradeoff between
+      // round-trip count and single-call latency.
+      const result = (await this.driver.command("scan", [
+        cursor,
+        "MATCH",
+        pattern,
+        "COUNT",
+        "100",
+      ])) as [string, string[]];
+      cursor = result[0];
+      const waitKeys = result[1] ?? [];
+
+      for (const waitKey of waitKeys) {
+        // Derive the jobPrefix for this task by stripping the ":wait"
+        // suffix. The script needs it to HMGET each job's priority/ts.
+        const jobPrefix = waitKey.slice(0, -"wait".length);
+        const migrated = (await this.eval("migrateWaitV1ToV2", 1, waitKey, jobPrefix)) as number;
+        if (migrated > 0) {
+          keys += 1;
+          jobs += migrated;
+        }
+      }
+    } while (cursor !== "0");
+
+    return { keys, jobs };
+  }
+
+  /**
+   * Block until the migration lock is absent OR targets a wire version
+   * strictly older than ours (in which case we can continue — we already
+   * understand the format the migrator is producing).
+   *
+   * Polls `taskora:<prefix>:migration:lock` at a fixed interval. Returns
+   * immediately if no lock is set (the common case). If a lock IS set,
+   * parses the JSON payload and respects its `targetWireVersion`:
+   *
+   *   - `ourWireVersion <= payload.targetWireVersion` → halt (keep
+   *     polling until the lock clears or the deadline expires)
+   *   - `ourWireVersion > payload.targetWireVersion`  → proceed (the
+   *     migrator is only touching formats older than ours)
+   *
+   * If the payload is malformed (missing fields, bad JSON), we treat
+   * the lock as "halts everyone" to fail safe. If the deadline expires
+   * we throw with a clear operator-facing message pointing at the key.
+   *
+   * Every in-place taskora migration (starting with v1 → v2) sets this
+   * lock before touching shared keyspace and clears it after. See
+   * `buildMigrationKeys` in keys.ts for the full contract.
+   *
+   * @param ourWireVersion — the caller's own `WIRE_VERSION`
+   * @internal — tests may inject shorter timing via `_migrationPoll`.
+   */
+  private async awaitMigrationLock(ourWireVersion: number): Promise<void> {
+    const { migrationLock } = buildMigrationKeys(this.prefix);
+    const maxWaitMs = this._migrationPoll?.maxWaitMs ?? 30_000;
+    const intervalMs = this._migrationPoll?.intervalMs ?? 500;
+
+    const deadline = Date.now() + maxWaitMs;
+    let first = true;
+    while (Date.now() < deadline) {
+      const raw = (await this.driver.command("get", [migrationLock])) as string | null;
+      if (raw === null) return; // no lock
+
+      // Parse and respect targetWireVersion. Malformed payload → halt
+      // (fail safe: assume the migrator wants everyone out).
+      let targetVersion = Number.POSITIVE_INFINITY;
+      try {
+        const parsed = JSON.parse(raw) as Partial<MigrationLockPayload>;
+        if (typeof parsed.targetWireVersion === "number") {
+          targetVersion = parsed.targetWireVersion;
+        }
+      } catch {
+        // fallthrough — targetVersion stays +Infinity, we halt.
+      }
+
+      if (ourWireVersion > targetVersion) return; // we are past the migration
+
+      if (first) {
+        // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
+        console.log(
+          `[taskora] migration in progress (targetWireVersion=${targetVersion}), waiting for \`${migrationLock}\` to clear…`,
+        );
+        first = false;
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    throw new Error(
+      `taskora: migration lock \`${migrationLock}\` still set after ${maxWaitMs}ms. A previous migration run may have crashed before clearing it. Inspect with \`GET ${migrationLock}\` and delete it manually if the migrator is no longer running.`,
+    );
+  }
+
+  /** @internal — test hook for awaitMigrationLock pacing. */
+  _migrationPoll?: { maxWaitMs?: number; intervalMs?: number };
 
   async enqueue(
     task: string,
@@ -771,7 +974,10 @@ export class RedisBackend implements Taskora.Adapter {
       mode: string;
     }
   > = {
-    waiting: { key: "wait", mode: "lrange" },
+    // Wait list is a ZSET (priority desc, ts asc) — ZRANGE gives
+    // dequeue order directly. Active list is still a LIST with
+    // deterministic client-side (ts, seq) re-sort via the `lrange` mode.
+    waiting: { key: "wait", mode: "wait_zrange" },
     active: { key: "active", mode: "lrange" },
     delayed: { key: "delayed", mode: "zrange" },
     completed: { key: "completed", mode: "zrevrange" },
@@ -854,7 +1060,7 @@ export class RedisBackend implements Taskora.Adapter {
 
     const results = await this.driver
       .pipeline()
-      .add("llen", [keys.wait])
+      .add("zcard", [keys.wait])
       .add("llen", [keys.active])
       .add("zcard", [keys.delayed])
       .add("zcard", [keys.completed])
@@ -886,6 +1092,7 @@ export class RedisBackend implements Taskora.Adapter {
       keys.marker,
       keys.jobPrefix,
       jobId,
+      String(Date.now()),
     );
     return result === 1;
   }
@@ -901,6 +1108,7 @@ export class RedisBackend implements Taskora.Adapter {
       keys.marker,
       keys.jobPrefix,
       String(limit),
+      String(Date.now()),
     );
     return result as number;
   }

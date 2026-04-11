@@ -295,13 +295,10 @@ describe("multi-instance stall recovery", () => {
     await handle;
 
     // Simulate pod-1 crash: manually move job to active without a lock
-    // (as if the worker dequeued it, then the process died and the lock expired)
-    await redis.lmove(
-      "taskora:{stall-cross}:wait",
-      "taskora:{stall-cross}:active",
-      "RIGHT",
-      "LEFT",
-    );
+    // (as if the worker dequeued it, then the process died and the lock
+    // expired). Wait is a ZSET — ZREM the specific id, LPUSH active.
+    await redis.zrem("taskora:{stall-cross}:wait", handle.id);
+    await redis.lpush("taskora:{stall-cross}:active", handle.id);
     await redis.hset(`taskora:{stall-cross}:${handle.id}`, "state", "active");
     // No lock set — simulates expired lock after crash
 

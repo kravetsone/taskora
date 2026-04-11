@@ -246,8 +246,7 @@ export class MemoryBackend implements Taskora.Adapter {
       const otherSeq = other ? Number(other.fields.seq || 0) : 0;
       // Goes before `mid` if: higher priority, or same priority with
       // lower seq. Otherwise it goes after.
-      const goesBeforeMid =
-        newPrio > otherPrio || (newPrio === otherPrio && newSeq < otherSeq);
+      const goesBeforeMid = newPrio > otherPrio || (newPrio === otherPrio && newSeq < otherSeq);
       if (goesBeforeMid) hi = mid;
       else lo = mid + 1;
     }

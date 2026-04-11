@@ -255,9 +255,7 @@ export class Worker {
             );
           },
           onLog: (entry) => {
-            pendingWrites.push(
-              this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {}),
-            );
+            pendingWrites.push(this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {}));
           },
         });
 

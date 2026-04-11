@@ -98,8 +98,19 @@
  * The wire-format version this build of taskora writes and expects to read.
  * Monotonically increasing integer. Bumped whenever the layout listed in
  * `docs/WIRE_FORMAT.md` changes, additive or not. Do NOT bump on release.
+ *
+ * ── History ──
+ *   1 → 2: wait list changed from Redis LIST to SORTED SET so
+ *          `DispatchOptions.priority` can actually order dequeues by
+ *          (priority desc, ts asc). Every Lua script that touched the
+ *          wait list via LPUSH/RPUSH/RPOP/LLEN/LRANGE/LREM was rewritten
+ *          to ZADD/ZPOPMIN/ZCARD/ZRANGE/ZREM. A Redis instance containing
+ *          wire-version-1 `:wait` LIST data cannot be read by a
+ *          wire-version-2 process (WRONGTYPE on first ZADD) and vice
+ *          versa — this is a hard upgrade, not a rolling one. Drain the
+ *          waits (or flush the keyspace) before switching versions.
  */
-export const WIRE_VERSION = 1;
+export const WIRE_VERSION = 2;
 
 /**
  * The oldest wire-format version this build is still willing to coexist
@@ -112,8 +123,11 @@ export const WIRE_VERSION = 1;
  *
  * When this equals `WIRE_VERSION` the check is a hard gate: two processes
  * must run identical wire versions to share one backend.
+ *
+ * The 1 → 2 bump is such a hard gate. Wait-list type (LIST → ZSET) cannot
+ * round-trip between versions, so `MIN_COMPAT_VERSION` must also be 2.
  */
-export const MIN_COMPAT_VERSION = 1;
+export const MIN_COMPAT_VERSION = 2;
 
 /**
  * A taskora wire-format meta record. Persisted once per `(backend, prefix)`

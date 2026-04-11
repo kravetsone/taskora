@@ -92,8 +92,10 @@ describe("wire-format handshake", () => {
   });
 
   it("refuses to start on corrupt meta (minCompat > wireVersion)", async () => {
+    // Use wireVersion=2 (= ours) so the auto-migrator doesn't fire —
+    // we only want to exercise the invalid_meta detection path.
     await redis.hset("taskora:meta", {
-      wireVersion: "1",
+      wireVersion: "2",
       minCompat: "5",
       writtenBy: "corrupt",
       writtenAt: "0",
@@ -141,6 +143,176 @@ describe("wire-format handshake", () => {
     const handle = task.dispatch({});
     const id = await handle;
     expect(typeof id).toBe("string");
+    await app.close();
+  });
+});
+
+// ── wireVersion 1 → 2 auto-migrator ─────────────────────────────────
+//
+// `RedisBackend.handshake()` detects a stored wireVersion=1 meta and runs
+// `migrateWaitV1ToV2` before returning. The migrator converts every
+// `:wait` key from LIST to ZSET in place, using a single Lua script per
+// key so no concurrent writer can interleave. These tests seed a fake
+// wireVersion=1 keyspace by hand and verify the auto-migration runs
+// correctly under several shapes: empty waits, single-job waits,
+// multi-job waits, multi-task keyspaces, and re-run idempotence.
+
+describe("wire-format migration 1 → 2", () => {
+  async function seedV1Meta() {
+    // Write a fake wireVersion=1 meta record to trigger the migrator
+    // on the next handshake.
+    await redis.hset("taskora:meta", {
+      wireVersion: "1",
+      minCompat: "1",
+      writtenBy: "taskora-wire-1",
+      writtenAt: String(Date.now() - 1000),
+    });
+  }
+
+  async function seedV1WaitJob(
+    task: string,
+    jobId: string,
+    data: unknown,
+    priority = 0,
+  ): Promise<void> {
+    const jobKey = `taskora:{${task}}:${jobId}`;
+    const ts = Date.now();
+    await redis.hset(jobKey, {
+      ts: String(ts),
+      _v: "1",
+      attempt: "1",
+      maxAttempts: "1",
+      state: "waiting",
+      priority: String(priority),
+    });
+    await redis.set(`${jobKey}:data`, JSON.stringify(data));
+    // v1 wait-list semantics: LIST with LPUSH.
+    await redis.lpush(`taskora:{${task}}:wait`, jobId);
+  }
+
+  it("single task with a handful of v1 jobs migrates to ZSET with correct scores", async () => {
+    await seedV1Meta();
+    await seedV1WaitJob("migr-small", "j1", { n: 1 }, 0);
+    await new Promise((r) => setTimeout(r, 2));
+    await seedV1WaitJob("migr-small", "j2", { n: 2 }, 10);
+    await new Promise((r) => setTimeout(r, 2));
+    await seedV1WaitJob("migr-small", "j3", { n: 3 }, 5);
+
+    // Pre-migration: wait is a LIST.
+    expect(await redis.type("taskora:{migr-small}:wait")).toBe("list");
+    expect(await redis.llen("taskora:{migr-small}:wait")).toBe(3);
+
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    await app.ensureConnected();
+
+    // Post-migration: wait is a ZSET with all three jobs, meta is v2.
+    expect(await redis.type("taskora:{migr-small}:wait")).toBe("zset");
+    expect(await redis.zcard("taskora:{migr-small}:wait")).toBe(3);
+    const meta = await redis.hgetall("taskora:meta");
+    expect(meta.wireVersion).toBe(String(WIRE_VERSION));
+
+    // Dequeue via a worker — highest priority first.
+    const processed: number[] = [];
+    app.task("migr-small", {
+      concurrency: 1,
+      handler: async (data: { n: number }) => {
+        processed.push(data.n);
+      },
+    });
+    await app.start();
+    // waitFor without helper import: use expect retries via a small loop.
+    const deadline = Date.now() + 3000;
+    while (processed.length < 3 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // Priority 10 > 5 > 0 → [2, 3, 1].
+    expect(processed).toEqual([2, 3, 1]);
+
+    await app.close();
+  });
+
+  it("migrates multiple tasks in one handshake", async () => {
+    await seedV1Meta();
+    await seedV1WaitJob("migr-multi-a", "a1", { n: 1 });
+    await seedV1WaitJob("migr-multi-a", "a2", { n: 2 });
+    await seedV1WaitJob("migr-multi-b", "b1", { n: 10 });
+    await seedV1WaitJob("migr-multi-c", "c1", { n: 100 });
+
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    await app.ensureConnected();
+
+    // All three wait keys are now ZSETs with the right counts.
+    expect(await redis.type("taskora:{migr-multi-a}:wait")).toBe("zset");
+    expect(await redis.zcard("taskora:{migr-multi-a}:wait")).toBe(2);
+    expect(await redis.type("taskora:{migr-multi-b}:wait")).toBe("zset");
+    expect(await redis.zcard("taskora:{migr-multi-b}:wait")).toBe(1);
+    expect(await redis.type("taskora:{migr-multi-c}:wait")).toBe("zset");
+    expect(await redis.zcard("taskora:{migr-multi-c}:wait")).toBe(1);
+
+    await app.close();
+  });
+
+  it("is idempotent — re-running the migrator on an already-v2 keyspace is a no-op", async () => {
+    // First run: seeds v1, migrates on connect.
+    await seedV1Meta();
+    await seedV1WaitJob("migr-idem", "j1", { n: 1 });
+    const app1 = createTaskora({ adapter: redisAdapter(url()) });
+    await app1.ensureConnected();
+    const waitAfterFirst = await redis.zrange("taskora:{migr-idem}:wait", 0, -1);
+    await app1.close();
+
+    // Second run: meta is v2, migrator should no-op. The wait contents
+    // and scores must be byte-identical to the first run.
+    const app2 = createTaskora({ adapter: redisAdapter(url()) });
+    await app2.ensureConnected();
+    const waitAfterSecond = await redis.zrange("taskora:{migr-idem}:wait", 0, -1);
+    expect(waitAfterSecond).toEqual(waitAfterFirst);
+    expect(await redis.type("taskora:{migr-idem}:wait")).toBe("zset");
+    await app2.close();
+  });
+
+  it("handles an empty v1 keyspace cleanly (just bumps meta, nothing to migrate)", async () => {
+    await seedV1Meta();
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    await app.ensureConnected();
+    const meta = await redis.hgetall("taskora:meta");
+    expect(meta.wireVersion).toBe(String(WIRE_VERSION));
+    await app.close();
+  });
+
+  it("migrates a large-ish wait list (500 jobs) in one shot without timing out", async () => {
+    // Stress guard against the per-key Lua script. 500 jobs gives ~1500
+    // Redis calls inside the script (LRANGE + 500 HMGET + DEL + ZADD)
+    // and finishes well under 100ms on a real instance.
+    await seedV1Meta();
+    const task = "migr-big";
+    const pipe = redis.pipeline();
+    for (let i = 0; i < 500; i++) {
+      const jobKey = `taskora:{${task}}:j${i}`;
+      pipe.hset(jobKey, {
+        ts: String(Date.now() + i),
+        _v: "1",
+        attempt: "1",
+        maxAttempts: "1",
+        state: "waiting",
+        priority: String(i % 3 === 0 ? 10 : 0),
+      });
+      pipe.set(`${jobKey}:data`, JSON.stringify({ n: i }));
+      pipe.lpush(`taskora:{${task}}:wait`, `j${i}`);
+    }
+    await pipe.exec();
+
+    const start = Date.now();
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    await app.ensureConnected();
+    const elapsed = Date.now() - start;
+
+    expect(await redis.type(`taskora:{${task}}:wait`)).toBe("zset");
+    expect(await redis.zcard(`taskora:{${task}}:wait`)).toBe(500);
+    // Should migrate quickly even for 500 jobs — generous bound to
+    // avoid flakes under CI load.
+    expect(elapsed).toBeLessThan(5000);
+
     await app.close();
   });
 });

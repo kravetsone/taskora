@@ -87,6 +87,11 @@ describe("inspector list queries", () => {
 
     const t = app.task<{ n: number }, void>("list-test-2", async () => {});
     t.dispatch({ n: 1 });
+    // 2ms gap so dispatches land in distinct milliseconds and the
+    // wait-list ordering (ts-based within a priority band) is
+    // deterministic. Sub-ms FIFO is explicitly unspecified — see
+    // scripts.ts > "Wait-list ordering" header.
+    await new Promise((r) => setTimeout(r, 2));
     t.dispatch({ n: 2 });
 
     await new Promise((r) => setTimeout(r, 100));

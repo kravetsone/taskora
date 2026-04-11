@@ -29,7 +29,7 @@ describe("schema validation — dispatch", () => {
     await expect(task.dispatch({ email: "not-an-email" } as any)).rejects.toThrow(ValidationError);
 
     // Nothing should be enqueued
-    const waitCount = await redis.llen("taskora:{validated}:wait");
+    const waitCount = await redis.zcard("taskora:{validated}:wait");
     expect(waitCount).toBe(0);
 
     await app.close();

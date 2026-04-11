@@ -50,7 +50,7 @@ function collectScriptHashes(): Record<string, string> {
 
 // ── The frozen surface ──────────────────────────────────────────────────
 
-const FROZEN_AT_WIRE_VERSION = 1;
+const FROZEN_AT_WIRE_VERSION = 2;
 
 // buildKeys / buildMetaKey / buildScheduleKeys output for fixed inputs. These
 // strings are persisted in live Redis instances — renaming ANY of them is a
@@ -106,31 +106,32 @@ const FROZEN_SCRIPT_HASHES: Record<string, string> = {
   ACK: "b283e95480b7ab31",
   ACQUIRE_SCHEDULER_LOCK: "362180a86b49ee72",
   ADVANCE_WORKFLOW: "b3535a40f566e08e",
-  CANCEL: "ffabde65b5697117",
+  CANCEL: "d55f37b4d9f9ac00",
   CANCEL_WORKFLOW: "409298974cb9f05e",
   CLEAN_JOBS: "c30ae2ee03502165",
-  COLLECT_PUSH: "dd9aa80e077bc05a",
+  COLLECT_PUSH: "93e45908c14c30fb",
   CREATE_WORKFLOW: "e32df6d810b9ad4e",
   DEBOUNCE: "261d4950239a6e25",
-  DEDUPLICATE_ENQUEUE: "25aff30dea9e1700",
-  ENQUEUE: "38e8dfd12678577b",
+  DEDUPLICATE_ENQUEUE: "65dd032030d37e24",
+  ENQUEUE: "248486256f217544",
   ENQUEUE_DELAYED: "ca754f338ced0aab",
   EXTEND_LOCK: "dc500d7199ee06b1",
   FAIL: "b733a38465348cb8",
   FAIL_WORKFLOW: "a7762af2ff385164",
   FINISH_CANCEL: "5f78f671ea104896",
   HANDSHAKE: "91898f9a4c4cf5b7",
-  LIST_JOB_DETAILS: "22bda568e5f51e90",
-  MOVE_TO_ACTIVE: "fef6366ef04e91cc",
-  NACK: "7bcbb16f1c71aae0",
+  LIST_JOB_DETAILS: "c3bc00b91af8d6dc",
+  MIGRATE_WAIT_V1_TO_V2: "dd1209f915452b05",
+  MOVE_TO_ACTIVE: "6c8e670c19c24801",
+  NACK: "de5874937e547c4f",
   RENEW_SCHEDULER_LOCK: "96d3ba1e2ef947b6",
-  RETRY_ALL_DLQ: "f2d025c5ff4d6899",
-  RETRY_DLQ: "8a7b4bcd73618a03",
-  STALLED_CHECK: "41a0dbf10d445387",
-  THROTTLE_ENQUEUE: "a99be629170f0a5d",
+  RETRY_ALL_DLQ: "b316a2f787f03590",
+  RETRY_DLQ: "b32936832eaae7c5",
+  STALLED_CHECK: "40d22e00ae601954",
+  THROTTLE_ENQUEUE: "6b3dc48a61442199",
   TICK_SCHEDULER: "d77ed41b08630ef8",
   TRIM_DLQ: "97aaf7bb754bcdaf",
-  VERSION_DISTRIBUTION: "bbea7db69a97c4d8",
+  VERSION_DISTRIBUTION: "40d3a705e520bd5a",
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────
