@@ -1,0 +1,85 @@
+name: Publish @taskora/nestjs
+
+on: workflow_dispatch
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  tests:
+    # Reuse the standard test workflow. The lint-build job there already
+    # runs the @taskora/nestjs Node suite, so a green run gates publish
+    # on both taskora's cross-runtime matrix AND @taskora/nestjs's
+    # DI/consumer/harness coverage.
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.34
+
+      - id: version
+        name: Read @taskora/nestjs version
+        # Read version directly from package.json — don't reuse
+        # scripts/generate-changelog.ts because it's pegged to the latest
+        # git tag, which may be a `v*` taskora tag instead of the prior
+        # `nestjs-v*` tag and would inline cross-package commits into the
+        # nestjs release notes.
+        run: |
+          version=$(node -p "require('./packages/nestjs/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install modules
+        run: bun install
+
+      - name: Build taskora (types dep of @taskora/nestjs)
+        # @taskora/nestjs imports types from `taskora` via the workspace
+        # symlink. Those types come from packages/taskora/dist/*.d.mts, so
+        # taskora must be built first or pkgroll's rollup-plugin-dts has
+        # nothing to resolve. We build only taskora — not the full
+        # workspace — so we don't waste time on @taskora/board or other
+        # unrelated packages.
+        run: bun run build
+        working-directory: packages/taskora
+
+      - name: Build @taskora/nestjs
+        run: bun run build
+        working-directory: packages/nestjs
+
+      - name: Publish to NPM
+        # bun publish auto-resolves `workspace:*` devDeps to concrete
+        # versions at pack time, so the published tarball carries real
+        # semver ranges. @taskora/board / @nestjs/microservices /
+        # @nestjs/platform-express / @nestjs/testing remain optional peer
+        # deps — none of them are bundled.
+        run: bun publish --access public
+        working-directory: packages/nestjs
+        env:
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Tag scheme: nestjs-vX.Y.Z so tags don't collide with taskora's
+          # own vX.Y.Z releases. One repo, independent release cadence.
+          tag: nestjs-v${{ steps.version.outputs.version }}
+          name: "@taskora/nestjs v${{ steps.version.outputs.version }}"
+          # Let ncipollo synthesise notes from commit history between the
+          # previous tag and this one. Works out of the box once two
+          # nestjs-v* tags exist; the first release falls back to "all
+          # commits since repo inception" which is loud but harmless.
+          generateReleaseNotes: true
+          draft: false
+          prerelease: false

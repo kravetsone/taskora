@@ -1,6 +1,6 @@
 {
   "name": "@taskora/nestjs",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "NestJS integration for taskora — DI-first module, decorators, and consumer discovery.",
   "author": "kravetsone",
@@ -29,7 +29,7 @@
       "require": "./dist/testing/index.cjs"
     }
   },
-  "files": ["dist", "LICENSE"],
+  "files": ["dist", "README.md", "LICENSE"],
   "peerDependencies": {
     "@nestjs/common": ">=10",
     "@nestjs/core": ">=10",
