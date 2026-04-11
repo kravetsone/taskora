@@ -1,5 +1,6 @@
 import type { TaskContract as TaskContractImpl } from "./contract.js";
 import type { RetryError } from "./errors.js";
+import type { InferInput as InferInputImpl, InferOutput as InferOutputImpl } from "./infer.js";
 import type { Duration as DurationType } from "./scheduler/duration.js";
 
 export namespace Taskora {
@@ -13,6 +14,27 @@ export namespace Taskora {
    * `TaskContract` export from `taskora` for the full documentation.
    */
   export type TaskContract<TInput = unknown, TOutput = unknown> = TaskContractImpl<TInput, TOutput>;
+
+  // ── Type helpers ────────────────────────────────────────────────────
+
+  /**
+   * Namespaced alias of the top-level {@link InferInputImpl | InferInput}
+   * helper. Use this form when top-level `InferInput` would collide with
+   * another library's export (e.g. Zod):
+   *
+   * ```ts
+   * import type { Taskora } from "taskora"
+   * type Input = Taskora.InferInput<typeof sendEmailTask>
+   * ```
+   */
+  export type InferInput<T> = InferInputImpl<T>;
+
+  /**
+   * Namespaced alias of the top-level {@link InferOutputImpl | InferOutput}
+   * helper. Use this form when top-level `InferOutput` would collide with
+   * another library's export.
+   */
+  export type InferOutput<T> = InferOutputImpl<T>;
 
   // ── Event payloads ──────────────────────────────────────────────────
 

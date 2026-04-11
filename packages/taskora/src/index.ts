@@ -36,6 +36,7 @@ export {
 export { ResultHandle } from "./result.js";
 export { Inspector } from "./inspector.js";
 export { DeadLetterManager } from "./dlq.js";
+export type { InferInput, InferOutput } from "./infer.js";
 export { into } from "./migration.js";
 export { compose } from "./middleware.js";
 export { parseDuration, type Duration } from "./scheduler/duration.js";

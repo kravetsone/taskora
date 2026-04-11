@@ -17,6 +17,7 @@ export default defineConfig({
             "tests/unit/**/*.test.ts",
             "tests/schema.test.ts",
             "tests/schema-types.test.ts",
+            "tests/infer-types.test.ts",
           ],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },

@@ -106,16 +106,8 @@ export type AnySignature =
   | GroupSignature<any>
   | ChordSignature<any>;
 
-/** Infer the output type of any composition node. */
-export type InferOutput<T> = T extends Signature<any, infer O>
-  ? O
-  : T extends ChainSignature<any, infer O>
-    ? O
-    : T extends GroupSignature<infer O>
-      ? O
-      : T extends ChordSignature<infer O>
-        ? O
-        : never;
+export type { InferOutput } from "../infer.js";
+import type { InferOutput } from "../infer.js";
 
 /** Map a tuple of compositions to a tuple of their output types. */
 export type InferOutputTuple<T extends AnySignature[]> = {
