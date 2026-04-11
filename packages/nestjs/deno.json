@@ -7,6 +7,10 @@
   },
   "imports": {
     "taskora": "jsr:@taskora/core@^0.4.0",
+    "taskora/memory": "jsr:@taskora/core@^0.4.0/memory",
+    "taskora/test": "jsr:@taskora/core@^0.4.0/test",
+    "taskora/redis": "jsr:@taskora/core@^0.4.0/redis",
+    "taskora/redis/ioredis": "jsr:@taskora/core@^0.4.0/redis/ioredis",
     "taskora/": "jsr:@taskora/core@^0.4.0/",
     "@taskora/board": "jsr:@taskora/board@^0.1.0"
   },
