@@ -207,6 +207,85 @@ describe("graceful shutdown", () => {
 
     expect(jobFinished).toBe(true);
   });
+
+  it("close({ timeout }) returns around the deadline when a job exceeds it", async () => {
+    // Contract: close({ timeout }) is a cap on how long close() waits for
+    // active jobs to drain. A job slower than timeout must not block close()
+    // indefinitely. Abort signal fires, handler gets a chance to react (or
+    // not), and close() resolves around the deadline — NOT after the full
+    // handler duration.
+    let signalFired = false;
+
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("drain-overrun", async (_data, ctx) => {
+      ctx.signal.addEventListener("abort", () => {
+        signalFired = true;
+      });
+      // Handler sleeps longer than close timeout. Does NOT observe signal
+      // — simulates a handler that ignores abort (worst case).
+      await new Promise((r) => setTimeout(r, 2_000));
+      return null;
+    });
+
+    const handle = task.dispatch({});
+    await handle;
+    await app.start();
+
+    // Wait for job to become active.
+    await waitFor(async () => (await handle.getState()) === "active");
+
+    const closeStart = Date.now();
+    await app.close({ timeout: 150 });
+    const closeElapsed = Date.now() - closeStart;
+
+    // Close should return near the timeout, not at 2s.
+    expect(closeElapsed).toBeLessThan(500);
+    expect(closeElapsed).toBeGreaterThanOrEqual(100);
+    // Abort signal must have been wired — handler's listener fired even
+    // though handler didn't return.
+    expect(signalFired).toBe(true);
+  });
+
+  it("concurrency: multiple in-flight jobs all get abort signal on timeout-close", async () => {
+    // Three slow jobs running in parallel. close({timeout}) fires abort on
+    // ALL of them before returning — not just the first one. Guards against
+    // a regression where Worker.stop only aborts the first active job and
+    // misses the rest.
+    const aborted = new Set<number>();
+
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("drain-concurrency", {
+      concurrency: 3,
+      handler: async (data: { id: number }, ctx) => {
+        ctx.signal.addEventListener("abort", () => aborted.add(data.id));
+        await new Promise((r) => setTimeout(r, 5_000));
+        return null;
+      },
+    });
+
+    await Promise.all([
+      task.dispatch({ id: 1 }).ensureEnqueued(),
+      task.dispatch({ id: 2 }).ensureEnqueued(),
+      task.dispatch({ id: 3 }).ensureEnqueued(),
+    ]);
+
+    await app.start();
+    // Wait until all three are marked active (they all sleep 5s, no risk
+    // of early completion).
+    await waitFor(async () => {
+      const stats = await app.inspect().stats({ task: "drain-concurrency" });
+      return stats.active === 3;
+    }, 2_000);
+
+    const closeStart = Date.now();
+    await app.close({ timeout: 100 });
+    const closeElapsed = Date.now() - closeStart;
+
+    // Close returned around the deadline.
+    expect(closeElapsed).toBeLessThan(500);
+    // All three active jobs received the abort signal.
+    expect(aborted).toEqual(new Set([1, 2, 3]));
+  });
 });
 
 // ── Bulk dispatch ──────────────────────────────────────────────────
