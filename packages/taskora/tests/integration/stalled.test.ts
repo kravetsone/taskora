@@ -303,6 +303,112 @@ describe("stall detection", () => {
     await app.close();
   });
 
+  it("maxStalledCount=3 — recovers twice, fails on third stall", async () => {
+    // The existing fail test only covers the 1-and-done case. Boundary:
+    // given maxCount=3, a job must be recovered on stalls 1 and 2 and
+    // only fail permanently on stall 3. Off-by-one bugs in the HINCRBY
+    // comparison would either fail too early (recover 0 or 1 times) or
+    // never fail (stuck in infinite recovery loop).
+    const adapter = redisAdapter(url());
+    await adapter.connect();
+
+    const app = createTaskora({ adapter });
+    const task = app.task("stall-max3", {
+      stall: { interval: 200, maxCount: 3 },
+      handler: async () => null,
+    });
+
+    const handle = task.dispatch({});
+    await handle;
+    const jobId = handle.id;
+
+    const simulateStallCycle = async (expectedCount: number) => {
+      // Move job back to active, no lock, seed stalled set.
+      await redis.lmove(
+        "taskora:{stall-max3}:wait",
+        "taskora:{stall-max3}:active",
+        "RIGHT",
+        "LEFT",
+      );
+      await redis.hset(`taskora:{stall-max3}:${jobId}`, "state", "active");
+      await redis.sadd("taskora:{stall-max3}:stalled", jobId);
+      const result = await adapter.stalledCheck("stall-max3", 3);
+      return { result, expectedCount };
+    };
+
+    const c1 = await simulateStallCycle(1);
+    expect(c1.result.recovered).toEqual([jobId]);
+    expect(c1.result.failed).toEqual([]);
+    expect(await redis.hget(`taskora:{stall-max3}:${jobId}`, "stalledCount")).toBe("1");
+
+    const c2 = await simulateStallCycle(2);
+    expect(c2.result.recovered).toEqual([jobId]);
+    expect(c2.result.failed).toEqual([]);
+    expect(await redis.hget(`taskora:{stall-max3}:${jobId}`, "stalledCount")).toBe("2");
+
+    const c3 = await simulateStallCycle(3);
+    expect(c3.result.recovered).toEqual([jobId]);
+    expect(c3.result.failed).toEqual([]);
+    expect(await redis.hget(`taskora:{stall-max3}:${jobId}`, "stalledCount")).toBe("3");
+
+    // Fourth stall: stalledCount is now 3, exceeds maxCount — permanent fail.
+    const c4 = await simulateStallCycle(4);
+    expect(c4.result.recovered).toEqual([]);
+    expect(c4.result.failed).toEqual([jobId]);
+    expect(await redis.hget(`taskora:{stall-max3}:${jobId}`, "state")).toBe("failed");
+
+    await app.close();
+  });
+
+  it("extendLock race — extending just before stall check prevents false positive", async () => {
+    // Regression guard: if a worker's extendLock lands between the two
+    // phases of stalled-check (seed candidates → resolve on next run),
+    // the job must NOT be recovered. The existing "extendLock removes
+    // from stalled set" test covers the extendLock side; this one drives
+    // the full race: seed → extend → resolve, end-to-end.
+    const adapter = redisAdapter(url());
+    await adapter.connect();
+
+    const app = createTaskora({ adapter });
+    app.task("stall-race", {
+      stall: { interval: 200, maxCount: 1 },
+      handler: async () => null,
+    });
+
+    const jobId = "race-job";
+    const token = "race-tok";
+
+    // Set up: job in active with a valid lock.
+    await redis.lpush("taskora:{stall-race}:active", jobId);
+    await redis.set(`taskora:{stall-race}:${jobId}:lock`, token, "PX", 30000);
+
+    // Phase 1: stall check seeds the stalled candidate set (no recovery
+    // yet — job has a lock).
+    const phase1 = await adapter.stalledCheck("stall-race", 1);
+    expect(phase1.recovered).toEqual([]);
+    const seeded = await redis.sismember("taskora:{stall-race}:stalled", jobId);
+    expect(seeded).toBe(1);
+
+    // Worker extends its lock between phases — must clear the stalled
+    // candidacy.
+    const extendResult = await adapter.extendLock("stall-race", jobId, token, 30000);
+    expect(extendResult).toBe("extended");
+    const stillSeeded = await redis.sismember("taskora:{stall-race}:stalled", jobId);
+    expect(stillSeeded).toBe(0);
+
+    // Phase 2: next stall check runs. The job's lock is still valid AND
+    // it's no longer in the stalled candidate set. No false positive.
+    const phase2 = await adapter.stalledCheck("stall-race", 1);
+    expect(phase2.recovered).toEqual([]);
+    expect(phase2.failed).toEqual([]);
+
+    // Job remains active with its lock intact.
+    const lock = await redis.get(`taskora:{stall-race}:${jobId}:lock`);
+    expect(lock).toBe(token);
+
+    await app.close();
+  });
+
   it("stalledCheck is idempotent when run concurrently", async () => {
     const adapter = redisAdapter(url());
     await adapter.connect();
