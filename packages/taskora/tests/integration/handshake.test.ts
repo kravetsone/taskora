@@ -329,6 +329,77 @@ describe("wire-format migration 1 → 2", () => {
     await app.close();
   });
 
+  it("fails loud when a foreign migration completes on a wire version we cannot read", async () => {
+    // Scenario: v2 worker is running. A hypothetical v3 process comes
+    // up, sets the migration lock, rewrites the keyspace, bumps meta
+    // to wireVersion=3 with minCompat=3, and releases the lock. The
+    // v2 worker's next hot-path `eval()` must fail loud
+    // (SchemaVersionMismatchError) rather than running its stale
+    // Lua scripts against the new format.
+    //
+    // We simulate v3 by manipulating Redis directly — no second
+    // taskora process needed.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("incompat-test", async () => null);
+    await app.ensureConnected();
+
+    // v3 phase 1: set lock targeting our version.
+    const lockPayload = {
+      by: "taskora-wire-99",
+      reason: "test",
+      startedAt: Date.now(),
+      expectedDurationMs: 60_000,
+      targetWireVersion: WIRE_VERSION,
+    };
+    await redis.set("taskora:migration:lock", JSON.stringify(lockPayload), "PX", 60_000);
+    const pub = new Redis(url());
+    await pub.publish("taskora:migration:broadcast", "halt");
+    await pub.quit();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // v3 phase 2: bump meta beyond what we can read (minCompat moves
+    // past our wireVersion), then release the lock.
+    await redis.hset("taskora:meta", {
+      wireVersion: String(WIRE_VERSION + 1),
+      minCompat: String(WIRE_VERSION + 1),
+      writtenBy: `taskora-wire-${WIRE_VERSION + 1}`,
+      writtenAt: String(Date.now()),
+    });
+    await redis.del("taskora:migration:lock");
+    const pub2 = new Redis(url());
+    await pub2.publish("taskora:migration:broadcast", "done");
+    await pub2.quit();
+
+    // Give the broadcast handler a moment to pick up the "done" and
+    // run the post-migration compat check.
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Any dispatch now MUST throw SchemaVersionMismatchError. Latched
+    // state means subsequent attempts also throw — the worker doesn't
+    // recover without a restart.
+    let firstError: unknown;
+    try {
+      await task.dispatch({}).ensureEnqueued();
+    } catch (err) {
+      firstError = err;
+    }
+    expect(firstError).toBeInstanceOf(SchemaVersionMismatchError);
+    expect((firstError as SchemaVersionMismatchError).code).toBe("theirs_too_new");
+
+    // Second attempt also throws — the error is sticky.
+    let secondError: unknown;
+    try {
+      await task.dispatch({}).ensureEnqueued();
+    } catch (err) {
+      secondError = err;
+    }
+    expect(secondError).toBeInstanceOf(SchemaVersionMismatchError);
+
+    await app.close().catch(() => {
+      // close may itself fail from the same stuck adapter — fine
+    });
+  });
+
   it("running worker IGNORES a foreign migration lock that only targets older versions", async () => {
     // Regression for the targetWireVersion filter: a lock with
     // targetWireVersion strictly LESS than ours means the migrator is

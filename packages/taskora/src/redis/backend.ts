@@ -1,5 +1,6 @@
+import { SchemaVersionMismatchError } from "../errors.js";
 import type { Taskora } from "../types.js";
-import { WIRE_VERSION } from "../wire-version.js";
+import { WIRE_VERSION, checkCompat, currentMeta } from "../wire-version.js";
 import type { RedisDriver } from "./driver.js";
 import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
@@ -92,6 +93,14 @@ export class RedisBackend implements Taskora.Adapter {
   private migrationSubDriver: RedisDriver | null = null;
   private migrationUnsubscribe: (() => Promise<void>) | null = null;
   private migrationPollTimer: ReturnType<typeof setInterval> | null = null;
+  // Sticky failure set after a foreign migration completed against a
+  // wire version we don't understand. Once set, every hot-path `eval()`
+  // call throws this instead of running — our cached Lua SHAs point at
+  // scripts that would corrupt the new format if they ran, so the
+  // only correct action is loud failure until the process is restarted
+  // on a newer taskora build. Never cleared (deliberately — the
+  // operator must redeploy).
+  private migrationIncompatibleError: SchemaVersionMismatchError | null = null;
 
   constructor(options: { driver: RedisDriver; ownsDriver: boolean; prefix?: string }) {
     this.driver = options.driver;
@@ -245,6 +254,35 @@ export class RedisBackend implements Taskora.Adapter {
         "[taskora] foreign migration detected — pausing hot-path Redis ops until it clears",
       );
     } else if (!shouldPause && this.migrationPaused) {
+      // Pause is about to lift — but BEFORE we let hot-path callers
+      // resume, verify that the backend still speaks a wire version
+      // our cached Lua SHAs are actually compatible with. A foreign
+      // migration may have bumped stored meta past us, and running
+      // our old scripts against the new format would corrupt data.
+      //
+      // If compat still holds (the migrator only targeted older
+      // versions, or this was a false alarm from a crashed migrator
+      // whose lock expired), resume normally. If compat is broken,
+      // latch an incompatible error so every subsequent `eval()`
+      // throws — the process effectively halts until the operator
+      // restarts on a newer build.
+      const compatError = await this.checkPostMigrationCompat();
+      if (compatError) {
+        this.migrationIncompatibleError = compatError;
+        // biome-ignore lint/suspicious/noConsole: fatal operator-facing error
+        console.error(
+          `[taskora] foreign migration completed but left the backend on a wire version we cannot read (${compatError.message}). Halting hot-path Redis ops — restart this process on a compatible taskora build.`,
+        );
+        // Fire wake so currently-parked callers get their throw; leave
+        // `migrationPaused = true` so future callers don't race past
+        // the check. Callers see the sticky error via `waitForMigration`.
+        if (this.migrationWake) {
+          this.migrationWake();
+          this.migrationWake = null;
+        }
+        this.migrationPausePromise = null;
+        return;
+      }
       this.migrationPaused = false;
       if (this.migrationWake) {
         this.migrationWake();
@@ -253,6 +291,51 @@ export class RedisBackend implements Taskora.Adapter {
       this.migrationPausePromise = null;
       // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
       console.log("[taskora] foreign migration cleared — resuming hot-path Redis ops");
+    }
+  }
+
+  /**
+   * Read stored meta via direct HMGET (bypassing the HANDSHAKE Lua so
+   * we don't accidentally re-initialize it) and run the normal
+   * `checkCompat` verdict against our compiled constants. Returns
+   * `null` if still compatible, or a constructed
+   * `SchemaVersionMismatchError` ready to throw if not.
+   */
+  private async checkPostMigrationCompat(): Promise<SchemaVersionMismatchError | null> {
+    try {
+      const metaKey = buildMetaKey(this.prefix);
+      const raw = (await this.driver.command("hmget", [
+        metaKey,
+        "wireVersion",
+        "minCompat",
+        "writtenBy",
+        "writtenAt",
+      ])) as (string | null)[];
+      const theirs: Taskora.SchemaMeta = {
+        wireVersion: Number(raw[0] ?? 0),
+        minCompat: Number(raw[1] ?? 0),
+        writtenBy: raw[2] ?? "",
+        writtenAt: Number(raw[3] ?? 0),
+      };
+      const ours = currentMeta();
+      const verdict = checkCompat(ours, theirs);
+      if (verdict.ok) return null;
+      return new SchemaVersionMismatchError(
+        verdict.code,
+        verdict.message,
+        { wireVersion: ours.wireVersion, minCompat: ours.minCompat, writtenBy: ours.writtenBy },
+        {
+          wireVersion: theirs.wireVersion,
+          minCompat: theirs.minCompat,
+          writtenBy: theirs.writtenBy,
+          writtenAt: theirs.writtenAt,
+        },
+      );
+    } catch {
+      // If the HMGET itself fails (network blip), don't latch an
+      // incompatible error — we don't know the truth. The next
+      // broadcast/poll cycle will retry.
+      return null;
     }
   }
 
@@ -266,10 +349,18 @@ export class RedisBackend implements Taskora.Adapter {
    * common case (no migration in progress). During a foreign
    * migration this is what keeps workers out of the keyspace — the
    * `eval()` method calls it for every non-internal script name.
+   *
+   * If a foreign migration ended with the backend on a wire version
+   * we don't understand, this throws `SchemaVersionMismatchError` —
+   * every parked caller gets the same error, every subsequent
+   * `eval()` call gets it synchronously (via the same sticky flag),
+   * and the worker / app layer can treat it as a fatal signal.
    */
   private async waitForMigration(): Promise<void> {
+    if (this.migrationIncompatibleError) throw this.migrationIncompatibleError;
     while (this.migrationPaused && this.migrationPausePromise) {
       await this.migrationPausePromise;
+      if (this.migrationIncompatibleError) throw this.migrationIncompatibleError;
     }
   }
 
@@ -1947,6 +2038,13 @@ export class RedisBackend implements Taskora.Adapter {
     numkeys: number,
     ...args: (string | number)[]
   ): Promise<unknown> {
+    // Sticky incompatibility: once a foreign migration left the
+    // backend on a wire version we can't read, every eval() is fatal.
+    // We throw the latched error even for the exempt scripts — even
+    // handshake is pointless once the stored meta has moved past us,
+    // because our own Lua can't produce correct writes against the
+    // new format.
+    if (this.migrationIncompatibleError) throw this.migrationIncompatibleError;
     // Migration hot-path gate: if a foreign migrator is mid-run on this
     // keyspace, block every user-facing script invocation until it
     // clears. The migration-internal scripts and handshake itself are
