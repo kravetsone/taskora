@@ -5,14 +5,19 @@
 //   2. TaskoraRef + forFeature + @InjectTask
 //   3. @TaskConsumer + @OnTaskEvent + TaskoraExplorer
 //   4. Class middleware + @InjectInspector / @InjectDeadLetters /
-//      @InjectSchedules + InferBoundTask helper (this slice)
+//      @InjectSchedules + InferBoundTask helper
+//   5. TaskoraBoardModule + @InjectBoard — DI provider for
+//      @taskora/board, lazy-loaded via dynamic import (this slice)
 //
 // Upcoming phases:
-//   5. @taskora/board middleware mount + multi-app scoping
 //   6. @taskora/nestjs/testing
 
 export { TaskoraModule } from "./taskora.module.js";
 export { TaskoraCoreModule } from "./taskora-core.module.js";
+export {
+  TaskoraBoardModule,
+  type TaskoraBoardModuleOptions,
+} from "./taskora-board.module.js";
 export { TaskoraExplorer } from "./taskora-explorer.js";
 export { TaskoraRef } from "./taskora-ref.js";
 
@@ -30,11 +35,13 @@ export { TaskMiddleware } from "./decorators/task-middleware.js";
 export { InjectInspector } from "./decorators/inject-inspector.js";
 export { InjectDeadLetters } from "./decorators/inject-dead-letters.js";
 export { InjectSchedules } from "./decorators/inject-schedules.js";
+export { InjectBoard } from "./decorators/inject-board.js";
 
 // Tokens
 export {
   DEFAULT_APP_NAME,
   getAppToken,
+  getBoardToken,
   getDeadLettersToken,
   getExplorerToken,
   getInspectorToken,

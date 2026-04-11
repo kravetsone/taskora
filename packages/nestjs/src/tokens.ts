@@ -52,3 +52,13 @@ export function getDeadLettersToken(name: string = DEFAULT_APP_NAME): string {
 export function getSchedulesToken(name: string = DEFAULT_APP_NAME): string {
   return `TASKORA_SCHEDULES:${name}`;
 }
+
+/**
+ * Token for a named `@taskora/board` {@link Board} provider created
+ * by `TaskoraBoardModule.forRoot(...)`. Always string-keyed because
+ * `Board` is a runtime-imported interface from an optional peer dep,
+ * not a class we can use as a DI class token.
+ */
+export function getBoardToken(name: string = DEFAULT_APP_NAME): string {
+  return `TASKORA_BOARD:${name}`;
+}
