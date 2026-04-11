@@ -356,3 +356,60 @@ describe("memoryAdapter.blockingDequeue", () => {
     expect(closeElapsed).toBeLessThan(400);
   });
 });
+
+describe("memoryAdapter.priority (known-broken: characterization)", () => {
+  // `DispatchOptions.priority` is accepted by the public API and stored in
+  // the job hash on both Redis and memory backends, but **nothing sorts the
+  // wait list by it**. Redis uses LPUSH/RPUSH for wait, memory uses
+  // `wait.push()` — both pure FIFO with seq ordering.
+  //
+  // These tests are marked `it.fails` on purpose: they encode the desired
+  // behaviour (higher priority dequeues first), run against the current
+  // implementation, and assert the current behaviour is wrong. When someone
+  // wires real priority ordering they should flip each `it.fails` to `it`
+  // and the tests will start passing. If the bug gets accidentally fixed
+  // (or accidentally "fixed" in a breaking way) without touching this file,
+  // `it.fails` turns red too — so both directions are guarded.
+  //
+  // TODO(priority): decide whether to implement priority ordering (ZSET
+  // wait on Redis + insertion-sort on memory) or remove the option from
+  // `DispatchOptions`. Leaving it half-implemented in a public API is a
+  // trap for users.
+
+  it.fails("higher priority job dequeues before lower priority", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    // Enqueue in the worst possible order: lowest first, highest last.
+    await adapter.enqueue("t1", "low", '"low"', { _v: 1, priority: 0 });
+    await adapter.enqueue("t1", "mid", '"mid"', { _v: 1, priority: 5 });
+    await adapter.enqueue("t1", "high", '"high"', { _v: 1, priority: 10 });
+
+    const r1 = await adapter.dequeue("t1", 30_000, "tok1");
+    const r2 = await adapter.dequeue("t1", 30_000, "tok2");
+    const r3 = await adapter.dequeue("t1", 30_000, "tok3");
+
+    expect(r1?.id).toBe("high");
+    expect(r2?.id).toBe("mid");
+    expect(r3?.id).toBe("low");
+  });
+
+  it.fails("same-priority jobs preserve FIFO ordering within a band", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "hi-a", '"a"', { _v: 1, priority: 10 });
+    await adapter.enqueue("t1", "hi-b", '"b"', { _v: 1, priority: 10 });
+    await adapter.enqueue("t1", "lo-a", '"c"', { _v: 1, priority: 0 });
+    await adapter.enqueue("t1", "hi-c", '"d"', { _v: 1, priority: 10 });
+
+    const order: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await adapter.dequeue("t1", 30_000, `tok${i}`);
+      if (r) order.push(r.id);
+    }
+
+    // All priority-10 jobs first (FIFO between them), then lo-a last.
+    expect(order).toEqual(["hi-a", "hi-b", "hi-c", "lo-a"]);
+  });
+});
