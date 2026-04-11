@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { VERSION } from "../src/index.js";
+import { TaskoraModule } from "../src/index.js";
 
 describe("@taskora/nestjs skeleton", () => {
-  it("exposes a placeholder version constant", () => {
-    expect(typeof VERSION).toBe("string");
+  it("exports the TaskoraModule façade", () => {
+    expect(typeof TaskoraModule).toBe("function");
+    expect(typeof TaskoraModule.forRoot).toBe("function");
+    expect(typeof TaskoraModule.forRootAsync).toBe("function");
   });
 
   it("can import taskora through the workspace link", async () => {
