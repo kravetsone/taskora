@@ -1,16 +1,17 @@
 import { type DynamicModule, Global, Module, type Provider } from "@nestjs/common";
+import { DiscoveryModule, DiscoveryService, MetadataScanner } from "@nestjs/core";
 import { type App, type TaskoraOptions, createTaskora } from "taskora";
 import type {
   TaskoraModuleAsyncOptions,
   TaskoraModuleOptions,
   TaskoraModuleOptionsFactory,
 } from "./interfaces/module-options.js";
-import { TaskoraLifecycle } from "./lifecycle.js";
+import { TaskoraExplorer } from "./taskora-explorer.js";
 import { TaskoraRef } from "./taskora-ref.js";
 import {
   DEFAULT_APP_NAME,
   getAppToken,
-  getLifecycleToken,
+  getExplorerToken,
   getOptionsToken,
   getTaskoraRefToken,
 } from "./tokens.js";
@@ -31,9 +32,10 @@ export class TaskoraCoreModule {
     return {
       module: TaskoraCoreModule,
       global: true,
+      imports: [DiscoveryModule],
       providers: [
         appProvider,
-        createLifecycleProvider(name, autoStart, appToken),
+        createExplorerProvider(name, autoStart, appToken),
         createTaskoraRefProvider(name, appToken),
       ],
       exports: [appProvider, ...taskoraRefExports(name)],
@@ -57,11 +59,11 @@ export class TaskoraCoreModule {
     return {
       module: TaskoraCoreModule,
       global: true,
-      imports: asyncOptions.imports ?? [],
+      imports: [DiscoveryModule, ...(asyncOptions.imports ?? [])],
       providers: [
         ...asyncProviders,
         appProvider,
-        createLifecycleProvider(name, autoStart, appToken),
+        createExplorerProvider(name, autoStart, appToken),
         createTaskoraRefProvider(name, appToken),
       ],
       exports: [appProvider, ...taskoraRefExports(name)],
@@ -69,11 +71,12 @@ export class TaskoraCoreModule {
   }
 }
 
-function createLifecycleProvider(name: string, autoStart: boolean, appToken: string): Provider {
+function createExplorerProvider(name: string, autoStart: boolean, appToken: string): Provider {
   return {
-    provide: getLifecycleToken(name),
-    useFactory: (app: App) => new TaskoraLifecycle(app, autoStart),
-    inject: [appToken],
+    provide: getExplorerToken(name),
+    useFactory: (app: App, discovery: DiscoveryService, scanner: MetadataScanner) =>
+      new TaskoraExplorer(app, name, autoStart, discovery, scanner),
+    inject: [appToken, DiscoveryService, MetadataScanner],
   };
 }
 

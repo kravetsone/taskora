@@ -10,8 +10,13 @@ export function getOptionsToken(name: string = DEFAULT_APP_NAME): string {
   return `TASKORA_OPTIONS:${name}`;
 }
 
-export function getLifecycleToken(name: string = DEFAULT_APP_NAME): string {
-  return `TASKORA_LIFECYCLE:${name}`;
+/**
+ * Token for a named {@link TaskoraExplorer}. One explorer is created
+ * per app, owns the discovery-based consumer registration, and drives
+ * the `app.start()` / `app.close()` lifecycle for that app.
+ */
+export function getExplorerToken(name: string = DEFAULT_APP_NAME): string {
+  return `TASKORA_EXPLORER:${name}`;
 }
 
 /**
