@@ -1,7 +1,8 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { EOL } from "node:os";
+import { resolve } from "node:path";
 
 function getLatestTag() {
   try {
@@ -20,7 +21,12 @@ const commits = execSync(`git log ${getLatestTag()}..HEAD  --pretty="format:%s%b
 
 console.log(getLatestTag(), commits);
 
-const version = execSync("npm pkg get version").toString().replace(/"/gi, "");
+// Read package.json directly instead of `npm pkg get version` — the latter
+// now returns workspace-scoped output (`{"taskora":"0.4.0"}`) when invoked
+// inside a Bun/npm workspace, which broke $GITHUB_OUTPUT parsing.
+const version = JSON.parse(
+  readFileSync(resolve(process.cwd(), "package.json"), "utf8"),
+).version as string;
 
 const delimiter = `---${randomUUID()}---${EOL}`;
 
