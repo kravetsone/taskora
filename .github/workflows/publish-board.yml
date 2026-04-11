@@ -66,7 +66,12 @@ jobs:
 
             - id: version
               name: Read version
-              run: echo "version=$(npm pkg get version | tr -d '\"')" >> "$GITHUB_OUTPUT"
+              # Read via node -p instead of `npm pkg get version`: the latter
+              # returns workspace-scoped JSON (`{"@taskora/board":"0.1.0"}`)
+              # from inside packages/board/, which breaks $GITHUB_OUTPUT.
+              run: |
+                version=$(node -p "require('./package.json').version")
+                echo "version=$version" >> "$GITHUB_OUTPUT"
               working-directory: packages/board
 
             - name: GitHub Release
