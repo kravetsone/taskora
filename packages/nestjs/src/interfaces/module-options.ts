@@ -1,5 +1,6 @@
 import type { ModuleMetadata, Type } from "@nestjs/common";
 import type { TaskoraOptions } from "taskora";
+import type { TaskoraMiddleware } from "./taskora-middleware.js";
 
 export interface TaskoraModuleOptions extends TaskoraOptions {
   /**
@@ -18,6 +19,17 @@ export interface TaskoraModuleOptions extends TaskoraOptions {
    * this flag explicitly.
    */
   autoStart?: boolean;
+  /**
+   * App-level middleware classes. Each entry must be a Nest provider
+   * implementing {@link TaskoraMiddleware}. The explorer resolves the
+   * instance from the DI graph and wires its `use()` method via
+   * `app.use()` during `onApplicationBootstrap`, in list order (first
+   * entry runs outermost).
+   *
+   * The classes still need to be listed in the owning module's
+   * `providers: [...]` array so Nest knows to instantiate them.
+   */
+  middleware?: Type<TaskoraMiddleware>[];
 }
 
 export interface TaskoraModuleOptionsFactory {
@@ -27,6 +39,8 @@ export interface TaskoraModuleOptionsFactory {
 export interface TaskoraModuleAsyncOptions extends Pick<ModuleMetadata, "imports"> {
   name?: string;
   autoStart?: boolean;
+  /** App-level middleware classes. Resolved from the DI graph by the explorer. */
+  middleware?: Type<TaskoraMiddleware>[];
   useFactory?: (...args: any[]) => Promise<TaskoraOptions> | TaskoraOptions;
   inject?: any[];
   useClass?: Type<TaskoraModuleOptionsFactory>;

@@ -40,3 +40,15 @@ export function getTaskToken(
 ): string {
   return `TASKORA_TASK:${appName}:${contract.name}`;
 }
+
+export function getInspectorToken(name: string = DEFAULT_APP_NAME): string {
+  return `TASKORA_INSPECTOR:${name}`;
+}
+
+export function getDeadLettersToken(name: string = DEFAULT_APP_NAME): string {
+  return `TASKORA_DLQ:${name}`;
+}
+
+export function getSchedulesToken(name: string = DEFAULT_APP_NAME): string {
+  return `TASKORA_SCHEDULES:${name}`;
+}

@@ -3,7 +3,13 @@ import { Test } from "@nestjs/testing";
 import { App, type Taskora, defineTask } from "taskora";
 import { memoryAdapter } from "taskora/memory";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OnTaskEvent, TaskConsumer, TaskoraModule } from "../src/index.js";
+import {
+  type InferInput,
+  type InferOutput,
+  OnTaskEvent,
+  TaskConsumer,
+  TaskoraModule,
+} from "../src/index.js";
 
 // ── Contracts ───────────────────────────────────────────────────────
 
@@ -63,7 +69,13 @@ describe("@TaskConsumer — discovery + registration", () => {
     class SendEmailConsumer {
       constructor(private readonly mailer: MailerService) {}
 
-      async process(data: { to: string }, _ctx: Taskora.Context) {
+      // `data` and return type tracked to the contract via Infer helpers —
+      // rename or reshape the contract's schema and this signature updates
+      // with it automatically.
+      async process(
+        data: InferInput<typeof sendEmailTask>,
+        _ctx: Taskora.Context,
+      ): Promise<InferOutput<typeof sendEmailTask>> {
         const messageId = this.mailer.send(data.to);
         return { sent: true as const, messageId };
       }

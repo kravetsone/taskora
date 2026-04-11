@@ -1,6 +1,12 @@
-import { Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from "@nestjs/common";
+import {
+  Logger,
+  type OnApplicationBootstrap,
+  type OnApplicationShutdown,
+  type Type,
+} from "@nestjs/common";
 import type { DiscoveryService, MetadataScanner } from "@nestjs/core";
 import type { App, Taskora } from "taskora";
+import type { TaskoraMiddleware } from "./interfaces/taskora-middleware.js";
 import {
   ON_TASK_EVENT_METADATA,
   TASK_CONSUMER_METADATA,
@@ -46,17 +52,51 @@ export class TaskoraExplorer implements OnApplicationBootstrap, OnApplicationShu
     private readonly app: App,
     private readonly appName: string,
     private readonly autoStart: boolean,
+    private readonly middlewareClasses: Type<TaskoraMiddleware>[],
     private readonly discovery: DiscoveryService,
     private readonly metadataScanner: MetadataScanner,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
+    this.registerMiddleware();
     this.registerConsumers();
     if (this.autoStart) await this.app.start();
   }
 
   async onApplicationShutdown(): Promise<void> {
     await this.app.close();
+  }
+
+  private registerMiddleware(): void {
+    if (this.middlewareClasses.length === 0) return;
+
+    const wrappers = this.discovery.getProviders();
+    const byMetatype = new Map<unknown, unknown>();
+    for (const wrapper of wrappers) {
+      if (wrapper.metatype && wrapper.instance) {
+        byMetatype.set(wrapper.metatype, wrapper.instance);
+      }
+    }
+
+    for (const cls of this.middlewareClasses) {
+      const instance = byMetatype.get(cls) as TaskoraMiddleware | undefined;
+      if (!instance) {
+        throw new Error(
+          `TaskoraModule middleware ${cls.name} was listed in forRoot({ middleware }) but no DI instance was found. Make sure it is included in the owning module's providers: [${cls.name}] array.`,
+        );
+      }
+      if (typeof instance.use !== "function") {
+        throw new Error(
+          `${cls.name} was registered as middleware but does not implement use(ctx, next).`,
+        );
+      }
+      this.app.use(((ctx, next) => instance.use(ctx, next)) as Taskora.Middleware);
+      this.logger.log(
+        `Registered @TaskMiddleware ${cls.name}${
+          this.appName === DEFAULT_APP_NAME ? "" : ` (app: ${this.appName})`
+        }`,
+      );
+    }
   }
 
   private registerConsumers(): void {

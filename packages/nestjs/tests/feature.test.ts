@@ -4,6 +4,7 @@ import { App, BoundTask, defineTask } from "taskora";
 import { memoryAdapter } from "taskora/memory";
 import { describe, expect, it } from "vitest";
 import {
+  type InferBoundTask,
   InjectApp,
   InjectTask,
   InjectTaskoraRef,
@@ -31,18 +32,20 @@ class EmailService {
     return this.tasks.for(sendEmailTask).dispatch({ to });
   }
 
-  get boundTask(): BoundTask<{ to: string }, { sent: true }> {
+  get boundTask(): InferBoundTask<typeof sendEmailTask> {
     return this.tasks.for(sendEmailTask);
   }
 }
 
 // ── Services for @InjectTask path ───────────────────────────────────
+// Uses InferBoundTask<typeof contract> so the type annotation follows the
+// contract automatically — no manual duplication of `{ to: string }, …`.
 
 @Injectable()
 class LegacyEmailService {
   constructor(
     @InjectTask(sendEmailTask)
-    readonly sendEmail: BoundTask<{ to: string }, { sent: true }>,
+    readonly sendEmail: InferBoundTask<typeof sendEmailTask>,
   ) {}
 }
 
@@ -197,7 +200,7 @@ describe("Multi-app TaskoraRef isolation", () => {
     class NamedService {
       constructor(
         @InjectTask(sendEmailTask, "secondary")
-        readonly sendEmail: BoundTask<{ to: string }, { sent: true }>,
+        readonly sendEmail: InferBoundTask<typeof sendEmailTask>,
       ) {}
     }
 
