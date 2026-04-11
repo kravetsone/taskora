@@ -24,9 +24,8 @@ console.log(getLatestTag(), commits);
 // Read package.json directly instead of `npm pkg get version` — the latter
 // now returns workspace-scoped output (`{"taskora":"0.4.0"}`) when invoked
 // inside a Bun/npm workspace, which broke $GITHUB_OUTPUT parsing.
-const version = JSON.parse(
-  readFileSync(resolve(process.cwd(), "package.json"), "utf8"),
-).version as string;
+const version = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"))
+  .version as string;
 
 const delimiter = `---${randomUUID()}---${EOL}`;
 
