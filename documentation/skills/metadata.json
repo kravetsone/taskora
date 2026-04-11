@@ -1,5 +1,5 @@
 {
-	"version": "0.5.2",
+	"version": "0.5.3",
 	"organization": "Taskora",
 	"date": "11 Apr 2026",
 	"abstract": "Build distributed task queues with taskora — a TypeScript-first, Redis-backed task queue library for Node.js with type-safe workflows (chain/group/chord), producer/consumer split via task contracts, scheduling, retry/backoff, schema validation, flow control, cancellation, a full admin dashboard, and a first-class NestJS integration with DI-managed consumers and middleware.",

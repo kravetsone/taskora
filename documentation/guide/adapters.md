@@ -31,6 +31,14 @@ const redis = new Redis("redis://localhost:6379")
 const adapter = redisAdapter(redis)
 ```
 
+::: tip Migrating from BullMQ? You don't need `maxRetriesPerRequest: null`
+BullMQ requires `maxRetriesPerRequest: null` and `enableReadyCheck: false` on the ioredis client because its worker treats ioredis's `MaxRetriesPerRequestError` as fatal — a long-running `BRPOPLPUSH` in the offline queue during a Redis reconnect would trip the default retry counter of 20 and crash the worker loop.
+
+**Taskora does not have this constraint.** The worker poll loop, event reader, and job waiter all wrap their blocking commands (`BZPOPMIN`, `XREAD BLOCK`) in try/catch retry loops. A `MaxRetriesPerRequestError` during a Redis blip is swallowed and the next iteration reissues the command on a healthy socket. ioredis defaults are safe to use.
+
+User-facing `task.dispatch()` calls are the one place a long Redis outage can surface as an error to your application code — they're not in a retry loop by design, so your app decides how to handle unavailability. Catch the error and retry at the call site if you want fail-open behavior.
+:::
+
 ### Bun driver
 
 ```ts

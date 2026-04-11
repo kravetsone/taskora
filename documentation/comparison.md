@@ -80,3 +80,7 @@ pg-boss runs on PostgreSQL — useful if you don't want to add Redis:
 6. Move retry, concurrency, timeout config into task options
 7. Add `await taskora.start()` / `await taskora.close()`
 8. Write tests using `createTestRunner()` — no Redis needed
+
+### ioredis connection config
+
+BullMQ requires `maxRetriesPerRequest: null` and `enableReadyCheck: false` on the ioredis client — without them, a long reconnect can surface an uncaught `MaxRetriesPerRequestError` that kills the worker loop. **You can drop both options when moving to Taskora.** Taskora's blocking commands (`BZPOPMIN`, `XREAD BLOCK`) run inside retry loops in the worker, event reader, and job waiter, so a transient ioredis error is swallowed and retried on the next tick. ioredis defaults are safe. See [Adapters → ioredis driver](./guide/adapters.md#ioredis-driver-default) for the full explanation.

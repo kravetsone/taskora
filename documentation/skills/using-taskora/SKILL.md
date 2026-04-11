@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.5.1"
+  version: "0.5.3"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -1629,9 +1629,13 @@ const taskora = createTaskora({
     host: process.env.REDIS_HOST,
     port: Number(process.env.REDIS_PORT),
     password: process.env.REDIS_PASSWORD,
-    maxRetriesPerRequest: null,      // required for blocking commands
-    enableReadyCheck: false,         // faster startup
     lazyConnect: true,               // connect on first use
+    // Taskora does NOT require `maxRetriesPerRequest: null` or
+    // `enableReadyCheck: false` — those are BullMQ-specific
+    // workarounds. Taskora's worker/event-reader/job-waiter all
+    // wrap their blocking commands in retry loops, so a transient
+    // ioredis MaxRetriesPerRequestError is swallowed and retried
+    // automatically. Using ioredis defaults is fine.
   }),
   defaults: {
     retry: { attempts: 3, backoff: "exponential", delay: 1000, maxDelay: 60_000 },
