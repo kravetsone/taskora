@@ -1,6 +1,8 @@
-# taskora/board — Dashboard Design Document
+# @taskora/board — Dashboard Design Document
 
 > In-house admin panel for observing tasks and managing the taskora runtime.
+
+> **2026-04 update**: the board ships as **`@taskora/board`**, a separate npm + JSR package (see §10 Packaging). Earlier sections still refer to the original `taskora/board` subpath-export plan — that decision was reversed to keep the main `taskora` bundle free of Hono + React + static assets when the board isn't used. Treat any `taskora/board` import in this document as `@taskora/board`.
 
 ---
 

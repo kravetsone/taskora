@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
-import { parseDuration } from "../../scheduler/duration.js";
+import { parseDuration } from "taskora";
 import type { BoardAuthConfig, BoardAuthUser } from "../types.js";
 
 const DEFAULT_COOKIE_NAME = "taskora_board_session";

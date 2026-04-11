@@ -5,7 +5,7 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "build": "bun run --filter '*' build",
-    "build:ui": "cd ui && bun run build",
+    "build:ui": "bun run --filter '@taskora/board' build:ui",
     "test": "bun run --filter '*' test",
     "test:node": "bun run --filter '*' test:node",
     "test:node:unit": "bun run --filter '*' test:node:unit",

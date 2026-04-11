@@ -1,7 +1,5 @@
 import type { Hono } from "hono";
-import type { App } from "../app.js";
-import type { Duration } from "../scheduler/duration.js";
-import type { Taskora } from "../types.js";
+import type { Duration, Taskora } from "taskora";
 
 export interface BoardAuthUser {
   id: string;

@@ -1,22 +1,23 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createTaskora } from "taskora";
+import { memoryAdapter } from "taskora/memory";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createBoard } from "../../src/board/index.js";
-import type { Board } from "../../src/board/index.js";
-import { createTaskora } from "../../src/index.js";
-import { memoryAdapter } from "../../src/memory/index.js";
+import { createBoard } from "../../src/index.js";
+import type { Board } from "../../src/index.js";
 
 const COOKIE_PASSWORD = "x".repeat(48);
 
-// The board's static SPA is gitignored (`src/board/static/` is built by
-// `bun run build:ui` or the publish workflow). These tests exercise the SPA
-// redirect/guard path, which requires the static handler to be registered —
-// which requires `src/board/static/index.html` to exist. Seed a minimal stub
-// so the tests work in CI (where the build hasn't run yet) and locally.
+// The board's static SPA is gitignored (`packages/board/static/` is built by
+// `bun run --filter '@taskora/board' build:ui` or the publish workflow).
+// These tests exercise the SPA redirect/guard path, which requires the static
+// handler to be registered — which requires `static/index.html` to exist.
+// Seed a minimal stub so the tests work in CI (where the build hasn't run
+// yet) and locally.
 beforeAll(() => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const staticDir = resolve(here, "../../src/board/static");
+  const staticDir = resolve(here, "../../static");
   const indexHtml = resolve(staticDir, "index.html");
   if (!existsSync(indexHtml)) {
     mkdirSync(staticDir, { recursive: true });

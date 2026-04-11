@@ -1,5 +1,5 @@
 /**
- * taskora/board demo — rich scenario
+ * @taskora/board demo — rich scenario
  *
  * Usage:
  *   1. Start Redis:  docker run -d -p 6379:6379 redis:7-alpine
@@ -8,8 +8,8 @@
  *   4. Sign in:      admin / demo
  */
 
+import { createBoard } from "@taskora/board";
 import { chain, chord, createTaskora, group } from "taskora";
-import { createBoard } from "taskora/board";
 import { redisAdapter } from "taskora/redis";
 
 const app = createTaskora({

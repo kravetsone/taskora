@@ -1,10 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
-import type { App } from "../app.js";
-import type { Inspector } from "../inspector.js";
-import type { Task } from "../task.js";
-import type { Taskora } from "../types.js";
+import type { App, Inspector, Task, Taskora } from "taskora";
 import { createAuthGuard } from "./auth/guard.js";
 import { createRedactor } from "./redact.js";
 import {

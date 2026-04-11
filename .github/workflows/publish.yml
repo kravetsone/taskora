@@ -44,34 +44,7 @@ jobs:
               # package.json only) and every import fails. JSR publishes from
               # src/ via deno.json, so it's unaffected either way, but npm
               # absolutely needs this.
-              #
-              # MUST run before build:ui: the `prebuild` hook does `rm -rf dist`,
-              # so any UI assets staged into dist/ before this step would be wiped.
               run: bun run build
-              working-directory: packages/taskora
-
-            - name: Install board UI dependencies
-              # ui/ is a standalone bun project, not a workspace — root `bun install`
-              # above does not touch ui/node_modules.
-              run: bun install --frozen-lockfile
-              working-directory: ui
-
-            - name: Build board UI
-              # Builds the React SPA into packages/taskora/src/board/static/
-              # (see ui/vite.config.ts). That directory is git-ignored and does
-              # NOT exist in the src checkout, which means without this step
-              # `dist/board/static/` is empty in the published tarball and
-              # `createBoard()` serves a blank /board route in every consumer
-              # that installs taskora from npm.
-              run: bun run build:ui
-
-            - name: Stage board SPA into dist
-              # package.json `files` only ships `dist/`, so the freshly-built SPA
-              # has to be copied out of src/ into dist/ before `bun publish` packs
-              # the tarball. findStaticDir() in src/board/index.ts looks for
-              # `<import.meta.dir>/static` first, which resolves to
-              # `node_modules/taskora/dist/board/static` at runtime.
-              run: mkdir -p dist/board/static && cp -R src/board/static/. dist/board/static/
               working-directory: packages/taskora
 
             - name: Prepare to JSR publish

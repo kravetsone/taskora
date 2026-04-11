@@ -1,15 +1,17 @@
 ---
 title: Board — Admin Dashboard
-description: taskora/board — batteries-included admin UI for inspecting tasks, jobs, workflows, schedules, and DLQ in real time. Hono-based, framework-agnostic, with SSE live updates.
+description: "@taskora/board — batteries-included admin UI for inspecting tasks, jobs, workflows, schedules, and DLQ in real time. Hono-based, framework-agnostic, with SSE live updates. Shipped as a separate package so it never bloats the core bundle."
 ---
 
 # Board — Admin Dashboard
 
-`taskora/board` is a full-featured, batteries-included admin dashboard for taskora. It ships as a pre-built React SPA served by a [Hono](https://hono.dev) backend, so there is **no build step** on your side — import it, mount it, done.
+`@taskora/board` is a full-featured, batteries-included admin dashboard for taskora. It ships as a pre-built React SPA served by a [Hono](https://hono.dev) backend, so there is **no build step** on your side — import it, mount it, done.
+
+It's a **separate package** — install it alongside `taskora` only if you want the dashboard. No Hono dependency, no static assets, no board code lands in your bundle if you don't.
 
 Unlike bull-board (which focuses on queues) or Flower (Celery-only), the taskora board is **task-centric** and exposes everything taskora actually does: workflow DAGs, schedules, migrations, flow control, retention, DLQ.
 
-![taskora/board per-task view — stat cards, hourly throughput chart, state tabs, and a jobs table with a real retry error surfaced inline](/board/task-detail.jpg)
+![taskora board per-task view — stat cards, hourly throughput chart, state tabs, and a jobs table with a real retry error surfaced inline](/board/task-detail.jpg)
 
 ## Why a dashboard?
 
@@ -23,19 +25,19 @@ Unlike bull-board (which focuses on queues) or Flower (Celery-only), the taskora
 
 ## Installation
 
-`taskora/board` requires [`hono`](https://hono.dev) as a peer dependency.
+`@taskora/board` is a separate package with `taskora` and `hono` as peer dependencies. Install both together:
 
-::: pm-add hono
+::: pm-add @taskora/board hono
 :::
 
-The pre-built React SPA and its dependencies (Recharts, @xyflow/react, Tailwind) are **bundled inside the taskora package** — you do not install them yourself.
+The pre-built React SPA and its dependencies (Recharts, @xyflow/react, Tailwind) are **bundled inside the `@taskora/board` package** — you do not install them yourself. If you never install `@taskora/board`, none of that code reaches your bundle.
 
 ## Quick start
 
 ```ts
 import { createTaskora } from "taskora"
 import { redisAdapter } from "taskora/redis"
-import { createBoard } from "taskora/board"
+import { createBoard } from "@taskora/board"
 
 const taskora = createTaskora({
   adapter: redisAdapter("redis://localhost:6379"),

@@ -30,12 +30,16 @@ taskora              — core engine, types, task API (zero DB deps)
 taskora/redis        — Redis adapter, canonical entry (re-exports taskora/redis/ioredis)
 taskora/redis/ioredis — Redis adapter explicitly using ioredis (peer dep: ioredis)
 taskora/redis/bun    — Redis adapter using Bun's built-in RedisClient (Bun runtime only)
-taskora/board        — admin dashboard (peer dep: hono)
 taskora/postgres     — future
 taskora/memory       — in-memory adapter (zero DB deps)
 taskora/test         — test runner (wraps memory adapter)
 taskora/telemetry    — OpenTelemetry adapter (deferred)
 taskora/react        — React hooks (deferred)
+
+@taskora/board       — admin dashboard: Hono server + pre-built React SPA. Separate
+                       npm + JSR package (peer deps: taskora, hono). Install with
+                       `bun add @taskora/board hono` — no board code lands in the
+                       `taskora` bundle if you don't use it.
 ```
 
 `ioredis` is an optional peer dep — only required when using `taskora/redis` or
@@ -162,7 +166,7 @@ Phase 19 delivered:
 - No Redis-backed contract registry — deliberately cut. Runtime drift safety comes from worker-side Standard Schema validation (Phase 1) + payload versioning & migrations (Phase 9), which together cover the drift cases a registry would have caught.
 
 Phase 18 delivered:
-- `taskora/board` entrypoint: `createBoard(app, options)` — admin dashboard for taskora
+- `@taskora/board` package (separate npm + JSR publish): `createBoard(app, options)` — admin dashboard for taskora. Originally shipped as a `taskora/board` subpath; extracted into a standalone fullstack package so the `taskora` main bundle no longer carries Hono/React/static assets when the board isn't used.
 - Hono-based REST API server: overview, jobs, schedules, workflows, DLQ, migrations, throughput endpoints
 - SSE real-time events: bridges `adapter.subscribe()` to SSE stream with periodic `stats:update`
 - React SPA (Vite + Tailwind): pre-built at publish time, served as static files from the package
@@ -183,7 +187,7 @@ Phase 18 delivered:
 - New Adapter methods: `cleanJobs`, `getServerInfo`, `listWorkflows`, `getWorkflowDetail`, `getThroughput`
 - Throughput metric counters: `INCR` per-minute buckets in `ack.lua`/`fail.lua`, 24h TTL auto-expire
 - `CLEAN_JOBS` Lua script: bulk clean sorted set by timestamp
-- `hono` optional peer dep (required only for `taskora/board`)
+- `hono` peer dep of `@taskora/board` (not of `taskora` itself)
 - Design doc: `docs/BOARD_DESIGN.md`
 
 Phase 14 delivered:

@@ -1,0 +1,11 @@
+{
+  "name": "@kravets/taskora-board",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "publish": {
+    "include": ["deno.json", "src", "static", "README.md", "LICENSE"]
+  },
+  "nodeModulesDir": "auto"
+}

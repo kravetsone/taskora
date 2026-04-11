@@ -43,7 +43,7 @@ features:
     link: /testing/
     linkText: Test your tasks
   - title: Batteries-Included Admin UI
-    details: "taskora/board — live dashboard with workflow DAG, schedules, DLQ, migrations, throughput. Mount on any framework. No build step."
+    details: "@taskora/board — live dashboard with workflow DAG, schedules, DLQ, migrations, throughput. Separate fullstack package, mount on any framework. No build step."
     icon: "\U0001F4CA"
     link: /operations/board
     linkText: Explore the board

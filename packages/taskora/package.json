@@ -1,6 +1,6 @@
 {
   "name": "taskora",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Task queue for Node.js. TypeScript-first, Celery-inspired, batteries-included.",
   "author": "kravetsone",
@@ -46,23 +46,14 @@
       "types": "./dist/test/index.d.mts",
       "import": "./dist/test/index.mjs",
       "require": "./dist/test/index.cjs"
-    },
-    "./board": {
-      "types": "./dist/board/index.d.mts",
-      "import": "./dist/board/index.mjs",
-      "require": "./dist/board/index.cjs"
     }
   },
   "peerDependencies": {
     "cron-parser": ">=5",
-    "hono": ">=4",
     "ioredis": ">=5"
   },
   "peerDependenciesMeta": {
     "cron-parser": {
-      "optional": true
-    },
-    "hono": {
       "optional": true
     },
     "ioredis": {
@@ -74,7 +65,6 @@
     "@testcontainers/redis": "^10.18.0",
     "@types/node": "^22.0.0",
     "cron-parser": "^5.0.3",
-    "hono": "^4.7.0",
     "ioredis": "^5.4.1",
     "pkgroll": "^2.5.1",
     "typescript": "^5.7.2",

@@ -10,7 +10,7 @@ description: >
   Bee-Queue, or other task queue libraries.
 metadata:
   author: Taskora
-  version: "0.4.0"
+  version: "0.5.0"
   source: https://github.com/kravetsone/taskora
 ---
 
@@ -25,9 +25,10 @@ taskora              — core engine, types, task API (zero DB deps)
 taskora/redis        — Redis adapter (peer dep: ioredis)
 taskora/memory       — in-memory adapter (zero deps, for testing & dev)
 taskora/test         — test runner with virtual time
-taskora/board        — admin dashboard (peer dep: hono)
 taskora/telemetry    — OpenTelemetry adapter (deferred)
 taskora/react        — React hooks (deferred)
+
+@taskora/board       — admin dashboard, separate fullstack package (peer deps: taskora, hono)
 ```
 
 Always import from the correct subpath:
@@ -43,11 +44,12 @@ import { redisAdapter } from "taskora/redis"
 // Testing
 import { createTestRunner } from "taskora/test"
 
-// Admin dashboard
-import { createBoard } from "taskora/board"
+// Admin dashboard — separate package, install with `bun add @taskora/board hono`
+import { createBoard } from "@taskora/board"
 ```
 
 `ioredis` is an **optional peer dep** — only required when using `taskora/redis`.
+`@taskora/board` is a **separate package** with its own `hono` peer dep — no board code lands in the `taskora` bundle unless you install it.
 
 ## Basic usage
 
@@ -957,10 +959,15 @@ afterEach(() => runner.dispose())  // from-instance mode (restores original adap
 
 ## Admin dashboard (Board)
 
-`taskora/board` ships a full-featured admin UI as a pre-built React SPA served by a Hono backend. No build step for users — install the `hono` peer dep and mount the board.
+`@taskora/board` is a **separate package** that ships a full-featured admin UI as a pre-built React SPA served by a Hono backend. No build step for users — install it alongside `hono` and mount the board. Separate-package layout keeps the main `taskora` bundle free of Hono + static assets when the board isn't used.
+
+```bash
+bun add @taskora/board hono
+# or: npm install @taskora/board hono
+```
 
 ```typescript
-import { createBoard } from "taskora/board"
+import { createBoard } from "@taskora/board"
 
 const board = createBoard(taskora, {
   basePath: "/board",                  // default "/board"

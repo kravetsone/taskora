@@ -102,7 +102,7 @@ const { messageId } = await handle.result // typed!
 **Observability**
 - Typed events: `completed` / `failed` / `retrying` / `progress` / `active` / `stalled` / `cancelled`
 - [Inspector API](https://kravetsone.github.io/taskora/operations/inspector): stats, jobs by state, cross-task `find(jobId)` with full timeline
-- [Admin dashboard](https://kravetsone.github.io/taskora/operations/board) — `taskora/board` — React SPA with SSE live updates, workflow DAG visualisation, DLQ management
+- [Admin dashboard](https://kravetsone.github.io/taskora/operations/board) — `@taskora/board` (separate fullstack package) — React SPA with SSE live updates, workflow DAG visualisation, DLQ management
 - Structured job logs via `ctx.log.info()` / `warn()` / `error()`
 - Progress reporting via `ctx.progress()`
 
@@ -139,7 +139,8 @@ taskora/redis/ioredis   — explicit ioredis driver (Node, Bun, Deno)
 taskora/redis/bun       — native Bun.RedisClient driver (Bun only, no peer deps)
 taskora/memory          — in-memory adapter for development & tests
 taskora/test            — test runner with virtual time
-taskora/board           — admin dashboard (peer dep: hono)
+
+@taskora/board          — admin dashboard, separate fullstack package (peer deps: taskora, hono)
 ```
 
 ## Documentation

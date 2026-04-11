@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { Hono, type MiddlewareHandler } from "hono";
-import type { App } from "../app.js";
+import type { App } from "taskora";
 import { createApi } from "./api.js";
 import { createAuthGuard } from "./auth/guard.js";
 import { createAuthRoutes } from "./auth/routes.js";
@@ -28,12 +28,14 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 function findStaticDir(): string | null {
-  // Try multiple locations: source (dev), dist (published)
+  const here = import.meta.dir ?? ".";
+  // Candidates cover both published (dist/index.js next to dist/static) and
+  // dev/test runs (src/index.ts with the vite build in <pkg>/static).
   const candidates = [
-    resolve(import.meta.dir ?? ".", "static"),
-    resolve(import.meta.dir ?? ".", "../board/static"),
-    resolve(process.cwd(), "src/board/static"),
-    resolve(process.cwd(), "dist/board/static"),
+    resolve(here, "static"),
+    resolve(here, "../static"),
+    resolve(process.cwd(), "static"),
+    resolve(process.cwd(), "packages/board/static"),
   ];
   for (const dir of candidates) {
     if (existsSync(join(dir, "index.html"))) return dir;

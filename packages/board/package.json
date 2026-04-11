@@ -1,0 +1,87 @@
+{
+  "name": "@taskora/board",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Admin dashboard for taskora — pre-built React SPA served by a Hono backend. Workflow DAG, schedules, DLQ, migrations, throughput, all with SSE live updates.",
+  "author": "kravetsone",
+  "license": "MIT",
+  "homepage": "https://kravetsone.github.io/taskora/operations/board",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kravetsone/taskora.git",
+    "directory": "packages/board"
+  },
+  "bugs": {
+    "url": "https://github.com/kravetsone/taskora/issues"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "peerDependencies": {
+    "hono": ">=4",
+    "taskora": ">=0.4.0"
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "^5.62.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "@xyflow/react": "^12.4.0",
+    "autoprefixer": "^10.4.20",
+    "hono": "^4.7.0",
+    "pkgroll": "^2.5.1",
+    "postcss": "^8.4.49",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-json-view-lite": "^2.5.0",
+    "react-router-dom": "^7.1.0",
+    "recharts": "^2.15.0",
+    "tailwindcss": "^3.4.17",
+    "taskora": "workspace:*",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0",
+    "vitest": "^3.1.1"
+  },
+  "scripts": {
+    "prebuild": "rm -rf dist",
+    "build": "pkgroll && bun run build:ui",
+    "build:server": "pkgroll",
+    "build:ui": "cd ui && vite build",
+    "dev:ui": "cd ui && vite",
+    "test": "vitest",
+    "test:node": "vitest run",
+    "test:node:unit": "vitest run --project unit",
+    "test:node:integration": "vitest run --project integration",
+    "test:bun": "TASKORA_TEST_DRIVER=bun bunx --bun vitest run",
+    "test:bun:ioredis": "bunx --bun vitest run",
+    "test:deno": "deno run -A --node-modules-dir=auto npm:vitest/vitest.mjs run",
+    "test:all": "npm run test:node && npm run test:bun:ioredis && npm run test:bun && npm run test:deno"
+  },
+  "keywords": [
+    "taskora",
+    "board",
+    "admin",
+    "dashboard",
+    "ui",
+    "queue",
+    "jobs",
+    "monitoring",
+    "observability",
+    "workflow",
+    "dag",
+    "scheduler",
+    "dlq",
+    "hono",
+    "react",
+    "sse"
+  ],
+  "files": ["dist", "README.md", "LICENSE"]
+}
