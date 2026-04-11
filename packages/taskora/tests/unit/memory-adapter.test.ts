@@ -211,3 +211,148 @@ describe("memoryAdapter", () => {
     if (!r2.created) expect(r2.existingId).toBe("j1");
   });
 });
+
+describe("memoryAdapter.blockingDequeue", () => {
+  // These tests cover the event-driven blockingDequeue implementation. Before
+  // the fix, MemoryBackend.blockingDequeue was a sync-delegating stub —
+  // ignored `timeoutMs` and returned `null` immediately on an empty queue,
+  // turning the Worker poll loop into a microtask firehose. Regression guards:
+  //
+  // 1. honours `timeoutMs` when truly empty (no busy-loop)
+  // 2. wakes up on a concurrent enqueue (no latency penalty)
+  // 3. wakes up on `disconnect()` (so Worker.stop → adapter.disconnect doesn't
+  //    deadlock behind the 2s BLOCK_TIMEOUT)
+  // 4. respects delayed-job deadlines — waits only until the job is due, not
+  //    the full timeoutMs
+  // 5. FIFO per-task: one enqueue wakes exactly one waiter
+  // 6. fast path stays fast when the queue already has work
+
+  it("blocks for approximately timeoutMs when the queue stays empty", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const start = Date.now();
+    const result = await adapter.blockingDequeue("t1", 30_000, "tok", 100);
+    const elapsed = Date.now() - start;
+
+    expect(result).toBeNull();
+    // Allow generous slack for CI — what we're guarding against is the old
+    // "returns null in <1ms" behaviour. 60ms minimum catches the regression.
+    expect(elapsed).toBeGreaterThanOrEqual(60);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("wakes up when a job is enqueued while parked", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const start = Date.now();
+    const blockingPromise = adapter.blockingDequeue("t1", 30_000, "tok", 2_000);
+
+    // Give the waiter a tick to park before we enqueue.
+    await new Promise((r) => setTimeout(r, 20));
+    await adapter.enqueue("t1", "j1", '"payload"', { _v: 1 });
+
+    const result = await blockingPromise;
+    const elapsed = Date.now() - start;
+
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("j1");
+    // Should wake on the enqueue event — well under the 2s block timeout.
+    expect(elapsed).toBeLessThan(300);
+  });
+
+  it("returns null immediately when disconnect() is called while parked", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const start = Date.now();
+    const blockingPromise = adapter.blockingDequeue("t1", 30_000, "tok", 5_000);
+
+    await new Promise((r) => setTimeout(r, 20));
+    await adapter.disconnect();
+
+    const result = await blockingPromise;
+    const elapsed = Date.now() - start;
+
+    expect(result).toBeNull();
+    // Must drain instantly on disconnect — not sit on the 5s deadline.
+    expect(elapsed).toBeLessThan(300);
+  });
+
+  it("wakes up when a delayed job becomes due", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    // Delayed job due in ~80ms, block timeout of 5s — we should wake around
+    // the 80ms mark via promoteDelayed, not wait 5s.
+    await adapter.enqueue("t1", "j1", '"payload"', { _v: 1, delay: 80 });
+
+    const start = Date.now();
+    const result = await adapter.blockingDequeue("t1", 30_000, "tok", 5_000);
+    const elapsed = Date.now() - start;
+
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("j1");
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("wakes exactly one parked waiter per enqueue (FIFO)", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    const a = adapter.blockingDequeue("t1", 30_000, "tok-a", 500);
+    const b = adapter.blockingDequeue("t1", 30_000, "tok-b", 500);
+    const c = adapter.blockingDequeue("t1", 30_000, "tok-c", 500);
+
+    await new Promise((r) => setTimeout(r, 20));
+    await adapter.enqueue("t1", "j1", '"only-one"', { _v: 1 });
+
+    const [ra, rb, rc] = await Promise.all([a, b, c]);
+
+    // FIFO: first parked waiter gets the job, others time out with null.
+    expect(ra?.id).toBe("j1");
+    expect(rb).toBeNull();
+    expect(rc).toBeNull();
+  });
+
+  it("fast-paths when a job is already waiting (no parking)", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "j1", '"ready"', { _v: 1 });
+
+    const start = Date.now();
+    const result = await adapter.blockingDequeue("t1", 30_000, "tok", 5_000);
+    const elapsed = Date.now() - start;
+
+    expect(result?.id).toBe("j1");
+    // Fast path must not go through setTimeout at all.
+    expect(elapsed).toBeLessThan(50);
+  });
+
+  it("Worker loop against memoryAdapter idles without busy-waiting", async () => {
+    // Regression guard for the original symptom: running a real Worker against
+    // memoryAdapter with an empty queue used to produce a microtask firehose
+    // that hid event loop starvation. This checks the loop doesn't publish
+    // completion events for a job we never dispatched, and that close()
+    // resolves promptly even though the worker was actively polling.
+    const app = createTaskora({ adapter: memoryAdapter() });
+    const events: string[] = [];
+    const task = app.task("idle-task", async () => "ok");
+    task.on("completed", () => events.push("completed"));
+
+    await app.start();
+    // Let the worker park on blockingDequeue for a bit with nothing to do.
+    await new Promise((r) => setTimeout(r, 150));
+
+    const closeStart = Date.now();
+    await app.close({ timeout: 500 });
+    const closeElapsed = Date.now() - closeStart;
+
+    expect(events).toEqual([]);
+    // Real regression: before the fix, close() could lag behind the starved
+    // event loop. After the fix it's essentially immediate.
+    expect(closeElapsed).toBeLessThan(400);
+  });
+});

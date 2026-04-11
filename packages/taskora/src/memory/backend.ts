@@ -124,6 +124,28 @@ export class MemoryBackend implements Taskora.Adapter {
       timer?: ReturnType<typeof setTimeout>;
     }>
   >();
+  // ── Blocking-dequeue waiters ──
+  //
+  // Per-task queue of pending `blockingDequeue()` callers. Real event-driven
+  // wakeup, modelled after Redis BZPOPMIN: on every enqueue (via `emit()`
+  // routing through "waiting"), pop one waiter and make it re-try `dequeue`.
+  // Without this the `MemoryBackend` would turn the worker poll loop into a
+  // microtask firehose — blockingDequeue would resolve to `null` immediately,
+  // worker would `continue`, repeat. Event-loop starvation + nondeterministic
+  // `app.close()` timing in anything that runs the real Worker against the
+  // memory adapter (e.g. @taskora/nestjs integration tests).
+  //
+  // `wake()` = "a job may be available, try `dequeue()` again" — used by
+  // enqueue / delayed promotion. `drain()` = "shut down, resolve null now"
+  // — used by `disconnect()` and `clear()` to unblock `Worker.stop()`.
+  private dequeueWaiters = new Map<
+    string,
+    Array<{
+      wake: () => void;
+      drain: () => void;
+      timer: ReturnType<typeof setTimeout>;
+    }>
+  >();
 
   /** @internal */
   _clock: () => number;
@@ -165,6 +187,29 @@ export class MemoryBackend implements Taskora.Adapter {
     return job;
   }
 
+  // ── Blocking-dequeue wakeup helpers ──
+  //
+  // Contract: `wakeOneDequeuer` removes a waiter from the parked list but
+  // does NOT clear its timer. The `wake` callback either (a) finishes the
+  // promise — and clears its own timer — or (b) re-parks itself with the
+  // same timer still counting down the original deadline. This avoids the
+  // "timer cleared before we knew whether we'd actually claim a job" race.
+
+  private wakeOneDequeuer(task: string): void {
+    const arr = this.dequeueWaiters.get(task);
+    if (!arr || arr.length === 0) return;
+    const w = arr.shift();
+    if (arr.length === 0) this.dequeueWaiters.delete(task);
+    if (w) w.wake();
+  }
+
+  private drainAllDequeuers(): void {
+    for (const arr of this.dequeueWaiters.values()) {
+      for (const w of arr) w.drain();
+    }
+    this.dequeueWaiters.clear();
+  }
+
   // ── Event helper ──
 
   private emit(task: string, event: string, jobId: string, fields: Record<string, string>): void {
@@ -173,6 +218,14 @@ export class MemoryBackend implements Taskora.Adapter {
       try {
         handler(ev);
       } catch {}
+    }
+
+    // Every site that enqueues into `wait` already emits "waiting" — piggyback
+    // on that single choke point to wake a blocking dequeuer. Covers enqueue,
+    // enqueueDelayed-after-promotion, nack-return, stall recovery, collect
+    // flush, retryDLQ, debounce/throttle/dedup enqueue.
+    if (event === "waiting") {
+      this.wakeOneDequeuer(task);
     }
 
     if (event === "completed" || event === "failed" || event === "cancelled") {
@@ -237,6 +290,7 @@ export class MemoryBackend implements Taskora.Adapter {
   promoteDelayed(task: string): void {
     const tq = this.q(task);
     const now = this.now();
+    let promoted = 0;
     while (tq.delayed.length > 0 && tq.delayed[0].score <= now) {
       const entry = tq.delayed.shift();
       if (!entry) break;
@@ -244,6 +298,14 @@ export class MemoryBackend implements Taskora.Adapter {
       if (!job) continue;
       job.fields.state = "waiting";
       tq.wait.push(entry.member);
+      promoted++;
+    }
+    // Wake up to `promoted` blocking dequeuers so they can claim the newly
+    // promoted jobs. Can't piggyback on `emit("waiting")` here — promotion is
+    // internal, not a user-visible state transition, and historically hasn't
+    // emitted anything.
+    for (let i = 0; i < promoted; i++) {
+      this.wakeOneDequeuer(task);
     }
   }
 
@@ -326,6 +388,7 @@ export class MemoryBackend implements Taskora.Adapter {
       }
     }
     this.jobWaiters.clear();
+    this.drainAllDequeuers();
   }
 
   /** @internal */
@@ -352,7 +415,12 @@ export class MemoryBackend implements Taskora.Adapter {
   // ══════════════════════════════════════════════════════════════════════
 
   async connect(): Promise<void> {}
-  async disconnect(): Promise<void> {}
+  async disconnect(): Promise<void> {
+    // Release any workers parked in blockingDequeue so the caller's close()
+    // flow (Worker.stop → adapter.disconnect) doesn't deadlock behind a 2s
+    // BLOCK_TIMEOUT.
+    this.drainAllDequeuers();
+  }
 
   async handshake(ours: Taskora.SchemaMeta): Promise<Taskora.SchemaMeta> {
     if (this.schemaMeta === null) {
@@ -710,10 +778,115 @@ export class MemoryBackend implements Taskora.Adapter {
     task: string,
     lockTtl: number,
     token: string,
-    _timeoutMs: number,
+    timeoutMs: number,
     options?: Taskora.DequeueOptions,
   ): Promise<Taskora.DequeueResult | null> {
-    return this.dequeue(task, lockTtl, token, options);
+    // Fast path: something is already available, no waiting needed.
+    const first = await this.dequeue(task, lockTtl, token, options);
+    if (first) return first;
+
+    // Nothing to take — park until someone emits "waiting", or until the
+    // earliest relevant delayed job is due, or until `timeoutMs` elapses,
+    // whichever comes first. Match Redis BZPOPMIN semantics: one consumer,
+    // one job, FIFO across waiters on the same task.
+    //
+    // Two distinct timer paths:
+    //   • real deadline timer — original `timeoutMs` from the caller; firing
+    //     it means we give up and resolve null.
+    //   • delayed-job nudge timer — shorter, fires when the earliest delayed
+    //     job should be due. On fire it retries `dequeue` (which promotes)
+    //     and, if still empty, re-arms.
+    //
+    // Before splitting these, the single-timer implementation resolved null
+    // at the delayed-nudge point instead of collecting the now-due job.
+    const deadline = this.now() + timeoutMs;
+
+    return new Promise<Taskora.DequeueResult | null>((resolve) => {
+      const state: {
+        settled: boolean;
+        nudgeTimer: ReturnType<typeof setTimeout> | null;
+      } = { settled: false, nudgeTimer: null };
+
+      const finish = (value: Taskora.DequeueResult | null) => {
+        if (state.settled) return;
+        state.settled = true;
+        clearTimeout(deadlineTimer);
+        if (state.nudgeTimer) clearTimeout(state.nudgeTimer);
+        resolve(value);
+      };
+
+      const removeFromWaiters = () => {
+        const arr = this.dequeueWaiters.get(task);
+        if (!arr) return;
+        const idx = arr.findIndex((w) => w.timer === deadlineTimer);
+        if (idx >= 0) arr.splice(idx, 1);
+        if (arr.length === 0) this.dequeueWaiters.delete(task);
+      };
+
+      const drain = () => finish(null);
+
+      const park = () => {
+        const arr = this.dequeueWaiters.get(task) ?? [];
+        arr.push({ wake, drain, timer: deadlineTimer });
+        this.dequeueWaiters.set(task, arr);
+        armNudgeTimer();
+      };
+
+      const wake = () => {
+        if (state.settled) return;
+        if (state.nudgeTimer) {
+          clearTimeout(state.nudgeTimer);
+          state.nudgeTimer = null;
+        }
+        this.promoteDelayed(task);
+        this.dequeue(task, lockTtl, token, options).then((result) => {
+          if (state.settled) return;
+          if (result) {
+            finish(result);
+            return;
+          }
+          // Null = either another waiter claimed it first (FIFO race), or
+          // the delayed job that fired our nudge is still not due. Re-park
+          // without rearming the deadline timer — it owns the absolute
+          // cutoff.
+          park();
+        });
+      };
+
+      const armNudgeTimer = () => {
+        const tq = this.taskQueues.get(task);
+        if (!tq || tq.delayed.length === 0) return;
+        const untilDue = tq.delayed[0].score - this.now();
+        const untilDeadline = deadline - this.now();
+        if (untilDue >= untilDeadline) return; // deadline fires first
+        const t = setTimeout(
+          () => {
+            state.nudgeTimer = null;
+            // Pop self from the waiter list — wake() will re-park us via
+            // dequeue → retry. We MUST come off the list here so that the
+            // `wake()` path runs from a clean slate and doesn't double-park.
+            removeFromWaiters();
+            wake();
+          },
+          Math.max(0, untilDue),
+        );
+        if (typeof t.unref === "function") t.unref();
+        state.nudgeTimer = t;
+      };
+
+      // Don't hold the event loop open just because a worker is parked on the
+      // memory adapter — real Redis blocks inside ioredis over sockets that
+      // don't anchor process exit. Match that shape so a test that forgets
+      // `app.close()` doesn't hang Vitest for the full BLOCK_TIMEOUT.
+      const deadlineTimer = setTimeout(() => {
+        if (state.settled) return;
+        removeFromWaiters();
+        finish(null);
+      }, timeoutMs);
+      if (typeof deadlineTimer.unref === "function") deadlineTimer.unref();
+
+      park();
+    });
   }
 
   // ── Ack / Fail / Nack ──
