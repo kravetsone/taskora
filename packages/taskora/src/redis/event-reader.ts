@@ -84,6 +84,13 @@ export class EventReader {
         const pending: PendingEvent[] = [];
         const pipe = this.driver.pipeline();
         let cmdIdx = 0;
+        // Track the max entryId per stream in THIS batch only. We commit
+        // it to `this.lastIds` after the enrichment pipeline succeeds, so
+        // a mid-batch connection failure (throw from `pipe.exec()`) leaves
+        // the cursor at its pre-batch position and the next XREAD replays
+        // the same entries. Without this, a failing exec silently dropped
+        // the whole batch of events.
+        const batchLastIds = new Map<string, string>();
 
         for (const [streamKey, entries] of result) {
           const task = taskByStream.get(streamKey);
@@ -91,9 +98,7 @@ export class EventReader {
           const keys = buildKeys(task, this.prefix);
 
           for (const [entryId, fieldArr] of entries) {
-            // Advance lastId unconditionally — even if the entry is malformed
-            // or enrichment later fails, we don't want to replay it forever.
-            this.lastIds.set(streamKey, entryId);
+            batchLastIds.set(streamKey, entryId);
 
             const fields: Record<string, string> = {};
             for (let i = 0; i < fieldArr.length; i += 2) {
@@ -111,12 +116,28 @@ export class EventReader {
           }
         }
 
-        if (pending.length === 0) continue;
+        if (pending.length === 0) {
+          // Nothing to enrich/deliver, but we still consumed entries from
+          // the XREAD response — malformed entries or non-enriched events
+          // we skipped past. Commit the cursor so we don't replay them.
+          for (const [k, v] of batchLastIds) this.lastIds.set(k, v);
+          continue;
+        }
 
         // Only exec the pipeline if at least one event needs enrichment. This
         // keeps the fast path for "progress" / "stalled" / other enrichment-less
         // events free of a wasted round trip.
+        //
+        // If `exec()` throws — connection drop, MaxRetriesPerRequestError,
+        // NOSCRIPT on a bad day — the surrounding catch swallows it, we
+        // sleep, and the next poll tick retries with the OLD cursor because
+        // we haven't committed `batchLastIds` yet. That's the invariant
+        // guarded by tests/unit/event-reader.test.ts.
         const results: PipelineResult = cmdIdx > 0 ? await pipe.exec() : [];
+
+        // Enrichment succeeded — advance the stream cursor before firing
+        // handlers, so a handler that throws doesn't cause a replay either.
+        for (const [k, v] of batchLastIds) this.lastIds.set(k, v);
 
         for (const p of pending) {
           try {
