@@ -39,7 +39,7 @@ Any change to the following is a wire-format change:
 * Bun vs ioredis driver choice
 * The `SCRIPT LOAD` SHA — each process loads its own
 
-## Current surface (wireVersion = 1)
+## Current surface (wireVersion = 2)
 
 ### Keys
 
@@ -47,7 +47,7 @@ Any change to the following is a wire-format change:
 |---|---|---|
 | `taskora:meta` | Hash | Wire-format meta record (this doc's subject) |
 | `taskora:<prefix>:meta` | Hash | Same, per-prefix |
-| `taskora:{<task>}:wait` | List | FIFO queue of waiting job IDs |
+| `taskora:{<task>}:wait` | Sorted set | Waiting job IDs, keyed by composite score `-(priority * 1e13) + ts` so `ZPOPMIN` always yields a higher-priority job before any lower-priority one. Within a priority band ordering is best-effort (not FIFO) — multi-worker concurrency makes strict ordering unachievable at the execution layer anyway |
 | `taskora:{<task>}:active` | List | Claimed-but-not-finished job IDs |
 | `taskora:{<task>}:delayed` | Sorted set | Score = run-at epoch ms |
 | `taskora:{<task>}:completed` | Sorted set | Score = finish epoch ms |
@@ -183,3 +183,41 @@ that doesn't change the wire format doesn't touch this file at all.
    - No  → leave `MIN_COMPAT_VERSION` alone (enables rolling upgrade)
 4. [ ] Add a short note to the phase tracker in `docs/IMPLEMENTATION.md`
    describing the wire change and its motivation
+
+## Version history
+
+### 1 → 2 (priority-aware wait list)
+
+The wait list changed from `List` to `Sorted set`. Every Lua script that
+touched it (`enqueue`, `moveToActive`, `nack`, `stalledCheck`, `retryDLQ`,
+`retryAllDLQ`, `cancel`, `throttleEnqueue`, `deduplicateEnqueue`,
+`collectPush`, `versionDistribution`, `listJobDetails`) was rewritten from
+`LPUSH`/`RPUSH`/`RPOP`/`LLEN`/`LRANGE`/`LREM` to
+`ZADD`/`ZPOPMIN`/`ZCARD`/`ZRANGE`/`ZREM`. The composite score is
+`-(priority * 1e13) + ts` so `ZPOPMIN` always yields a higher-priority
+waiting job before any lower-priority one. Within a priority band
+ordering is best-effort — not a FIFO contract.
+
+This was done to implement `DispatchOptions.priority`, which was a
+decorative no-op on wireVersion=1 (the priority field was stored in the
+job hash but nothing sorted the wait list by it).
+
+**Upgrade is automatic.** Redis key type is part of the persisted layout
+— a wireVersion=1 process reading a `ZADD`-created wait set crashes with
+`WRONGTYPE` and vice versa — so the two formats cannot coexist. But a
+wireVersion=2 `RedisBackend.handshake()` detects a stored wireVersion=1
+meta record and runs an in-place `:wait` migrator before returning: for
+every `taskora:*:wait` key it finds of type `list`, it reads all job
+IDs, looks up each job's `priority` and `ts` fields, computes scores,
+and atomically replaces the list with a sorted set carrying the same
+members. Workers never run during this — `App.ensureConnected()` holds
+them off until the handshake resolves. The migrator chunks its work so
+Redis is never blocked on a single huge script; see
+`RedisBackend.migrateWaitV1ToV2` for pacing details.
+
+Operators upgrading existing clusters should see a one-line log entry
+at `app.start()` the first time a wireVersion=2 process connects to a
+wireVersion=1 keyspace, and nothing more. `MIN_COMPAT_VERSION` is still
+bumped to 2 so two processes running the old and new versions side by
+side against the same Redis can never observe each other mid-migration
+— the handshake refuses the mismatched pair.

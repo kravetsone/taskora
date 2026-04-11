@@ -51,6 +51,22 @@ The `code` field tells you what's going on and how to resolve it:
 
 You should never have to use this table, but it's here in case you do.
 
+## Known breaking upgrades
+
+Most releases are additive and roll through without intervention. When a release changes the persisted format in a way that the previous version cannot read, we call it out here. In every case we aim to ship an automatic migrator so operators still just "upgrade taskora, redeploy, done" — you should only ever need to read these sections if something goes wrong.
+
+### wireVersion 1 → 2 — priority-aware wait list
+
+**What changed.** The `:wait` list was promoted from a Redis `List` to a `Sorted set` so `DispatchOptions.priority` can actually order dequeues. Before this release, `priority` was a decorative field — stored on the job hash but completely ignored by the wait-list dequeue path. A wireVersion=2 worker now always dequeues a higher-priority waiting job before any lower-priority one.
+
+**Upgrade is automatic.** `RedisBackend.handshake()` detects stored wireVersion=1 meta on connect and runs an in-place migrator before any worker or scheduler touches the backend. The migrator walks the keyspace with `SCAN`, and for every `:wait` key of type `list` it reads all job IDs via chunked `LRANGE`, pipelines `HMGET priority,ts` lookups in batches, computes scores, and atomically swaps the list for a sorted set carrying the same members via a tiny `DEL + RENAME` Lua script. Redis is never blocked on a long script — chunk size is bounded to 500 IDs per batch — so even a keyspace with thousands of tasks and millions of waiting jobs migrates without triggering timeouts or failover.
+
+You should see a one-line log entry the first time a wireVersion=2 process starts against a wireVersion=1 Redis ("migrated N `:wait` lists to sorted sets") and nothing more. If the migration fails mid-run (e.g. Redis disconnects), the next `app.start()` retries from wherever it left off — individual `:wait` conversions are atomic per key, so partial state is safe to resume.
+
+**Why a rolling upgrade is still not safe.** A wireVersion=1 worker reading a `ZADD`-created wait set hits `WRONGTYPE` on the first `LPUSH`/`RPOP`, and vice versa. `MIN_COMPAT_VERSION` is bumped to 2 so if you do run both versions against one Redis during a staged rollout, the handshake refuses the old process with a `theirs_too_new` error — you never get a half-converted keyspace. The upgrader makes the *one-shot* upgrade seamless; it does not make the two versions coexist.
+
+**If you'd rather migrate manually.** The auto-migrator is idempotent and you can skip it by draining the `:wait` lists yourself before switching versions: stop dispatching, wait for in-flight work to finish, confirm `LLEN taskora:{<task>}:wait` is zero on every task, then deploy. Nothing breaks if you do — the new version just finds an empty keyspace and writes fresh sorted sets from scratch.
+
 ## Not to be confused with task payload versioning
 
 There are two independent versioning systems in taskora. They solve different problems and you'll interact with them at very different frequencies.
