@@ -321,6 +321,107 @@ describe("missed run catch-up", () => {
 
     await app.close();
   });
+
+  // Exactness boundary tests. The existing catch-up tests use loose bounds
+  // (`>= 4`, `<= 6`) because the 1s interval means normal ticks keep firing
+  // during the measurement window. These use a large `every` (10s) so the
+  // first tick processes the entire backlog and no normal ticks fire before
+  // we measure — giving us exact counts for each boundary case.
+  //
+  // Scheduler semantics under test (see `scheduler.ts:computeDispatches`):
+  //   missedCount = floor((now - lastRun) / interval)
+  //   catch-up          → dispatches = missedCount
+  //   catch-up-limit:N  → dispatches = min(missedCount, N)
+  //   skip              → dispatches = 1 (always, ignores backlog)
+  //
+  // Scenario: lastRun was 5 intervals ago, so missedCount = 5.
+
+  const runBoundaryScenario = async (
+    scheduleName: string,
+    taskName: string,
+    onMissed: string,
+  ): Promise<number[]> => {
+    const processed: number[] = [];
+    const app = createTaskora({
+      adapter: redisAdapter(url()),
+      scheduler: { pollInterval: 50 },
+    });
+    app.task<undefined, void>(taskName, async () => {
+      processed.push(Date.now());
+    });
+
+    const adapter = app.adapter;
+    await adapter.connect();
+
+    const now = Date.now();
+    const interval = 10_000;
+    const fiveIntervalsAgo = now - 5 * interval;
+    const storedConfig = JSON.stringify({
+      task: taskName,
+      data: null,
+      every: interval,
+      overlap: false,
+      onMissed,
+      lastRun: fiveIntervalsAgo,
+      lastJobId: null,
+    });
+
+    await redis.hset("taskora:schedules", scheduleName, storedConfig);
+    await redis.zadd("taskora:schedules:next", String(fiveIntervalsAgo + interval), scheduleName);
+
+    await app.start();
+
+    // First scheduler tick lands within ~pollInterval (50ms). After the
+    // burst, nextRun is set to now+10s so no additional dispatches can
+    // fire during our 300ms settle window.
+    await new Promise((r) => setTimeout(r, 300));
+
+    await app.close();
+    return processed;
+  };
+
+  it("catch-up-limit:N where N exactly matches missedCount — dispatches exactly N", async () => {
+    // missedCount = 5, limit = 5 → exactly 5
+    const processed = await runBoundaryScenario(
+      "boundary-exact",
+      "boundary-exact-task",
+      "catch-up-limit:5",
+    );
+    expect(processed.length).toBe(5);
+  });
+
+  it("catch-up-limit:N where N > missedCount — dispatches exactly missedCount (no padding)", async () => {
+    // missedCount = 5, limit = 100 → exactly 5 (capped by backlog, not by limit)
+    const processed = await runBoundaryScenario(
+      "boundary-over",
+      "boundary-over-task",
+      "catch-up-limit:100",
+    );
+    expect(processed.length).toBe(5);
+  });
+
+  it("catch-up-limit:N where N < missedCount — dispatches exactly N", async () => {
+    // missedCount = 5, limit = 2 → exactly 2
+    const processed = await runBoundaryScenario(
+      "boundary-under",
+      "boundary-under-task",
+      "catch-up-limit:2",
+    );
+    expect(processed.length).toBe(2);
+  });
+
+  it("catch-up policy with missedCount=5 — dispatches exactly 5 (unlimited)", async () => {
+    // Full catch-up: all missed runs replayed.
+    const processed = await runBoundaryScenario("boundary-full", "boundary-full-task", "catch-up");
+    expect(processed.length).toBe(5);
+  });
+
+  it("skip policy with missedCount=5 — dispatches exactly 1 (ignores backlog)", async () => {
+    // skip means "don't catch up, just run once now". missedCount doesn't
+    // matter: always 1 dispatch on the tick.
+    const processed = await runBoundaryScenario("boundary-skip", "boundary-skip-task", "skip");
+    expect(processed.length).toBe(1);
+  });
 });
 
 // ── Runtime management ──────────────────────────────────────────────
