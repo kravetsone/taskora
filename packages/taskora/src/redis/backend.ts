@@ -1,4 +1,5 @@
 import type { Taskora } from "../types.js";
+import { WIRE_VERSION } from "../wire-version.js";
 import type { RedisDriver } from "./driver.js";
 import { EventReader } from "./event-reader.js";
 import { JobWaiter } from "./job-waiter.js";
@@ -73,6 +74,25 @@ export class RedisBackend implements Taskora.Adapter {
   private blockingClients = new Map<string, RedisDriver>();
   private connected = false;
 
+  // ── Migration pause state ─────────────────────────────────────────
+  //
+  // When a foreign taskora process sets `taskora:<prefix>:migration:lock`
+  // with a `targetWireVersion >= ours`, we MUST stop touching the shared
+  // keyspace for the duration of the migration. These fields track that
+  // state and let every `eval()` block on it from the hot path.
+  //
+  // `migrationPaused` is flipped by the broadcast-channel listener
+  // and by a periodic safety-net poll. `migrationWake` is the resolver
+  // of the current pause promise — it fires when the flag flips back
+  // to false so any awaiting call resumes immediately instead of
+  // polling.
+  private migrationPaused = false;
+  private migrationWake: (() => void) | null = null;
+  private migrationPausePromise: Promise<void> | null = null;
+  private migrationSubDriver: RedisDriver | null = null;
+  private migrationUnsubscribe: (() => Promise<void>) | null = null;
+  private migrationPollTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(options: { driver: RedisDriver; ownsDriver: boolean; prefix?: string }) {
     this.driver = options.driver;
     this.ownsDriver = options.ownsDriver;
@@ -83,10 +103,12 @@ export class RedisBackend implements Taskora.Adapter {
     await this.driver.connect();
     this.connected = true;
     await this.loadScripts();
+    await this.startMigrationListener();
   }
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    await this.stopMigrationListener();
     // Blocking clients are stuck in BZPOPMIN — must force-disconnect, NOT
     // graceful close, or shutdown hangs up to the full block timeout.
     for (const client of this.blockingClients.values()) {
@@ -99,6 +121,155 @@ export class RedisBackend implements Taskora.Adapter {
     }
     if (this.ownsDriver) {
       await this.driver.close();
+    }
+  }
+
+  /**
+   * Subscribe to the reserved `migration:broadcast` channel and start
+   * a periodic safety-net poll against the `migration:lock` key. Any
+   * time a foreign migrator sets the lock with a `targetWireVersion`
+   * covering ours, we flip `migrationPaused = true` so every subsequent
+   * `eval()` on the hot path blocks until the lock clears.
+   *
+   * Called from `connect()`. The subscribe uses a duplicated driver so
+   * the main connection doesn't enter Redis subscriber mode (which
+   * would forbid every other command). Failures are non-fatal — if
+   * subscribe throws (very old Redis, missing perms, etc.) we fall
+   * back to the periodic poll alone.
+   */
+  private async startMigrationListener(): Promise<void> {
+    const { migrationChannel } = buildMigrationKeys(this.prefix);
+
+    try {
+      this.migrationSubDriver = await this.driver.duplicate();
+      this.migrationUnsubscribe = await this.migrationSubDriver.subscribe(migrationChannel, () => {
+        // Any broadcast message is a hint to re-check the lock. We
+        // intentionally ignore the payload content — future migrators
+        // may put anything in there.
+        this.refreshMigrationState().catch(() => {
+          // Broadcast-triggered refresh is best-effort; the periodic
+          // poll will retry.
+        });
+      });
+    } catch {
+      this.migrationSubDriver = null;
+      this.migrationUnsubscribe = null;
+    }
+
+    // Safety net: poll every 30 s even if pub/sub works, so a missed
+    // message (e.g. we were reconnecting when the migrator PUBLISHed)
+    // can't pin us in the wrong state forever. Seed with an immediate
+    // check so a process starting mid-migration notices right away.
+    await this.refreshMigrationState();
+    this.migrationPollTimer = setInterval(() => {
+      this.refreshMigrationState().catch(() => {
+        // Poll failure is non-fatal; next tick retries.
+      });
+    }, 30_000);
+    if (typeof this.migrationPollTimer.unref === "function") {
+      this.migrationPollTimer.unref();
+    }
+  }
+
+  private async stopMigrationListener(): Promise<void> {
+    if (this.migrationPollTimer) {
+      clearInterval(this.migrationPollTimer);
+      this.migrationPollTimer = null;
+    }
+    if (this.migrationUnsubscribe) {
+      try {
+        await this.migrationUnsubscribe();
+      } catch {
+        // ignored
+      }
+      this.migrationUnsubscribe = null;
+    }
+    if (this.migrationSubDriver) {
+      try {
+        await this.migrationSubDriver.disconnect();
+      } catch {
+        // ignored
+      }
+      this.migrationSubDriver = null;
+    }
+    // Release anyone still parked on migrationPausePromise — on shutdown
+    // we want them to unblock and exit, not hang.
+    if (this.migrationWake) {
+      this.migrationWake();
+      this.migrationWake = null;
+      this.migrationPausePromise = null;
+    }
+    this.migrationPaused = false;
+  }
+
+  /**
+   * Read the current migration lock and update `migrationPaused` to
+   * match. Called from three places: initial connect, every broadcast
+   * message, and the periodic safety-net poll. Idempotent — calling
+   * it multiple times concurrently is safe.
+   */
+  private async refreshMigrationState(): Promise<void> {
+    const { migrationLock } = buildMigrationKeys(this.prefix);
+    const ourWireVersion = this.ourWireVersion;
+
+    let shouldPause = false;
+    try {
+      const raw = (await this.driver.command("get", [migrationLock])) as string | null;
+      if (raw !== null) {
+        let targetVersion = Number.POSITIVE_INFINITY;
+        try {
+          const parsed = JSON.parse(raw) as Partial<MigrationLockPayload>;
+          if (typeof parsed.targetWireVersion === "number") {
+            targetVersion = parsed.targetWireVersion;
+          }
+        } catch {
+          // malformed → halt everyone (fail safe)
+        }
+        if (ourWireVersion <= targetVersion) {
+          shouldPause = true;
+        }
+      }
+    } catch {
+      // If the GET itself fails (network blip) don't flip state — the
+      // next poll will retry. Assume current state remains valid.
+      return;
+    }
+
+    if (shouldPause && !this.migrationPaused) {
+      this.migrationPaused = true;
+      this.migrationPausePromise = new Promise((resolve) => {
+        this.migrationWake = resolve;
+      });
+      // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
+      console.log(
+        "[taskora] foreign migration detected — pausing hot-path Redis ops until it clears",
+      );
+    } else if (!shouldPause && this.migrationPaused) {
+      this.migrationPaused = false;
+      if (this.migrationWake) {
+        this.migrationWake();
+        this.migrationWake = null;
+      }
+      this.migrationPausePromise = null;
+      // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
+      console.log("[taskora] foreign migration cleared — resuming hot-path Redis ops");
+    }
+  }
+
+  /** Wire version this build understands. */
+  private get ourWireVersion(): number {
+    return WIRE_VERSION;
+  }
+
+  /**
+   * Await the migration pause clearing. Returns immediately in the
+   * common case (no migration in progress). During a foreign
+   * migration this is what keeps workers out of the keyspace — the
+   * `eval()` method calls it for every non-internal script name.
+   */
+  private async waitForMigration(): Promise<void> {
+    while (this.migrationPaused && this.migrationPausePromise) {
+      await this.migrationPausePromise;
     }
   }
 
@@ -1776,6 +1947,13 @@ export class RedisBackend implements Taskora.Adapter {
     numkeys: number,
     ...args: (string | number)[]
   ): Promise<unknown> {
+    // Migration hot-path gate: if a foreign migrator is mid-run on this
+    // keyspace, block every user-facing script invocation until it
+    // clears. The migration-internal scripts and handshake itself are
+    // exempt — otherwise our own migration path would deadlock.
+    if (this.migrationPaused && !MIGRATION_EXEMPT_SCRIPTS.has(scriptName)) {
+      await this.waitForMigration();
+    }
     const sha = this.shas.get(scriptName);
     if (!sha) {
       throw new Error(`Script "${scriptName}" not loaded — call connect() first`);
@@ -1784,6 +1962,17 @@ export class RedisBackend implements Taskora.Adapter {
     return this.driver.evalSha(sha, numkeys, args, SCRIPT_MAP[scriptName]);
   }
 }
+
+/**
+ * Script names that are exempt from the migration-pause gate. These
+ * are the scripts that RUN during a migration — if we gated them the
+ * migration itself would deadlock against its own pause flag.
+ *
+ * Also includes `handshake` so a process whose handshake is trying
+ * to acquire the migration lock can still talk to the meta key
+ * while it's checking the current state.
+ */
+const MIGRATION_EXEMPT_SCRIPTS: ReadonlySet<string> = new Set(["handshake", "migrateWaitV1ToV2"]);
 
 /**
  * Normalize an HGETALL reply to `Record<string, string>`.

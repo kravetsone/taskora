@@ -280,6 +280,87 @@ describe("wire-format migration 1 → 2", () => {
     await app.close();
   });
 
+  it("running worker pauses hot-path dispatches when a foreign migration lock appears", async () => {
+    // Simulates the v2 → v3 upgrade scenario: v2 is happily running,
+    // then a future v3 process sets the migration lock with
+    // targetWireVersion=2. The v2 worker must stop touching the
+    // keyspace until the lock clears — broadcast-triggered, not just
+    // poll-triggered, so the pause happens instantly.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("pause-test", async () => null);
+    await app.ensureConnected();
+
+    // Set the lock with targetWireVersion >= ours.
+    const lockPayload = {
+      by: "taskora-wire-99",
+      reason: "test",
+      startedAt: Date.now(),
+      expectedDurationMs: 60_000,
+      targetWireVersion: WIRE_VERSION + 1,
+    };
+    await redis.set("taskora:migration:lock", JSON.stringify(lockPayload), "PX", 60_000);
+    // Broadcast so the backend reacts instantly without waiting for
+    // the 30s safety-net poll.
+    const pubRedis = new Redis(url());
+    await pubRedis.publish("taskora:migration:broadcast", "halt");
+    await pubRedis.quit();
+
+    // Give the broadcast handler a tick to flip the flag.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Dispatch attempt during the pause — should block, not error out.
+    let dispatchResolved = false;
+    const dispatchPromise = (async () => {
+      await task.dispatch({}).ensureEnqueued();
+      dispatchResolved = true;
+    })();
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(dispatchResolved).toBe(false);
+
+    // Clear the lock + broadcast "done" — the dispatch should unblock.
+    await redis.del("taskora:migration:lock");
+    const pub2 = new Redis(url());
+    await pub2.publish("taskora:migration:broadcast", "done");
+    await pub2.quit();
+    await dispatchPromise;
+    expect(dispatchResolved).toBe(true);
+
+    await app.close();
+  });
+
+  it("running worker IGNORES a foreign migration lock that only targets older versions", async () => {
+    // Regression for the targetWireVersion filter: a lock with
+    // targetWireVersion strictly LESS than ours means the migrator is
+    // rewriting a format we're already past. We must NOT halt.
+    const app = createTaskora({ adapter: redisAdapter(url()) });
+    const task = app.task("pause-skip", async () => null);
+    await app.ensureConnected();
+
+    const lockPayload = {
+      by: "taskora-wire-0",
+      reason: "test",
+      startedAt: Date.now(),
+      expectedDurationMs: 60_000,
+      targetWireVersion: WIRE_VERSION - 1,
+    };
+    await redis.set("taskora:migration:lock", JSON.stringify(lockPayload), "PX", 60_000);
+    const pubRedis = new Redis(url());
+    await pubRedis.publish("taskora:migration:broadcast", "halt");
+    await pubRedis.quit();
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Dispatch should go through immediately.
+    const start = Date.now();
+    await task.dispatch({}).ensureEnqueued();
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(300);
+
+    await redis.del("taskora:migration:lock");
+    await app.close();
+  });
+
   it("migrates a large-ish wait list (500 jobs) in one shot without timing out", async () => {
     // Stress guard against the per-key Lua script. 500 jobs gives ~1500
     // Redis calls inside the script (LRANGE + 500 HMGET + DEL + ZADD)

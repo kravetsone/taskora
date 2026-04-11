@@ -87,9 +87,14 @@ describe("job lifecycle", () => {
       return null;
     });
 
-    // Enqueue sequentially to guarantee FIFO ordering
+    // Enqueue sequentially with a 2 ms gap so each dispatch lands in
+    // a distinct millisecond — wait-list scoring is ts-based with 1 ms
+    // granularity, and same-ms FIFO is explicitly unspecified (see
+    // scripts.ts > "Wait-list ordering" header).
     await task.dispatch({ n: 1 });
+    await new Promise((r) => setTimeout(r, 2));
     await task.dispatch({ n: 2 });
+    await new Promise((r) => setTimeout(r, 2));
     await task.dispatch({ n: 3 });
 
     await app.start();
