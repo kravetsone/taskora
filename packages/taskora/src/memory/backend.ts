@@ -210,6 +210,50 @@ export class MemoryBackend implements Taskora.Adapter {
     this.dequeueWaiters.clear();
   }
 
+  // ── Priority-aware wait insertion ──
+  //
+  // The wait list used to be a plain FIFO string[]: push on enqueue,
+  // shift on dequeue. `DispatchOptions.priority` was stored in the job
+  // hash and completely ignored by the ordering logic.
+  //
+  // The insertion helpers below maintain `tq.wait` sorted by
+  // (priority desc, seq asc): higher priority comes out first, and
+  // within the same priority FIFO is preserved via the monotonically
+  // increasing `seq` field stamped at dispatch time. Binary search on
+  // insert is O(log n) comparisons + O(n) splice cost — acceptable up
+  // to tens of thousands of waiting jobs per task, which matches real
+  // production queue sizes for a task-centric library.
+  //
+  // Line-738 `unshift` put-back (concurrency-key skip) is intentionally
+  // NOT routed through this helper: we just popped that job from
+  // position 0, so restoring it at position 0 preserves the invariant.
+
+  private waitInsert(tq: TaskQueue, jobId: string): void {
+    const job = this.jobStore.get(jobId);
+    if (!job) {
+      tq.wait.push(jobId);
+      return;
+    }
+    const newPrio = Number(job.fields.priority || 0);
+    const newSeq = Number(job.fields.seq || 0);
+
+    let lo = 0;
+    let hi = tq.wait.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const other = this.jobStore.get(tq.wait[mid]);
+      const otherPrio = other ? Number(other.fields.priority || 0) : 0;
+      const otherSeq = other ? Number(other.fields.seq || 0) : 0;
+      // Goes before `mid` if: higher priority, or same priority with
+      // lower seq. Otherwise it goes after.
+      const goesBeforeMid =
+        newPrio > otherPrio || (newPrio === otherPrio && newSeq < otherSeq);
+      if (goesBeforeMid) hi = mid;
+      else lo = mid + 1;
+    }
+    tq.wait.splice(lo, 0, jobId);
+  }
+
   // ── Event helper ──
 
   private emit(task: string, event: string, jobId: string, fields: Record<string, string>): void {
@@ -297,7 +341,7 @@ export class MemoryBackend implements Taskora.Adapter {
       const job = this.jobStore.get(entry.member);
       if (!job) continue;
       job.fields.state = "waiting";
-      tq.wait.push(entry.member);
+      this.waitInsert(tq, entry.member);
       promoted++;
     }
     // Wake up to `promoted` blocking dequeuers so they can claim the newly
@@ -355,7 +399,7 @@ export class MemoryBackend implements Taskora.Adapter {
           job.fields.state = "waiting";
           job.fields.collectKey = "";
           job.fields.collectTask = "";
-          tq.wait.push(buffer.sentinelId);
+          this.waitInsert(tq, buffer.sentinelId);
           this.emit(task, "waiting", buffer.sentinelId, {});
         }
         buffer.sentinelId = null;
@@ -453,6 +497,10 @@ export class MemoryBackend implements Taskora.Adapter {
     job.data = data;
     job.fields = {
       ts: String(now),
+      // `seq` is a monotonic counter stamped by task.ts at dispatch time
+      // (see `_dispatchSeq`). Stored here so `waitInsert` can tiebreak
+      // within the same priority band.
+      seq: String((options as { seq?: number }).seq ?? 0),
       _v: String(options._v),
       attempt: "0",
       maxAttempts: String(options.maxAttempts ?? 1),
@@ -473,7 +521,7 @@ export class MemoryBackend implements Taskora.Adapter {
       job.fields.delay = String(options.delay);
       zAdd(tq.delayed, jobId, now + options.delay);
     } else {
-      tq.wait.push(jobId);
+      this.waitInsert(tq, jobId);
     }
     this.emit(task, "waiting", jobId, {});
   }
@@ -634,9 +682,14 @@ export class MemoryBackend implements Taskora.Adapter {
         state: "waiting",
         attempt: "0",
         maxAttempts: String(options.maxAttempts ?? 1),
+        // Collect tasks don't carry a per-batch priority — default to 0
+        // so waitInsert treats them as normal FIFO relative to other
+        // priority-0 jobs.
+        priority: "0",
+        seq: "0",
       };
       this.jobTask.set(jobId, task);
-      tq.wait.push(jobId);
+      this.waitInsert(tq, jobId);
       this.emit(task, "waiting", jobId, {});
 
       if (buffer.sentinelId) {
@@ -964,7 +1017,7 @@ export class MemoryBackend implements Taskora.Adapter {
 
     job.fields.state = "waiting";
     job.lock = null;
-    tq.wait.push(jobId);
+    this.waitInsert(tq, jobId);
     this.emit(task, "waiting", jobId, {});
   }
 
@@ -1112,7 +1165,7 @@ export class MemoryBackend implements Taskora.Adapter {
         failed.push(jobId);
       } else {
         job.fields.state = "waiting";
-        tq.wait.push(jobId);
+        this.waitInsert(tq, jobId);
         this.emit(task, "stalled", jobId, { count: String(count), action: "recovered" });
         recovered.push(jobId);
       }
@@ -1312,7 +1365,7 @@ export class MemoryBackend implements Taskora.Adapter {
       job.fields.error = "";
       job.fields.finishedOn = "";
     }
-    tq.wait.push(jobId);
+    this.waitInsert(tq, jobId);
     this.emit(task, "waiting", jobId, {});
     return true;
   }

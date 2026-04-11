@@ -357,26 +357,13 @@ describe("memoryAdapter.blockingDequeue", () => {
   });
 });
 
-describe("memoryAdapter.priority (known-broken: characterization)", () => {
-  // `DispatchOptions.priority` is accepted by the public API and stored in
-  // the job hash on both Redis and memory backends, but **nothing sorts the
-  // wait list by it**. Redis uses LPUSH/RPUSH for wait, memory uses
-  // `wait.push()` — both pure FIFO with seq ordering.
-  //
-  // These tests are marked `it.fails` on purpose: they encode the desired
-  // behaviour (higher priority dequeues first), run against the current
-  // implementation, and assert the current behaviour is wrong. When someone
-  // wires real priority ordering they should flip each `it.fails` to `it`
-  // and the tests will start passing. If the bug gets accidentally fixed
-  // (or accidentally "fixed" in a breaking way) without touching this file,
-  // `it.fails` turns red too — so both directions are guarded.
-  //
-  // TODO(priority): decide whether to implement priority ordering (ZSET
-  // wait on Redis + insertion-sort on memory) or remove the option from
-  // `DispatchOptions`. Leaving it half-implemented in a public API is a
-  // trap for users.
+describe("memoryAdapter.priority", () => {
+  // Priority-aware wait ordering: `tq.wait` is maintained sorted by
+  // (priority desc, seq asc) via `waitInsert`. Higher priority dequeues
+  // first, FIFO preserved within the same priority band via the monotonic
+  // `seq` counter stamped at dispatch time. See backend.ts > `waitInsert`.
 
-  it.fails("higher priority job dequeues before lower priority", async () => {
+  it("higher priority job dequeues before lower priority", async () => {
     const adapter = memoryAdapter();
     await adapter.connect();
 
@@ -394,7 +381,7 @@ describe("memoryAdapter.priority (known-broken: characterization)", () => {
     expect(r3?.id).toBe("low");
   });
 
-  it.fails("same-priority jobs preserve FIFO ordering within a band", async () => {
+  it("same-priority jobs preserve FIFO ordering within a band", async () => {
     const adapter = memoryAdapter();
     await adapter.connect();
 
