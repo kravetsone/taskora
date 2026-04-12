@@ -336,7 +336,158 @@ export class Task<TInput, TOutput> {
   dispatchMany(
     jobs: Array<{ data: TInput; options?: Taskora.DispatchOptions }>,
   ): ResultHandle<TOutput>[] {
-    return jobs.map((job) => this.dispatch(job.data, job.options));
+    // Collect tasks and adapters without enqueueBulk use the individual path
+    if (this.config.collect || !this.deps.adapter.enqueueBulk) {
+      return jobs.map((job) => this.dispatch(job.data, job.options));
+    }
+
+    // Partition: jobs with flow-control options must go through individual dispatch
+    const batchIndices: number[] = [];
+    const individualIndices: number[] = [];
+
+    for (let i = 0; i < jobs.length; i++) {
+      const opts = jobs[i].options;
+      if (opts?.debounce || opts?.throttle || opts?.deduplicate) {
+        individualIndices.push(i);
+      } else {
+        batchIndices.push(i);
+      }
+    }
+
+    // All special → fall back entirely
+    if (batchIndices.length === 0) {
+      return jobs.map((job) => this.dispatch(job.data, job.options));
+    }
+
+    const handles: ResultHandle<TOutput>[] = new Array(jobs.length);
+    const shouldValidate = this.deps.validateOnDispatch;
+    const dispatchTs = Date.now();
+    const batchIds = batchIndices.map(() => randomUUID());
+
+    // Per-job promise resolvers so validation failures reject individually
+    const resolvers: Array<{
+      resolve: () => void;
+      reject: (err: unknown) => void;
+    }> = [];
+    const jobPromises = batchIndices.map(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          resolvers.push({ resolve, reject });
+        }),
+    );
+
+    // Orchestrate: validate → bulk enqueue → resolve/reject handles
+    const adapter = this.deps.adapter;
+    const taskName = this.name;
+    const version = this.version;
+    const retryAttempts = this.config.retry?.attempts;
+    const ttlMaxMs = this.config.ttl ? this.config.ttl.maxMs : 0;
+    const taskConcurrencyLimit = this.config.concurrencyLimit;
+    const serializer = this.deps.serializer;
+    const inputSchema = this.inputSchema;
+
+    (async () => {
+      await this.deps.ensureConnected();
+
+      // Validate + serialize in parallel, collect per-job errors
+      type Prepared = {
+        jobId: string;
+        data: string;
+        options: {
+          _v: number;
+          maxAttempts?: number;
+          priority?: number;
+          expireAt?: number;
+          concurrencyKey?: string;
+          concurrencyLimit?: number;
+          ts: number;
+          delay?: number;
+        };
+      };
+
+      const prepared: (Prepared | null)[] = await Promise.all(
+        batchIndices.map(async (jobIndex, batchIdx) => {
+          try {
+            const job = jobs[jobIndex];
+            if (
+              shouldValidate &&
+              job.options?.skipValidation !== true &&
+              inputSchema
+            ) {
+              await validateSchema(inputSchema, job.data);
+            }
+            const serialized = serializer.serialize(job.data);
+            const opts = job.options;
+            const ttlMs = opts?.ttl ? parseDuration(opts.ttl) : ttlMaxMs;
+            const expireAt = ttlMs > 0 ? Date.now() + ttlMs : 0;
+            const concurrencyKey = opts?.concurrencyKey;
+            const concurrencyLimit = concurrencyKey
+              ? (opts?.concurrencyLimit ?? taskConcurrencyLimit ?? 1)
+              : 0;
+
+            return {
+              jobId: batchIds[batchIdx],
+              data: serialized,
+              options: {
+                _v: version,
+                maxAttempts: retryAttempts,
+                priority: opts?.priority,
+                expireAt: expireAt || undefined,
+                concurrencyKey,
+                concurrencyLimit: concurrencyLimit || undefined,
+                ts: dispatchTs,
+                delay: opts?.delay,
+              },
+            };
+          } catch (err) {
+            resolvers[batchIdx].reject(err);
+            return null;
+          }
+        }),
+      );
+
+      // Filter out validation failures
+      const valid: Prepared[] = [];
+      const validResolverIndices: number[] = [];
+      for (let i = 0; i < prepared.length; i++) {
+        if (prepared[i] !== null) {
+          valid.push(prepared[i]);
+          validResolverIndices.push(i);
+        }
+      }
+
+      if (valid.length > 0) {
+        await adapter.enqueueBulk!(taskName, valid);
+      }
+
+      // Resolve all valid handles
+      for (const idx of validResolverIndices) {
+        resolvers[idx].resolve();
+      }
+    })().catch((err) => {
+      // Pipeline-level failure (Redis down, etc.) — reject all pending
+      for (const r of resolvers) {
+        r.reject(err);
+      }
+    });
+
+    // Create handles for batchable jobs
+    for (let i = 0; i < batchIndices.length; i++) {
+      handles[batchIndices[i]] = new ResultHandle<TOutput>(
+        batchIds[i],
+        this.name,
+        this.deps.adapter,
+        this.deps.serializer,
+        jobPromises[i],
+      );
+    }
+
+    // Create handles for individual jobs
+    for (const idx of individualIndices) {
+      handles[idx] = this.dispatch(jobs[idx].data, jobs[idx].options);
+    }
+
+    return handles;
   }
 
   /**

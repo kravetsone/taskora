@@ -311,6 +311,22 @@ export namespace Taskora {
         _wfNode?: number;
       } & DispatchOptions,
     ): Promise<void>;
+    enqueueBulk?(
+      task: string,
+      jobs: Array<{
+        jobId: string;
+        data: string;
+        options: {
+          _v: number;
+          maxAttempts?: number;
+          expireAt?: number;
+          concurrencyKey?: string;
+          concurrencyLimit?: number;
+          _wf?: string;
+          _wfNode?: number;
+        } & DispatchOptions;
+      }>,
+    ): Promise<void>;
     debounceEnqueue(
       task: string,
       jobId: string,

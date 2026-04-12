@@ -507,6 +507,27 @@ export class MemoryBackend implements Taskora.Adapter {
     this.emit(task, "waiting", jobId, {});
   }
 
+  async enqueueBulk(
+    task: string,
+    jobs: Array<{
+      jobId: string;
+      data: string;
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        expireAt?: number;
+        concurrencyKey?: string;
+        concurrencyLimit?: number;
+        _wf?: string;
+        _wfNode?: number;
+      } & Taskora.DispatchOptions;
+    }>,
+  ): Promise<void> {
+    for (const job of jobs) {
+      await this.enqueue(task, job.jobId, job.data, job.options);
+    }
+  }
+
   async debounceEnqueue(
     task: string,
     jobId: string,

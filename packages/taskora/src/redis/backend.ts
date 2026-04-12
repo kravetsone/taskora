@@ -25,6 +25,7 @@ const MAX_LOGS_PER_JOB = 10_000;
 const SCRIPT_MAP: Record<string, string> = {
   enqueue: scripts.ENQUEUE,
   enqueueDelayed: scripts.ENQUEUE_DELAYED,
+  enqueueBulk: scripts.ENQUEUE_BULK,
   moveToActive: scripts.MOVE_TO_ACTIVE,
   ack: scripts.ACK,
   fail: scripts.FAIL,
@@ -631,6 +632,56 @@ export class RedisBackend implements Taskora.Adapter {
       concurrencyLimit,
       (options as { _wf?: string })._wf ?? "",
       String((options as { _wfNode?: number })._wfNode ?? ""),
+    );
+  }
+
+  async enqueueBulk(
+    task: string,
+    jobs: Array<{
+      jobId: string;
+      data: string;
+      options: {
+        _v: number;
+        maxAttempts?: number;
+        expireAt?: number;
+        concurrencyKey?: string;
+        concurrencyLimit?: number;
+        _wf?: string;
+        _wfNode?: number;
+      } & Taskora.JobOptions;
+    }>,
+  ): Promise<void> {
+    if (jobs.length === 0) return;
+
+    const keys = buildKeys(task, this.prefix);
+    const args: (string | number)[] = [keys.jobPrefix, String(jobs.length)];
+
+    for (const job of jobs) {
+      const now = String(job.options.ts ?? Date.now());
+      args.push(
+        job.jobId,
+        job.data,
+        now,
+        String(job.options._v),
+        String(job.options.priority ?? 0),
+        String(job.options.maxAttempts ?? 1),
+        String(job.options.expireAt ?? 0),
+        job.options.concurrencyKey ?? "",
+        String(job.options.concurrencyLimit ?? 0),
+        String(job.options.delay ?? 0),
+        (job.options as { _wf?: string })._wf ?? "",
+        String((job.options as { _wfNode?: number })._wfNode ?? ""),
+      );
+    }
+
+    await this.eval(
+      "enqueueBulk",
+      4,
+      keys.wait,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      ...args,
     );
   }
 

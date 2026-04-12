@@ -1609,3 +1609,110 @@ end
 local raw = redis.call('HMGET', metaKey, 'wireVersion', 'minCompat', 'writtenBy', 'writtenAt')
 return {raw[1] or '', raw[2] or '', raw[3] or '', raw[4] or '0'}
 `;
+
+// ── enqueueBulk ─────────────────────────────────────────────────────
+// Atomic bulk enqueue: loops over N jobs in a single Lua invocation.
+// Handles both immediate and delayed jobs; emits one marker ZADD at the
+// end instead of N.
+//
+// KEYS[1] = <task>:wait
+// KEYS[2] = <task>:delayed
+// KEYS[3] = <task>:events
+// KEYS[4] = <task>:marker
+// ARGV[1] = jobPrefix
+// ARGV[2] = jobCount
+// ARGV[3..] = per-job args, fixed stride of 12:
+//   [0] jobId
+//   [1] data (serialized)
+//   [2] ts (ms)
+//   [3] _v
+//   [4] priority
+//   [5] maxAttempts
+//   [6] expireAt (0 = no TTL)
+//   [7] concurrencyKey ("" = none)
+//   [8] concurrencyLimit ("0" = none)
+//   [9] delay (ms, 0 = immediate)
+//   [10] _wf ("" = none)
+//   [11] _wfNode ("" = none)
+// Returns: number of jobs enqueued
+export const ENQUEUE_BULK = `
+local prefix = ARGV[1]
+local count = tonumber(ARGV[2])
+local stride = 12
+local base = 3
+local hasImmediate = false
+local minDelayScore = nil
+
+for i = 0, count - 1 do
+  local off = base + i * stride
+  local jobId       = ARGV[off]
+  local data        = ARGV[off + 1]
+  local ts          = ARGV[off + 2]
+  local version     = ARGV[off + 3]
+  local priority    = ARGV[off + 4]
+  local maxAttempts = ARGV[off + 5]
+  local expireAt    = ARGV[off + 6]
+  local concKey     = ARGV[off + 7]
+  local concLimit   = ARGV[off + 8]
+  local delay       = tonumber(ARGV[off + 9])
+  local wf          = ARGV[off + 10]
+  local wfNode      = ARGV[off + 11]
+
+  local jobKey  = prefix .. jobId
+  local dataKey = jobKey .. ':data'
+
+  if delay > 0 then
+    local score = tonumber(ts) + delay
+    if minDelayScore == nil or score < minDelayScore then
+      minDelayScore = score
+    end
+
+    redis.call('HSET', jobKey,
+      'ts', ts, 'delay', ARGV[off + 9], '_v', version,
+      'attempt', 1, 'maxAttempts', maxAttempts,
+      'state', 'delayed', 'priority', priority)
+    if tonumber(expireAt) > 0 then
+      redis.call('HSET', jobKey, 'expireAt', expireAt)
+    end
+    if concKey ~= '' then
+      redis.call('HSET', jobKey, 'concurrencyKey', concKey,
+                                  'concurrencyLimit', concLimit)
+    end
+    redis.call('SET', dataKey, data)
+    redis.call('ZADD', KEYS[2], score, jobId)
+    redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+      'event', 'delayed', 'jobId', jobId)
+  else
+    hasImmediate = true
+    redis.call('HSET', jobKey,
+      'ts', ts, '_v', version,
+      'attempt', 1, 'maxAttempts', maxAttempts,
+      'state', 'waiting', 'priority', priority)
+    if tonumber(expireAt) > 0 then
+      redis.call('HSET', jobKey, 'expireAt', expireAt)
+    end
+    if concKey ~= '' then
+      redis.call('HSET', jobKey, 'concurrencyKey', concKey,
+                                  'concurrencyLimit', concLimit)
+    end
+    if wf ~= '' then
+      redis.call('HSET', jobKey, '_wf', wf, '_wfNode', wfNode)
+    end
+    redis.call('SET', dataKey, data)
+    local waitScore = -(tonumber(priority) or 0) * 1e13
+                      + (tonumber(ts) or 0)
+    redis.call('ZADD', KEYS[1], waitScore, jobId)
+    redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
+      'event', 'waiting', 'jobId', jobId)
+  end
+end
+
+-- Single marker wake instead of per-job
+if hasImmediate then
+  redis.call('ZADD', KEYS[4], 0, '0')
+elseif minDelayScore then
+  redis.call('ZADD', KEYS[4], 'LT', minDelayScore, '0')
+end
+
+return count
+`;
