@@ -212,21 +212,9 @@ export class MemoryBackend implements Taskora.Adapter {
 
   // ── Priority-aware wait insertion ──
   //
-  // The wait list used to be a plain FIFO string[]: push on enqueue,
-  // shift on dequeue. `DispatchOptions.priority` was stored in the job
-  // hash and completely ignored by the ordering logic.
-  //
-  // The insertion helpers below maintain `tq.wait` sorted by
-  // (priority desc, seq asc): higher priority comes out first, and
-  // within the same priority FIFO is preserved via the monotonically
-  // increasing `seq` field stamped at dispatch time. Binary search on
-  // insert is O(log n) comparisons + O(n) splice cost — acceptable up
-  // to tens of thousands of waiting jobs per task, which matches real
-  // production queue sizes for a task-centric library.
-  //
-  // Line-738 `unshift` put-back (concurrency-key skip) is intentionally
-  // NOT routed through this helper: we just popped that job from
-  // position 0, so restoring it at position 0 preserves the invariant.
+  // Maintains `tq.wait` sorted by (priority desc, ts asc): higher priority
+  // comes out first, within the same priority FIFO by timestamp. Binary
+  // search on insert is O(log n) comparisons + O(n) splice cost.
 
   private waitInsert(tq: TaskQueue, jobId: string): void {
     const job = this.jobStore.get(jobId);
@@ -235,7 +223,7 @@ export class MemoryBackend implements Taskora.Adapter {
       return;
     }
     const newPrio = Number(job.fields.priority || 0);
-    const newSeq = Number(job.fields.seq || 0);
+    const newTs = Number(job.fields.ts || 0);
 
     let lo = 0;
     let hi = tq.wait.length;
@@ -243,10 +231,8 @@ export class MemoryBackend implements Taskora.Adapter {
       const mid = (lo + hi) >>> 1;
       const other = this.jobStore.get(tq.wait[mid]);
       const otherPrio = other ? Number(other.fields.priority || 0) : 0;
-      const otherSeq = other ? Number(other.fields.seq || 0) : 0;
-      // Goes before `mid` if: higher priority, or same priority with
-      // lower seq. Otherwise it goes after.
-      const goesBeforeMid = newPrio > otherPrio || (newPrio === otherPrio && newSeq < otherSeq);
+      const otherTs = other ? Number(other.fields.ts || 0) : 0;
+      const goesBeforeMid = newPrio > otherPrio || (newPrio === otherPrio && newTs < otherTs);
       if (goesBeforeMid) hi = mid;
       else lo = mid + 1;
     }
@@ -496,10 +482,6 @@ export class MemoryBackend implements Taskora.Adapter {
     job.data = data;
     job.fields = {
       ts: String(now),
-      // `seq` is a monotonic counter stamped by task.ts at dispatch time
-      // (see `_dispatchSeq`). Stored here so `waitInsert` can tiebreak
-      // within the same priority band.
-      seq: String((options as { seq?: number }).seq ?? 0),
       _v: String(options._v),
       attempt: "0",
       maxAttempts: String(options.maxAttempts ?? 1),
@@ -685,7 +667,6 @@ export class MemoryBackend implements Taskora.Adapter {
         // so waitInsert treats them as normal FIFO relative to other
         // priority-0 jobs.
         priority: "0",
-        seq: "0",
       };
       this.jobTask.set(jobId, task);
       this.waitInsert(tq, jobId);

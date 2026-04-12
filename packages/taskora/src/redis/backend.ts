@@ -55,18 +55,6 @@ const SCRIPT_MAP: Record<string, string> = {
 };
 
 export class RedisBackend implements Taskora.Adapter {
-  // Process-monotonic dispatch counter. Stored alongside `ts` in every enqueued
-  // job hash as the `seq` field. The inspector's `waiting()` query sorts by
-  // `(ts, seq)` — `ts` gives wall-clock display order, `seq` disambiguates
-  // dispatches within the same millisecond so ordering stays deterministic
-  // across drivers.
-  //
-  // Verified: tests/integration/inspector-dlq.test.ts > waiting() returns
-  // enqueued jobs — under BunDriver without this field, two dispatches in the
-  // same millisecond landed in pure LPUSH (LIFO) order, while ioredis's
-  // pipeline reordering happened to put them in FIFO order by luck.
-  private static dispatchSeq = 0;
-
   private driver: RedisDriver;
   private ownsDriver: boolean;
   private prefix?: string;
@@ -594,16 +582,10 @@ export class RedisBackend implements Taskora.Adapter {
       concurrencyKey?: string;
       concurrencyLimit?: number;
       ts?: number;
-      seq?: number;
     } & Taskora.JobOptions,
   ): Promise<void> {
     const keys = buildKeys(task, this.prefix);
-    // Prefer caller-supplied ts/seq (captured synchronously at task.dispatch()
-    // call site) so parallel dispatches keep their original call order in the
-    // hash, regardless of which driver's command pipeline serializes them
-    // first. Fall back to local generation for legacy callers.
     const now = String(options.ts ?? Date.now());
-    const seq = String(options.seq ?? ++RedisBackend.dispatchSeq);
     const maxAttempts = String(options.maxAttempts ?? 1);
     const expireAt = String(options.expireAt ?? 0);
     const concurrencyKey = options.concurrencyKey ?? "";
@@ -649,7 +631,6 @@ export class RedisBackend implements Taskora.Adapter {
       concurrencyLimit,
       (options as { _wf?: string })._wf ?? "",
       String((options as { _wfNode?: number })._wfNode ?? ""),
-      seq,
     );
   }
 
@@ -1238,7 +1219,7 @@ export class RedisBackend implements Taskora.Adapter {
   > = {
     // Wait list is a ZSET (priority desc, ts asc) — ZRANGE gives
     // dequeue order directly. Active list is still a LIST with
-    // deterministic client-side (ts, seq) re-sort via the `lrange` mode.
+    // deterministic client-side ts re-sort via the `lrange` mode.
     waiting: { key: "wait", mode: "wait_zrange" },
     active: { key: "active", mode: "lrange" },
     delayed: { key: "delayed", mode: "zrange" },

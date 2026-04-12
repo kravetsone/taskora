@@ -9,7 +9,7 @@
  *   • Key layout and naming — `taskora:{task}:wait`, `{id}:data`, `{id}:result`, …
  *   • Job hash field names and their expected encodings
  *     (`state`, `attempt`, `_v`, `stalledCount`, `cancelledAt`, `_wf`, `_wfNode`,
- *     `expireAt`, `maxAttempts`, `seq`, `processedOn`, `finishedOn`, …)
+ *     `expireAt`, `maxAttempts`, `processedOn`, `finishedOn`, …)
  *   • Stream event shapes — the fields attached to XADD entries on `<task>:events`
  *     (completed/failed/retrying/progress/stalled/cancelled)
  *   • Lua script semantics over shared state (ACK/FAIL/NACK/…) — renaming a

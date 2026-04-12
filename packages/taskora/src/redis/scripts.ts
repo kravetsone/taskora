@@ -72,8 +72,7 @@ redis.call('HSET', jobKey,
   'attempt', 1,
   'maxAttempts', ARGV[7],
   'state', 'waiting',
-  'priority', ARGV[6],
-  'seq', ARGV[13])
+  'priority', ARGV[6])
 
 if tonumber(ARGV[8]) > 0 then
   redis.call('HSET', jobKey, 'expireAt', ARGV[8])
@@ -784,28 +783,15 @@ if mode == 'wait_zrange' then
   -- first, FIFO within the same priority).
   ids = redis.call('ZRANGE', KEYS[1], offset, offset + limit - 1)
 elseif mode == 'lrange' then
-  -- Active list is still a LIST (LPUSH-ordered, newest at head). Parallel
-  -- dispatches can land in a race-order that depends on the driver's
-  -- pipeline semantics (ioredis reorders; BunDriver preserves). To give
-  -- the inspector a deterministic FIFO view regardless of driver, sort by
-  -- (ts, seq) — 'ts' gives wall-clock display order, and 'seq'
-  -- disambiguates dispatches that land in the same millisecond.
-  --
-  -- Verified under BunDriver via tests/integration/inspector-dlq.test.ts >
-  -- waiting() returns enqueued jobs. 'seq' is populated by enqueue.lua
-  -- (ARGV[13]) from a process-monotonic counter in RedisBackend.
+  -- Active list is still a LIST (LPUSH-ordered, newest at head). Sort by
+  -- ts for a deterministic chronological view regardless of driver.
   local all = redis.call('LRANGE', KEYS[1], 0, -1)
   local sortable = {}
   for i = 1, #all do
-    local meta = redis.call('HMGET', prefix .. all[i], 'ts', 'seq')
-    local ts = tonumber(meta[1] or '0')
-    local seq = tonumber(meta[2] or '0')
-    sortable[#sortable + 1] = { all[i], ts, seq }
+    local ts = tonumber(redis.call('HGET', prefix .. all[i], 'ts') or '0')
+    sortable[#sortable + 1] = { all[i], ts }
   end
-  table.sort(sortable, function(a, b)
-    if a[2] ~= b[2] then return a[2] < b[2] end
-    return a[3] < b[3]
-  end)
+  table.sort(sortable, function(a, b) return a[2] < b[2] end)
   ids = {}
   local from = offset + 1
   local to = math.min(#sortable, offset + limit)

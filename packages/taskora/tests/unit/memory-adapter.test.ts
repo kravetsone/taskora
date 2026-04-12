@@ -359,9 +359,8 @@ describe("memoryAdapter.blockingDequeue", () => {
 
 describe("memoryAdapter.priority", () => {
   // Priority-aware wait ordering: `tq.wait` is maintained sorted by
-  // (priority desc, seq asc) via `waitInsert`. Higher priority dequeues
-  // first, FIFO preserved within the same priority band via the monotonic
-  // `seq` counter stamped at dispatch time. See backend.ts > `waitInsert`.
+  // (priority desc, ts asc) via `waitInsert`. Higher priority dequeues
+  // first, FIFO preserved within the same priority band by timestamp.
 
   it("higher priority job dequeues before lower priority", async () => {
     const adapter = memoryAdapter();
