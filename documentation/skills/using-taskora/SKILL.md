@@ -130,6 +130,8 @@ sendEmailTask.dispatch(data, {
 })
 ```
 
+Ordering: **(priority desc, timestamp asc)** — best-effort, not strict FIFO. No global sequence counter. For strict per-key ordering use `concurrencyKey` + `concurrencyLimit: 1`.
+
 Bulk dispatch:
 
 ```typescript

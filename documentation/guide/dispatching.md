@@ -58,6 +58,18 @@ sendEmailTask.dispatch(data, {
 })
 ```
 
+## Ordering Guarantees
+
+Jobs are dequeued in **(priority desc, timestamp asc)** order. Higher-priority jobs always come first; within the same priority band, earlier dispatches come first.
+
+This is **best-effort, not a strict FIFO contract**:
+
+- Multiple workers dequeue concurrently — execution order may differ from dequeue order.
+- Dispatches from separate processes that land in the same millisecond have no deterministic tiebreaker. Taskora uses UUID job IDs (generated client-side, no Redis round-trip), so there is no global sequence counter.
+- Delayed, retried, and debounced jobs re-enter the queue with a fresh timestamp.
+
+If your workload requires strict per-key ordering, use `concurrencyKey` with `concurrencyLimit: 1` — this serializes execution for that key while leaving other keys concurrent.
+
 ## Flow Control Options
 
 ### Debounce

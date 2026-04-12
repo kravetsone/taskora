@@ -97,7 +97,6 @@ Stable fields (reading or writing any of these by a new name is a wire change):
 | `maxAttempts` | integer | Total attempts allowed |
 | `priority` | integer | Queue priority |
 | `ts` | epoch ms | Enqueue timestamp |
-| `seq` | integer | Process-monotonic dispatch tiebreaker |
 | `processedOn` | epoch ms | First moved to active |
 | `finishedOn` | epoch ms | Terminal state entry |
 | `stalledCount` | integer | Times recovered from stall |
