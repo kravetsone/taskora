@@ -83,6 +83,35 @@ expect(result.messageId).toBeDefined();
 
 BullMQ requires `maxRetriesPerRequest: null` and `enableReadyCheck: false` — without them, a reconnect kills the worker loop. Taskora's blocking commands run inside internal retry loops, so ioredis defaults just work. One less footgun on day one.
 
+### One object, all capabilities
+
+BullMQ splits every concern into a separate class — `Queue` for dispatch, `Worker` for processing, `QueueEvents` for listening, `FlowProducer` for flows. You wire them together by name strings, and types don't flow between them.
+
+Taskora puts everything on the task:
+
+```ts
+const sendEmailTask = taskora.task("send-email", {
+  schema: { in: EmailInput, out: EmailOutput },
+  retry: { attempts: 3, backoff: "exponential" },
+  timeout: "30s",
+  concurrency: 10,
+  schedule: { cron: "0 9 * * MON" },
+  middleware: [withSentry],
+  handler: async (data, ctx) => {
+    ctx.log.info("sending", { to: data.to });
+    const id = await mailer.send(data);
+    return { messageId: id };
+  },
+});
+
+// dispatch, events, workflows, inspect — all from the same object
+sendEmailTask.dispatch({ to: "a@b.com", body: "hi" });
+sendEmailTask.on("completed", ({ result }) => { /* typed */ });
+sendEmailTask.s({ to: "a@b.com", body: "hi" }).pipe(logTask.s());
+```
+
+Schema, retry, timeout, concurrency, schedule, middleware, handler — one definition, one place to look. No name-string wiring, no scattered config across multiple class instances.
+
 ### Everything composes with types
 
 Contracts, workflows, middleware, events — types flow through every layer:
@@ -104,6 +133,8 @@ const pipeline = chain(
 const { cdn } = await pipeline.dispatch().result;
 //      ^? string
 ```
+
+No `as unknown as` casts, no manual generics, no separate type packages. Define the schema once — types propagate from dispatch through middleware, handler, events, workflows, contracts, and result handles.
 
 ## Key Differences
 
