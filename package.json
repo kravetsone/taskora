@@ -15,7 +15,8 @@
     "test:deno": "bun run --filter '*' test:deno",
     "test:all": "bun run --filter '*' test:all",
     "lint": "biome check .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "bench": "bun run --filter '@taskora/bench' bench"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4"

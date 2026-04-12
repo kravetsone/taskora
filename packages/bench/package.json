@@ -1,0 +1,21 @@
+{
+  "name": "@taskora/bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "bun run src/index.ts",
+    "bench:taskora": "bun run src/index.ts --libraries taskora",
+    "bench:bullmq": "bun run src/index.ts --libraries bullmq",
+    "bench:json": "bun run src/index.ts --json"
+  },
+  "dependencies": {
+    "taskora": "workspace:*",
+    "bullmq": "^5",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "@testcontainers/redis": "^10.18.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.2"
+  }
+}
