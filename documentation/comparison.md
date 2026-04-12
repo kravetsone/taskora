@@ -33,6 +33,78 @@ Choosing a task queue for Node.js? Here's an honest feature comparison.
 | **Events** | Redis Streams (fan-out) | QueueEvents | — | Pub/sub |
 | **Backend** | Redis, Memory | Redis | MongoDB | PostgreSQL |
 
+## Developer Experience
+
+Beyond the feature checklist, day-to-day DX is where Taskora pulls ahead.
+
+### Typed from dispatch to result
+
+```ts
+const handle = sendEmailTask.dispatch({ to: "a@b.com", body: "hi" });
+//    ^? ResultHandle<{ messageId: string }>
+
+const { messageId } = await handle.result;
+//      ^? string — inferred end-to-end
+```
+
+`dispatch()` is synchronous — it returns a typed `ResultHandle` immediately. `await handle` confirms enqueue, `handle.result` resolves to the typed output. In BullMQ you need a separate `QueueEvents` instance and `job.waitUntilFinished(queueEvents)` with no output typing.
+
+### Manual retry from the handler
+
+```ts
+handler: async (data, ctx) => {
+  const res = await fetch(data.url);
+  if (res.status === 429) {
+    const retryAfter = Number(res.headers.get("retry-after")) * 1000;
+    throw ctx.retry({ delay: retryAfter, reason: "rate-limited" });
+  }
+  return res.json();
+}
+```
+
+`ctx.retry()` lets you control exactly when the next attempt fires — useful for respecting upstream `Retry-After` headers. In BullMQ you throw an error and hope the static backoff config aligns.
+
+### Test without infrastructure
+
+```ts
+const runner = createTestRunner({ from: app }); // patches prod app to memory
+
+const { result, state, logs } = await runner.execute(sendEmailTask, {
+  to: "a@b.com", body: "hi"
+});
+
+expect(state).toBe("completed");
+expect(result.messageId).toBeDefined();
+```
+
+`createTestRunner({ from: app })` takes your production app with all its tasks, middleware, and migrations — patches every task to use an in-memory backend. No Docker, no Redis, no mocks. Virtual time lets you test delayed jobs and retry backoff without `setTimeout`.
+
+### Zero-config ioredis
+
+BullMQ requires `maxRetriesPerRequest: null` and `enableReadyCheck: false` — without them, a reconnect kills the worker loop. Taskora's blocking commands run inside internal retry loops, so ioredis defaults just work. One less footgun on day one.
+
+### Everything composes with types
+
+Contracts, workflows, middleware, events — types flow through every layer:
+
+```ts
+// contract — no handler import needed on the producer
+const resizeContract = defineTask({
+  name: "resize-image",
+  schema: { in: ImageInput, out: ImageOutput },
+});
+
+// workflow — output types chain automatically
+const pipeline = chain(
+  downloadTask.s({ url }),       // → Buffer
+  resizeTask.s(),                // Buffer → ImageOutput
+  uploadTask.s(),                // ImageOutput → { cdn: string }
+);
+
+const { cdn } = await pipeline.dispatch().result;
+//      ^? string
+```
+
 ## Key Differences
 
 ### vs BullMQ
