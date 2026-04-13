@@ -109,8 +109,17 @@
  *          wire-version-2 process (WRONGTYPE on first ZADD) and vice
  *          versa — this is a hard upgrade, not a rolling one. Drain the
  *          waits (or flush the keyspace) before switching versions.
+ *   2 → 3: purely additive. Two new Lua scripts shipped —
+ *          ACK_AND_MOVE_TO_ACTIVE and FAIL_AND_MOVE_TO_ACTIVE — that fuse
+ *          ack+dequeue (and fail+dequeue) into a single EVALSHA so each
+ *          worker slot can self-feed without funneling through the poll
+ *          loop. No key layout, hash field, or sorted-set score meaning
+ *          changed; existing ACK/FAIL/MOVE_TO_ACTIVE scripts are still
+ *          present and produce identical Redis state. Wire-version-2
+ *          readers can safely share a backend with wire-version-3 writers,
+ *          so `MIN_COMPAT_VERSION` stays at 2 and rolling upgrades work.
  */
-export const WIRE_VERSION = 2;
+export const WIRE_VERSION = 3;
 
 /**
  * The oldest wire-format version this build is still willing to coexist

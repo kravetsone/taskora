@@ -1008,6 +1008,33 @@ export class MemoryBackend implements Taskora.Adapter {
     }
   }
 
+  async ackAndDequeue(
+    task: string,
+    jobId: string,
+    token: string,
+    result: string,
+    newToken: string,
+    newLockTtl: number,
+    options?: Taskora.DequeueOptions,
+  ): Promise<Taskora.DequeueResult | null> {
+    await this.ack(task, jobId, token, result);
+    return this.dequeue(task, newLockTtl, newToken, options);
+  }
+
+  async failAndDequeue(
+    task: string,
+    jobId: string,
+    token: string,
+    error: string,
+    retry: { delay: number } | undefined,
+    newToken: string,
+    newLockTtl: number,
+    options?: Taskora.DequeueOptions,
+  ): Promise<Taskora.DequeueResult | null> {
+    await this.fail(task, jobId, token, error, retry);
+    return this.dequeue(task, newLockTtl, newToken, options);
+  }
+
   async nack(task: string, jobId: string, token: string): Promise<void> {
     const tq = this.q(task);
     const job = this.jobStore.get(jobId);

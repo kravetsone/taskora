@@ -175,211 +175,324 @@ export class Worker {
     }
   }
 
-  private processJob(raw: Taskora.DequeueResult, token: string): void {
-    const controller = new AbortController();
+  private processJob(initialRaw: Taskora.DequeueResult, initialToken: string): void {
+    // ── Self-feeding slot ────────────────────────────────────────────
+    //
+    // Each call to processJob() represents one concurrency slot. Instead of
+    // returning after one job and asking the poll loop to refill the slot,
+    // the while loop below self-feeds: on successful ack/fail the adapter
+    // atomically dequeues the next job (via `ackAndDequeue`/`failAndDequeue`)
+    // and we keep going inside the same slot promise.
+    //
+    // This eliminates the serial-poll-loop bottleneck at high concurrency —
+    // each of the N slots pipelines ack+dequeue independently instead of
+    // funneling ack, then blockingDequeue, then ack, through one loop.
+    //
+    // `currentRaw` / `currentToken` / `currentController` mutate across
+    // iterations so the closures captured by `extendAllLocks` and the cancel
+    // subscription always see the job currently being processed in this slot.
+    let currentRaw = initialRaw;
+    let currentToken = initialToken;
+    let currentController = new AbortController();
+
+    // Forward-declared so the loop body can install it in activeJobs entries
+    // when transitioning mid-chain. Safe: the loop body only reads `tracked`
+    // after its first await (by which time the assignment below has run).
+    let tracked!: Promise<void>;
 
     const promise = (async () => {
-      // ── Version checks ──────────────────────────────────────────
-      const jobVersion = raw._v ?? 1;
-      const taskVersion = this.task.version;
+      chain: while (true) {
+        const raw = currentRaw;
+        const token = currentToken;
+        const controller = currentController;
 
-      // Future version — nack silently, leave for a newer worker
-      if (jobVersion > taskVersion) {
+        // ── Version checks ────────────────────────────────────────
+        const jobVersion = raw._v ?? 1;
+        const taskVersion = this.task.version;
+
+        // Future version — nack silently, leave for a newer worker.
+        // Don't self-feed: the nacked job could pop right back.
+        if (jobVersion > taskVersion) {
+          try {
+            await this.adapter.nack(this.task.name, raw.id, token);
+          } catch {
+            // nack failed (e.g. lock expired)
+          }
+          break chain;
+        }
+
+        // Expired version — fail permanently, migration code is gone
+        if (jobVersion < this.task.since) {
+          const msg = `Job version ${jobVersion} is below minimum supported version ${this.task.since} — migration no longer available`;
+          try {
+            await this.adapter.fail(this.task.name, raw.id, token, msg);
+          } catch {
+            // fail() itself failed
+          }
+          break chain;
+        }
+
+        let handlerResult: unknown;
+        let data: unknown;
+        let ctx: Taskora.Context | undefined;
+        // In-flight progress/log writes kicked off by the handler via
+        // ctx.progress / ctx.log. They are fire-and-forget from the handler's
+        // perspective (ctx.progress returns void) but the worker MUST await
+        // them before the terminal ack/fail — otherwise the "progress" XADD
+        // can land in the Redis stream after the "completed" XADD, and any
+        // consumer that clears state on the terminal event would then receive
+        // stale progress events. See events.test.ts > "task event ordering".
+        const pendingWrites: Promise<unknown>[] = [];
+        const flushPendingWrites = async () => {
+          if (pendingWrites.length === 0) return;
+          const snapshot = pendingWrites.splice(0, pendingWrites.length);
+          await Promise.allSettled(snapshot);
+        };
+
         try {
-          await this.adapter.nack(this.task.name, raw.id, token);
-        } catch {
-          // nack failed (e.g. lock expired)
-        }
-        return;
-      }
+          data = this.serializer.deserialize(raw.data);
 
-      // Expired version — fail permanently, migration code is gone
-      if (jobVersion < this.task.since) {
-        const msg = `Job version ${jobVersion} is below minimum supported version ${this.task.since} — migration no longer available`;
-        try {
-          await this.adapter.fail(this.task.name, raw.id, token, msg);
-        } catch {
-          // fail() itself failed
-        }
-        return;
-      }
+          // ── Migration + validation ──────────────────────────────
+          if (jobVersion < taskVersion) {
+            data = runMigrations(data, jobVersion, taskVersion, this.task.migrations);
+          }
 
-      let handlerResult: unknown;
-      let data: unknown;
-      let ctx: Taskora.Context | undefined;
-      // In-flight progress/log writes kicked off by the handler via
-      // ctx.progress / ctx.log. They are fire-and-forget from the handler's
-      // perspective (ctx.progress returns void) but the worker MUST await
-      // them before the terminal ack/fail — otherwise the "progress" XADD
-      // can land in the Redis stream after the "completed" XADD, and any
-      // consumer that clears state on the terminal event would then receive
-      // stale progress events. See events.test.ts > "task event ordering".
-      const pendingWrites: Promise<unknown>[] = [];
-      const flushPendingWrites = async () => {
-        if (pendingWrites.length === 0) return;
-        // Snapshot and clear so late writes (which shouldn't happen after
-        // the handler returns, but defensive) don't block a second flush.
-        const snapshot = pendingWrites.splice(0, pendingWrites.length);
-        await Promise.allSettled(snapshot);
-      };
-      try {
-        data = this.serializer.deserialize(raw.data);
+          // Validate input after migration (applies .default() values)
+          // Only for versioned tasks (version > 1 or has migrations)
+          if (this.task.inputSchema && (taskVersion > 1 || this.task.migrations.size > 0)) {
+            data = await validateSchema(this.task.inputSchema, data);
+          }
 
-        // ── Migration + validation ────────────────────────────────
-        if (jobVersion < taskVersion) {
-          data = runMigrations(data, jobVersion, taskVersion, this.task.migrations);
-        }
-
-        // Validate input after migration (applies .default() values)
-        // Only for versioned tasks (version > 1 or has migrations)
-        if (this.task.inputSchema && (taskVersion > 1 || this.task.migrations.size > 0)) {
-          data = await validateSchema(this.task.inputSchema, data);
-        }
-
-        ctx = createContext({
-          id: raw.id,
-          attempt: raw.attempt,
-          timestamp: raw.timestamp,
-          signal: controller.signal,
-          onHeartbeat: () => {
-            this.adapter
-              .extendLock(this.task.name, raw.id, token, LOCK_TTL)
-              .then((status) => {
-                if (status === "cancelled") controller.abort("cancelled");
-              })
-              .catch(() => {});
-          },
-          onProgress: (value) => {
-            pendingWrites.push(
-              this.adapter.setProgress(this.task.name, raw.id, value).catch(() => {}),
-            );
-          },
-          onLog: (entry) => {
-            pendingWrites.push(this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {}));
-          },
-        });
-
-        // Build middleware context (superset of Context)
-        const mwCtx: Taskora.MiddlewareContext = Object.assign(ctx, {
-          task: { name: this.task.name },
-          data,
-          result: undefined as unknown,
-        });
-
-        const timeoutMs = this.task.config.timeout;
-        if (timeoutMs > 0 && timeoutMs < Number.POSITIVE_INFINITY) {
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              controller.abort("timeout");
-              reject(new TimeoutError(raw.id, timeoutMs));
-            }, timeoutMs);
-            this.composed(mwCtx).then(
-              () => {
-                clearTimeout(timer);
-                resolve();
-              },
-              (err) => {
-                clearTimeout(timer);
-                reject(err);
-              },
-            );
+          ctx = createContext({
+            id: raw.id,
+            attempt: raw.attempt,
+            timestamp: raw.timestamp,
+            signal: controller.signal,
+            onHeartbeat: () => {
+              this.adapter
+                .extendLock(this.task.name, raw.id, token, LOCK_TTL)
+                .then((status) => {
+                  if (status === "cancelled") controller.abort("cancelled");
+                })
+                .catch(() => {});
+            },
+            onProgress: (value) => {
+              pendingWrites.push(
+                this.adapter.setProgress(this.task.name, raw.id, value).catch(() => {}),
+              );
+            },
+            onLog: (entry) => {
+              pendingWrites.push(
+                this.adapter.addLog(this.task.name, raw.id, entry).catch(() => {}),
+              );
+            },
           });
-        } else {
-          await this.composed(mwCtx);
+
+          // Build middleware context (superset of Context)
+          const mwCtx: Taskora.MiddlewareContext = Object.assign(ctx, {
+            task: { name: this.task.name },
+            data,
+            result: undefined as unknown,
+          });
+
+          const timeoutMs = this.task.config.timeout;
+          if (timeoutMs > 0 && timeoutMs < Number.POSITIVE_INFINITY) {
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(() => {
+                controller.abort("timeout");
+                reject(new TimeoutError(raw.id, timeoutMs));
+              }, timeoutMs);
+              this.composed(mwCtx).then(
+                () => {
+                  clearTimeout(timer);
+                  resolve();
+                },
+                (err) => {
+                  clearTimeout(timer);
+                  reject(err);
+                },
+              );
+            });
+          } else {
+            await this.composed(mwCtx);
+          }
+          handlerResult = mwCtx.result;
+          if (this.task.outputSchema) {
+            handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
+          }
+        } catch (err) {
+          // Cancellation — don't self-feed, let poll loop handle re-fill
+          if (controller.signal.aborted && controller.signal.reason === "cancelled") {
+            await flushPendingWrites();
+            await this.handleCancellation(raw.id, token, data, ctx);
+            break chain;
+          }
+
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          const retryConfig = this.task.config.retry;
+          let retryInfo: { delay: number } | undefined;
+
+          if (err instanceof TimeoutError) {
+            // Timeout errors are not retried by default —
+            // user must add TimeoutError to retryOn explicitly
+            if (retryConfig?.retryOn && shouldRetry(err, raw.attempt, retryConfig)) {
+              retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
+            }
+          } else if (err instanceof RetryError) {
+            // Manual retry via ctx.retry() or throw new RetryError()
+            // Always retry unless attempts exhausted
+            if (!retryConfig || raw.attempt >= retryConfig.attempts) {
+              retryInfo = undefined;
+            } else {
+              const delay =
+                err.delay ?? (retryConfig ? computeDelay(raw.attempt, retryConfig) : 1000);
+              retryInfo = { delay };
+            }
+          } else if (retryConfig && shouldRetry(err, raw.attempt, retryConfig)) {
+            retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
+          }
+
+          this.onJobError?.({
+            task: this.task.name,
+            jobId: raw.id,
+            error: err,
+            attempt: raw.attempt,
+            maxAttempts: retryConfig?.attempts ?? 1,
+            willRetry: !!retryInfo,
+          });
+
+          await flushPendingWrites();
+
+          // Self-fed fail path: atomically fail + dequeue next
+          if (this.running && this.adapter.failAndDequeue) {
+            const newToken = randomUUID();
+            let next: Taskora.DequeueResult | null = null;
+            try {
+              next = await this.adapter.failAndDequeue(
+                this.task.name,
+                raw.id,
+                token,
+                errorMsg,
+                retryInfo,
+                newToken,
+                LOCK_TTL,
+                this.dequeueOptions,
+              );
+            } catch {
+              // failAndDequeue failed (e.g. lock expired)
+              break chain;
+            }
+
+            // Fire-and-forget workflow failure notification — don't block
+            // the next job on cascade cancellation roundtrips.
+            if (!retryInfo) {
+              this.failWorkflow(raw.id, errorMsg).catch(() => {});
+            }
+
+            if (next && this.running) {
+              // Swap activeJobs entry: old job → new job
+              this.activeJobs.delete(currentRaw.id);
+              currentRaw = next;
+              currentToken = newToken;
+              currentController = new AbortController();
+              this.activeJobs.set(currentRaw.id, {
+                promise: tracked,
+                token: currentToken,
+                controller: currentController,
+              });
+              continue chain;
+            }
+            break chain;
+          }
+
+          // Shutdown or adapter without failAndDequeue → plain fail
+          try {
+            await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
+          } catch {
+            // fail() itself failed (e.g. lock expired)
+            break chain;
+          }
+          if (!retryInfo) {
+            await this.failWorkflow(raw.id, errorMsg);
+          }
+          break chain;
         }
-        handlerResult = mwCtx.result;
-        if (this.task.outputSchema) {
-          handlerResult = await validateSchema(this.task.outputSchema, handlerResult);
-        }
-      } catch (err) {
-        // Check if this was a cancellation
+
+        // Cancelled while handler was running (handler didn't check signal)
         if (controller.signal.aborted && controller.signal.reason === "cancelled") {
           await flushPendingWrites();
           await this.handleCancellation(raw.id, token, data, ctx);
-          return;
+          break chain;
         }
 
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        const retryConfig = this.task.config.retry;
-        let retryInfo: { delay: number } | undefined;
-
-        if (err instanceof TimeoutError) {
-          // Timeout errors are not retried by default —
-          // user must add TimeoutError to retryOn explicitly
-          if (retryConfig?.retryOn && shouldRetry(err, raw.attempt, retryConfig)) {
-            retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
-          }
-        } else if (err instanceof RetryError) {
-          // Manual retry via ctx.retry() or throw new RetryError()
-          // Always retry unless attempts exhausted
-          if (!retryConfig || raw.attempt >= retryConfig.attempts) {
-            retryInfo = undefined;
-          } else {
-            const delay =
-              err.delay ?? (retryConfig ? computeDelay(raw.attempt, retryConfig) : 1000);
-            retryInfo = { delay };
-          }
-        } else if (retryConfig && shouldRetry(err, raw.attempt, retryConfig)) {
-          retryInfo = { delay: computeDelay(raw.attempt, retryConfig) };
-        }
-
-        this.onJobError?.({
-          task: this.task.name,
-          jobId: raw.id,
-          error: err,
-          attempt: raw.attempt,
-          maxAttempts: retryConfig?.attempts ?? 1,
-          willRetry: !!retryInfo,
-        });
-
+        // Handler succeeded — drain any fire-and-forget progress/log writes
+        // before the terminal ack so the event stream order is
+        // (active → progress* → completed), not the other way around.
         await flushPendingWrites();
+        const serializedResult = this.serializer.serialize(handlerResult);
+
+        // Self-fed ack path: atomically ack + dequeue next
+        if (this.running && this.adapter.ackAndDequeue) {
+          const newToken = randomUUID();
+          let next: Taskora.DequeueResult | null = null;
+          try {
+            next = await this.adapter.ackAndDequeue(
+              this.task.name,
+              raw.id,
+              token,
+              serializedResult,
+              newToken,
+              LOCK_TTL,
+              this.dequeueOptions,
+            );
+          } catch {
+            // ackAndDequeue failed (e.g. lock expired) — stall check will clean up
+            break chain;
+          }
+
+          // Fire-and-forget workflow advance — don't delay the next job
+          this.advanceWorkflow(raw.id, serializedResult).catch(() => {});
+
+          if (next && this.running) {
+            // Swap activeJobs entry: old job → new job
+            this.activeJobs.delete(currentRaw.id);
+            currentRaw = next;
+            currentToken = newToken;
+            currentController = new AbortController();
+            this.activeJobs.set(currentRaw.id, {
+              promise: tracked,
+              token: currentToken,
+              controller: currentController,
+            });
+            continue chain;
+          }
+          break chain;
+        }
+
+        // Shutdown or adapter without ackAndDequeue → plain ack
         try {
-          await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
+          await this.adapter.ack(this.task.name, raw.id, token, serializedResult);
         } catch {
-          // fail() itself failed (e.g. lock expired)
-          return;
+          break chain;
         }
-
-        // Fail workflow if permanent failure (no retry)
-        if (!retryInfo) {
-          await this.failWorkflow(raw.id, errorMsg);
-        }
-        return;
+        await this.advanceWorkflow(raw.id, serializedResult);
+        break chain;
       }
-
-      // Check if cancelled while handler was running (handler didn't check signal)
-      if (controller.signal.aborted && controller.signal.reason === "cancelled") {
-        await flushPendingWrites();
-        await this.handleCancellation(raw.id, token, data, ctx);
-        return;
-      }
-
-      // Handler succeeded — ack the job. Drain any fire-and-forget
-      // progress/log writes the handler kicked off so the stream order is
-      // (active → progress* → completed), not (active → completed →
-      // progress*).
-      await flushPendingWrites();
-      const serializedResult = this.serializer.serialize(handlerResult);
-      try {
-        await this.adapter.ack(this.task.name, raw.id, token, serializedResult);
-      } catch {
-        // ack failed (e.g. lock expired) — job may be retried by stall detection
-        return;
-      }
-
-      // Advance workflow if this job is part of one
-      await this.advanceWorkflow(raw.id, serializedResult);
     })();
 
-    const tracked = promise.finally(() => {
-      this.activeJobs.delete(raw.id);
+    tracked = promise.finally(() => {
+      this.activeJobs.delete(currentRaw.id);
       if (this.slotResolve) {
         this.slotResolve();
         this.slotResolve = null;
       }
     });
 
-    this.activeJobs.set(raw.id, { promise: tracked, token, controller });
+    this.activeJobs.set(initialRaw.id, {
+      promise: tracked,
+      token: initialToken,
+      controller: currentController,
+    });
   }
 
   private async runStalledCheck(): Promise<void> {

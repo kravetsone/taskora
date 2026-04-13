@@ -377,6 +377,422 @@ redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
 return 1
 `;
 
+// ── ackAndMoveToActive ──────────────────────────────────────────────
+// Combined ack + dequeue in a single EVALSHA to eliminate one roundtrip.
+// The worker calls this instead of separate ack() + dequeue() so that
+// each concurrency slot self-feeds without going back through the poll
+// loop — the key optimisation for high-concurrency throughput.
+//
+// KEYS[1] = <task>:wait
+// KEYS[2] = <task>:active
+// KEYS[3] = <task>:delayed
+// KEYS[4] = <task>:events
+// KEYS[5] = <task>:marker
+// KEYS[6] = <task>:expired
+// KEYS[7] = <task>:completed
+// ARGV[1]  = jobPrefix
+// ARGV[2]  = jobId (current job to ack)
+// ARGV[3]  = lock token (current)
+// ARGV[4]  = serialized result
+// ARGV[5]  = current timestamp (ms)
+// ARGV[6]  = newLockTtl (for next job, ms)
+// ARGV[7]  = newToken (for next job's lock)
+// ARGV[8]  = onExpire ("fail" | "discard")
+// ARGV[9]  = singleton ("0" | "1")
+// Returns: {nextId, data, _v, attempt, ts} or nil
+export const ACK_AND_MOVE_TO_ACTIVE = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local token = ARGV[3]
+local result = ARGV[4]
+local now = tonumber(ARGV[5])
+local newLockTtl = ARGV[6]
+local newToken = ARGV[7]
+local onExpire = ARGV[8]
+local singleton = tonumber(ARGV[9])
+
+local jobKey = prefix .. jobId
+local lockKey = jobKey .. ':lock'
+local resultKey = jobKey .. ':result'
+
+-- ── Phase 1: ACK ─────────────────────────────────────────────────────
+
+local lockVal = redis.call('GET', lockKey)
+if lockVal ~= token then
+  return redis.error_reply('LOCK_MISMATCH')
+end
+
+redis.call('LREM', KEYS[2], 1, jobId)
+redis.call('DEL', lockKey)
+redis.call('SET', resultKey, result)
+redis.call('HSET', jobKey, 'state', 'completed', 'finishedOn', tostring(now))
+redis.call('ZADD', KEYS[7], now, jobId)
+
+local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+if dedupKey then
+  redis.call('DEL', dedupKey)
+end
+
+local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+if concKey and concKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. concKey
+  local val = redis.call('DECR', counterKey)
+  if val <= 0 then
+    redis.call('DEL', counterKey)
+  end
+end
+
+redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+  'event', 'completed', 'jobId', jobId)
+
+-- ── Phase 2: MOVE_TO_ACTIVE ─────────────────────────────────────────
+
+local delayed = redis.call('ZRANGEBYSCORE', KEYS[3], 0, now, 'LIMIT', 0, 100)
+if #delayed > 0 then
+  redis.call('ZREM', KEYS[3], unpack(delayed))
+  for i = #delayed, 1, -1 do
+    local jid = delayed[i]
+    local jKey = prefix .. jid
+    local ea = tonumber(redis.call('HGET', jKey, 'expireAt') or '0')
+    if ea > 0 and now >= ea then
+      if onExpire == 'discard' then
+        redis.call('DEL', jKey, jKey .. ':data')
+      else
+        redis.call('HSET', jKey, 'state', 'expired', 'finishedOn', tostring(now))
+        redis.call('ZADD', KEYS[6], now, jid)
+      end
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'expired', 'jobId', jid)
+    else
+      local pMeta = redis.call('HMGET', jKey, 'priority', 'ts')
+      local pScore = -(tonumber(pMeta[1]) or 0) * 1e13 + (tonumber(pMeta[2]) or 0)
+      redis.call('ZADD', KEYS[1], pScore, jid)
+      redis.call('HSET', jKey, 'state', 'waiting')
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'promoted', 'jobId', jid)
+    end
+  end
+end
+
+if singleton == 1 then
+  local activeLen = redis.call('LLEN', KEYS[2])
+  if activeLen > 0 then
+    redis.call('ZADD', KEYS[5], now + 1000, '0')
+    return nil
+  end
+end
+
+for _attempt = 1, 100 do
+  local popped = redis.call('ZPOPMIN', KEYS[1], 1)
+  if #popped == 0 then break end
+  local id = popped[1]
+
+  local nJobKey = prefix .. id
+
+  local ea = tonumber(redis.call('HGET', nJobKey, 'expireAt') or '0')
+  if ea > 0 and now >= ea then
+    if onExpire == 'discard' then
+      redis.call('DEL', nJobKey, nJobKey .. ':data')
+    else
+      redis.call('HSET', nJobKey, 'state', 'expired', 'finishedOn', tostring(now))
+      redis.call('ZADD', KEYS[6], now, id)
+    end
+    redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+      'event', 'expired', 'jobId', id)
+  else
+    local blocked = false
+    local nConcKey = redis.call('HGET', nJobKey, 'concurrencyKey')
+    if nConcKey and nConcKey ~= '' then
+      local nConcLimit = tonumber(redis.call('HGET', nJobKey, 'concurrencyLimit') or '0')
+      if nConcLimit > 0 then
+        local counterKey = prefix .. 'conc:' .. nConcKey
+        local current = tonumber(redis.call('GET', counterKey) or '0')
+        if current >= nConcLimit then
+          blocked = true
+          local blockedPrio = tonumber(redis.call('HGET', nJobKey, 'priority') or '0')
+          local blockedScore = -(blockedPrio) * 1e13 + now
+          redis.call('ZADD', KEYS[1], blockedScore, id)
+        else
+          redis.call('INCR', counterKey)
+        end
+      end
+    end
+
+    if not blocked then
+      redis.call('LPUSH', KEYS[2], id)
+      local nLockKey = nJobKey .. ':lock'
+      local dataKey = nJobKey .. ':data'
+
+      redis.call('SET', nLockKey, newToken, 'PX', newLockTtl)
+      redis.call('HSET', nJobKey, 'state', 'active', 'processedOn', tostring(now))
+
+      local skipCollect = false
+      local ck = redis.call('HGET', nJobKey, 'collectKey')
+      if ck then
+        local cItemsKey = prefix .. 'collect:' .. ck .. ':items'
+        local cMetaKey  = prefix .. 'collect:' .. ck .. ':meta'
+        local cFlushKey = prefix .. 'collect:' .. ck .. ':job'
+        local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
+        if #cItems == 0 then
+          redis.call('LREM', KEYS[2], 1, id)
+          redis.call('DEL', nJobKey, nJobKey .. ':data', nLockKey)
+          skipCollect = true
+        else
+          local arr = '[' .. table.concat(cItems, ',') .. ']'
+          redis.call('SET', nJobKey .. ':data', arr)
+          redis.call('DEL', cItemsKey, cMetaKey, cFlushKey)
+          redis.call('HDEL', nJobKey, 'collectKey')
+        end
+      end
+
+      if not skipCollect then
+        local data = redis.call('GET', dataKey)
+        local meta = redis.call('HMGET', nJobKey, '_v', 'attempt', 'ts')
+
+        redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+          'event', 'active', 'jobId', id)
+
+        local waitLen = redis.call('ZCARD', KEYS[1])
+        if waitLen > 0 then
+          redis.call('ZADD', KEYS[5], 0, '0')
+        else
+          local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+          if #nx > 0 then
+            redis.call('ZADD', KEYS[5], nx[2], '0')
+          end
+        end
+
+        return {id, data, meta[1], meta[2], meta[3]}
+      end
+    end
+  end
+end
+
+local waitLen = redis.call('ZCARD', KEYS[1])
+if waitLen > 0 then
+  redis.call('ZADD', KEYS[5], now + 1000, '0')
+else
+  local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+  if #nx > 0 then
+    redis.call('ZADD', KEYS[5], nx[2], '0')
+  end
+end
+return nil
+`;
+
+// ── failAndMoveToActive ─────────────────────────────────────────────
+// Combined fail + dequeue in a single EVALSHA (same rationale as above).
+//
+// KEYS[1] = <task>:wait
+// KEYS[2] = <task>:active
+// KEYS[3] = <task>:delayed
+// KEYS[4] = <task>:events
+// KEYS[5] = <task>:marker
+// KEYS[6] = <task>:expired
+// KEYS[7] = <task>:failed
+// ARGV[1]  = jobPrefix
+// ARGV[2]  = jobId
+// ARGV[3]  = lock token
+// ARGV[4]  = error message
+// ARGV[5]  = current timestamp (ms)
+// ARGV[6]  = retryDelay (ms, -1 = permanent fail)
+// ARGV[7]  = newLockTtl (for next job, ms)
+// ARGV[8]  = newToken (for next job's lock)
+// ARGV[9]  = onExpire ("fail" | "discard")
+// ARGV[10] = singleton ("0" | "1")
+// Returns: {nextId, data, _v, attempt, ts} or nil
+export const FAIL_AND_MOVE_TO_ACTIVE = `
+local prefix = ARGV[1]
+local jobId = ARGV[2]
+local token = ARGV[3]
+local errMsg = ARGV[4]
+local now = tonumber(ARGV[5])
+local retryDelay = tonumber(ARGV[6])
+local newLockTtl = ARGV[7]
+local newToken = ARGV[8]
+local onExpire = ARGV[9]
+local singleton = tonumber(ARGV[10])
+
+local jobKey = prefix .. jobId
+local lockKey = jobKey .. ':lock'
+
+-- ── Phase 1: FAIL ────────────────────────────────────────────────────
+
+local lockVal = redis.call('GET', lockKey)
+if lockVal ~= token then
+  return redis.error_reply('LOCK_MISMATCH')
+end
+
+redis.call('LREM', KEYS[2], 1, jobId)
+redis.call('DEL', lockKey)
+
+local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
+if concKey and concKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. concKey
+  local val = redis.call('DECR', counterKey)
+  if val <= 0 then
+    redis.call('DEL', counterKey)
+  end
+end
+
+if retryDelay >= 0 then
+  local newAttempt = redis.call('HINCRBY', jobKey, 'attempt', 1)
+  local score = now + retryDelay
+  redis.call('HSET', jobKey, 'state', 'retrying', 'error', errMsg)
+  redis.call('ZADD', KEYS[3], score, jobId)
+  redis.call('ZADD', KEYS[5], 'LT', score, '0')
+
+  redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+    'event', 'retrying', 'jobId', jobId,
+    'attempt', tostring(newAttempt), 'nextAttemptAt', tostring(score))
+else
+  redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', tostring(now), 'error', errMsg)
+  redis.call('ZADD', KEYS[7], now, jobId)
+
+  local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
+  if dedupKey then
+    redis.call('DEL', dedupKey)
+  end
+
+  redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+    'event', 'failed', 'jobId', jobId)
+end
+
+-- ── Phase 2: MOVE_TO_ACTIVE ─────────────────────────────────────────
+
+local delayed = redis.call('ZRANGEBYSCORE', KEYS[3], 0, now, 'LIMIT', 0, 100)
+if #delayed > 0 then
+  redis.call('ZREM', KEYS[3], unpack(delayed))
+  for i = #delayed, 1, -1 do
+    local jid = delayed[i]
+    local jKey = prefix .. jid
+    local ea = tonumber(redis.call('HGET', jKey, 'expireAt') or '0')
+    if ea > 0 and now >= ea then
+      if onExpire == 'discard' then
+        redis.call('DEL', jKey, jKey .. ':data')
+      else
+        redis.call('HSET', jKey, 'state', 'expired', 'finishedOn', tostring(now))
+        redis.call('ZADD', KEYS[6], now, jid)
+      end
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'expired', 'jobId', jid)
+    else
+      local pMeta = redis.call('HMGET', jKey, 'priority', 'ts')
+      local pScore = -(tonumber(pMeta[1]) or 0) * 1e13 + (tonumber(pMeta[2]) or 0)
+      redis.call('ZADD', KEYS[1], pScore, jid)
+      redis.call('HSET', jKey, 'state', 'waiting')
+      redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+        'event', 'promoted', 'jobId', jid)
+    end
+  end
+end
+
+if singleton == 1 then
+  local activeLen = redis.call('LLEN', KEYS[2])
+  if activeLen > 0 then
+    redis.call('ZADD', KEYS[5], now + 1000, '0')
+    return nil
+  end
+end
+
+for _attempt = 1, 100 do
+  local popped = redis.call('ZPOPMIN', KEYS[1], 1)
+  if #popped == 0 then break end
+  local id = popped[1]
+
+  local nJobKey = prefix .. id
+
+  local ea = tonumber(redis.call('HGET', nJobKey, 'expireAt') or '0')
+  if ea > 0 and now >= ea then
+    if onExpire == 'discard' then
+      redis.call('DEL', nJobKey, nJobKey .. ':data')
+    else
+      redis.call('HSET', nJobKey, 'state', 'expired', 'finishedOn', tostring(now))
+      redis.call('ZADD', KEYS[6], now, id)
+    end
+    redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+      'event', 'expired', 'jobId', id)
+  else
+    local blocked = false
+    local nConcKey = redis.call('HGET', nJobKey, 'concurrencyKey')
+    if nConcKey and nConcKey ~= '' then
+      local nConcLimit = tonumber(redis.call('HGET', nJobKey, 'concurrencyLimit') or '0')
+      if nConcLimit > 0 then
+        local counterKey = prefix .. 'conc:' .. nConcKey
+        local current = tonumber(redis.call('GET', counterKey) or '0')
+        if current >= nConcLimit then
+          blocked = true
+          local blockedPrio = tonumber(redis.call('HGET', nJobKey, 'priority') or '0')
+          local blockedScore = -(blockedPrio) * 1e13 + now
+          redis.call('ZADD', KEYS[1], blockedScore, id)
+        else
+          redis.call('INCR', counterKey)
+        end
+      end
+    end
+
+    if not blocked then
+      redis.call('LPUSH', KEYS[2], id)
+      local nLockKey = nJobKey .. ':lock'
+      local dataKey = nJobKey .. ':data'
+
+      redis.call('SET', nLockKey, newToken, 'PX', newLockTtl)
+      redis.call('HSET', nJobKey, 'state', 'active', 'processedOn', tostring(now))
+
+      local skipCollect = false
+      local ck = redis.call('HGET', nJobKey, 'collectKey')
+      if ck then
+        local cItemsKey = prefix .. 'collect:' .. ck .. ':items'
+        local cMetaKey  = prefix .. 'collect:' .. ck .. ':meta'
+        local cFlushKey = prefix .. 'collect:' .. ck .. ':job'
+        local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
+        if #cItems == 0 then
+          redis.call('LREM', KEYS[2], 1, id)
+          redis.call('DEL', nJobKey, nJobKey .. ':data', nLockKey)
+          skipCollect = true
+        else
+          local arr = '[' .. table.concat(cItems, ',') .. ']'
+          redis.call('SET', nJobKey .. ':data', arr)
+          redis.call('DEL', cItemsKey, cMetaKey, cFlushKey)
+          redis.call('HDEL', nJobKey, 'collectKey')
+        end
+      end
+
+      if not skipCollect then
+        local data = redis.call('GET', dataKey)
+        local meta = redis.call('HMGET', nJobKey, '_v', 'attempt', 'ts')
+
+        redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
+          'event', 'active', 'jobId', id)
+
+        local waitLen = redis.call('ZCARD', KEYS[1])
+        if waitLen > 0 then
+          redis.call('ZADD', KEYS[5], 0, '0')
+        else
+          local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+          if #nx > 0 then
+            redis.call('ZADD', KEYS[5], nx[2], '0')
+          end
+        end
+
+        return {id, data, meta[1], meta[2], meta[3]}
+      end
+    end
+  end
+end
+
+local waitLen = redis.call('ZCARD', KEYS[1])
+if waitLen > 0 then
+  redis.call('ZADD', KEYS[5], now + 1000, '0')
+else
+  local nx = redis.call('ZRANGEBYSCORE', KEYS[3], 0, '+inf', 'LIMIT', 0, 1, 'WITHSCORES')
+  if #nx > 0 then
+    redis.call('ZADD', KEYS[5], nx[2], '0')
+  end
+end
+return nil
+`;
+
 // ── fail ─────────────────────────────────────────────────────────────
 // KEYS[1] = <task>:active
 // KEYS[2] = <task>:failed     (sorted set, score = finishedOn)

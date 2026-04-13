@@ -28,7 +28,9 @@ const SCRIPT_MAP: Record<string, string> = {
   enqueueBulk: scripts.ENQUEUE_BULK,
   moveToActive: scripts.MOVE_TO_ACTIVE,
   ack: scripts.ACK,
+  ackAndMoveToActive: scripts.ACK_AND_MOVE_TO_ACTIVE,
   fail: scripts.FAIL,
+  failAndMoveToActive: scripts.FAIL_AND_MOVE_TO_ACTIVE,
   nack: scripts.NACK,
   stalledCheck: scripts.STALLED_CHECK,
   extendLock: scripts.EXTEND_LOCK,
@@ -1041,6 +1043,96 @@ export class RedisBackend implements Taskora.Adapter {
     );
     // Only count permanent failures, not retries
     if (!retry) this.incrMetric(task, "failed");
+  }
+
+  async ackAndDequeue(
+    task: string,
+    jobId: string,
+    token: string,
+    result: string,
+    newToken: string,
+    newLockTtl: number,
+    options?: Taskora.DequeueOptions,
+  ): Promise<Taskora.DequeueResult | null> {
+    const keys = buildKeys(task, this.prefix);
+    const raw = await this.eval(
+      "ackAndMoveToActive",
+      7,
+      keys.wait,
+      keys.active,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      keys.expired,
+      keys.completed,
+      keys.jobPrefix,
+      jobId,
+      token,
+      result,
+      String(Date.now()),
+      String(newLockTtl),
+      newToken,
+      options?.onExpire ?? "fail",
+      options?.singleton ? "1" : "0",
+    );
+    // Throughput counter — outside Lua to avoid hash tag issues
+    this.incrMetric(task, "completed");
+
+    if (!raw) return null;
+    const [id, data, _v, attempt, ts] = raw as [string, string, string, string, string];
+    return {
+      id,
+      data,
+      _v: Number(_v),
+      attempt: Number(attempt),
+      timestamp: Number(ts),
+    };
+  }
+
+  async failAndDequeue(
+    task: string,
+    jobId: string,
+    token: string,
+    error: string,
+    retry: { delay: number } | undefined,
+    newToken: string,
+    newLockTtl: number,
+    options?: Taskora.DequeueOptions,
+  ): Promise<Taskora.DequeueResult | null> {
+    const keys = buildKeys(task, this.prefix);
+    const raw = await this.eval(
+      "failAndMoveToActive",
+      7,
+      keys.wait,
+      keys.active,
+      keys.delayed,
+      keys.events,
+      keys.marker,
+      keys.expired,
+      keys.failed,
+      keys.jobPrefix,
+      jobId,
+      token,
+      error,
+      String(Date.now()),
+      String(retry ? retry.delay : -1),
+      String(newLockTtl),
+      newToken,
+      options?.onExpire ?? "fail",
+      options?.singleton ? "1" : "0",
+    );
+    // Only count permanent failures, not retries
+    if (!retry) this.incrMetric(task, "failed");
+
+    if (!raw) return null;
+    const [id, data, _v, attempt, ts] = raw as [string, string, string, string, string];
+    return {
+      id,
+      data,
+      _v: Number(_v),
+      attempt: Number(attempt),
+      timestamp: Number(ts),
+    };
   }
 
   private incrMetric(task: string, type: string): void {

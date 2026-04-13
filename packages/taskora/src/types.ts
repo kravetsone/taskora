@@ -427,6 +427,37 @@ export namespace Taskora {
       retry?: { delay: number },
     ): Promise<void>;
     nack(task: string, jobId: string, token: string): Promise<void>;
+    /**
+     * Atomically ack the current job and dequeue the next one in a single
+     * roundtrip. Optional — adapters that don't implement this fall back to
+     * separate `ack()` + `dequeue()` calls in the worker. The Redis adapter
+     * implements it as a fused Lua script (ACK_AND_MOVE_TO_ACTIVE) which is
+     * critical for high-concurrency throughput: each slot self-feeds without
+     * funneling through the worker's poll loop.
+     */
+    ackAndDequeue?(
+      task: string,
+      jobId: string,
+      token: string,
+      result: string,
+      newToken: string,
+      newLockTtl: number,
+      options?: DequeueOptions,
+    ): Promise<DequeueResult | null>;
+    /**
+     * Atomically fail the current job and dequeue the next one in a single
+     * roundtrip. Optional — see `ackAndDequeue` for rationale.
+     */
+    failAndDequeue?(
+      task: string,
+      jobId: string,
+      token: string,
+      error: string,
+      retry: { delay: number } | undefined,
+      newToken: string,
+      newLockTtl: number,
+      options?: DequeueOptions,
+    ): Promise<DequeueResult | null>;
     extendLock(
       task: string,
       jobId: string,
