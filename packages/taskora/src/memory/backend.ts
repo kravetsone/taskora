@@ -1016,9 +1016,13 @@ export class MemoryBackend implements Taskora.Adapter {
     newToken: string,
     newLockTtl: number,
     options?: Taskora.DequeueOptions,
-  ): Promise<Taskora.DequeueResult | null> {
+  ): Promise<Taskora.AckAndDequeueResult> {
+    // Snapshot the workflow binding before ack mutates the job, so the
+    // caller can advance the workflow without a second lookup.
+    const ackedWorkflow = this.readWorkflowBinding(jobId);
     await this.ack(task, jobId, token, result);
-    return this.dequeue(task, newLockTtl, newToken, options);
+    const next = await this.dequeue(task, newLockTtl, newToken, options);
+    return { next, ackedWorkflow };
   }
 
   async failAndDequeue(
@@ -1030,9 +1034,24 @@ export class MemoryBackend implements Taskora.Adapter {
     newToken: string,
     newLockTtl: number,
     options?: Taskora.DequeueOptions,
-  ): Promise<Taskora.DequeueResult | null> {
+  ): Promise<Taskora.AckAndDequeueResult> {
+    // Only surface workflow binding on permanent failures — retries don't
+    // cascade through the workflow.
+    const ackedWorkflow = retry ? null : this.readWorkflowBinding(jobId);
     await this.fail(task, jobId, token, error, retry);
-    return this.dequeue(task, newLockTtl, newToken, options);
+    const next = await this.dequeue(task, newLockTtl, newToken, options);
+    return { next, ackedWorkflow };
+  }
+
+  private readWorkflowBinding(
+    jobId: string,
+  ): { workflowId: string; nodeIndex: number } | null {
+    const job = this.jobStore.get(jobId);
+    if (!job || !job.fields._wf) return null;
+    return {
+      workflowId: job.fields._wf,
+      nodeIndex: Number(job.fields._wfNode ?? 0),
+    };
   }
 
   async nack(task: string, jobId: string, token: string): Promise<void> {

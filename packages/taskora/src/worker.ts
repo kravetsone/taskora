@@ -366,9 +366,9 @@ export class Worker {
           // Self-fed fail path: atomically fail + dequeue next
           if (this.running && this.adapter.failAndDequeue) {
             const newToken = randomUUID();
-            let next: Taskora.DequeueResult | null = null;
+            let reply: Taskora.AckAndDequeueResult | null = null;
             try {
-              next = await this.adapter.failAndDequeue(
+              reply = await this.adapter.failAndDequeue(
                 this.task.name,
                 raw.id,
                 token,
@@ -384,15 +384,18 @@ export class Worker {
             }
 
             // Fire-and-forget workflow failure notification — don't block
-            // the next job on cascade cancellation roundtrips.
-            if (!retryInfo) {
-              this.failWorkflow(raw.id, errorMsg).catch(() => {});
+            // the next job on cascade cancellation roundtrips. Lua already
+            // handed us the workflow binding so this path issues zero
+            // extra Redis ops for the common (non-workflow) case, and we
+            // skip the call entirely when there's no workflow.
+            if (!retryInfo && reply.ackedWorkflow) {
+              this.failWorkflow(raw.id, errorMsg, reply.ackedWorkflow).catch(() => {});
             }
 
-            if (next && this.running) {
+            if (reply.next && this.running) {
               // Swap activeJobs entry: old job → new job
               this.activeJobs.delete(currentRaw.id);
-              currentRaw = next;
+              currentRaw = reply.next;
               currentToken = newToken;
               currentController = new AbortController();
               this.activeJobs.set(currentRaw.id, {
@@ -413,7 +416,7 @@ export class Worker {
             break chain;
           }
           if (!retryInfo) {
-            await this.failWorkflow(raw.id, errorMsg);
+            await this.failWorkflow(raw.id, errorMsg, null);
           }
           break chain;
         }
@@ -434,9 +437,9 @@ export class Worker {
         // Self-fed ack path: atomically ack + dequeue next
         if (this.running && this.adapter.ackAndDequeue) {
           const newToken = randomUUID();
-          let next: Taskora.DequeueResult | null = null;
+          let reply: Taskora.AckAndDequeueResult | null = null;
           try {
-            next = await this.adapter.ackAndDequeue(
+            reply = await this.adapter.ackAndDequeue(
               this.task.name,
               raw.id,
               token,
@@ -450,13 +453,23 @@ export class Worker {
             break chain;
           }
 
-          // Fire-and-forget workflow advance — don't delay the next job
-          this.advanceWorkflow(raw.id, serializedResult).catch(() => {});
+          // Fire-and-forget workflow advance — skipped entirely for jobs
+          // not bound to a workflow (the common case). The ack Lua
+          // already returned the binding so we don't probe Redis again
+          // here; for non-workflow jobs we avoid even the promise
+          // allocation.
+          if (reply.ackedWorkflow) {
+            this.advanceWorkflow(
+              raw.id,
+              serializedResult,
+              reply.ackedWorkflow,
+            ).catch(() => {});
+          }
 
-          if (next && this.running) {
+          if (reply.next && this.running) {
             // Swap activeJobs entry: old job → new job
             this.activeJobs.delete(currentRaw.id);
-            currentRaw = next;
+            currentRaw = reply.next;
             currentToken = newToken;
             currentController = new AbortController();
             this.activeJobs.set(currentRaw.id, {
@@ -475,7 +488,7 @@ export class Worker {
         } catch {
           break chain;
         }
-        await this.advanceWorkflow(raw.id, serializedResult);
+        await this.advanceWorkflow(raw.id, serializedResult, null);
         break chain;
       }
     })();
@@ -544,21 +557,34 @@ export class Worker {
     }
   }
 
-  private async advanceWorkflow(jobId: string, result: string): Promise<void> {
+  /**
+   * Advance a workflow after a node completed. Called with the workflow
+   * binding already known (from the ack Lua reply when available, or a
+   * fresh `getWorkflowMeta` on the shutdown fallback). The `meta`
+   * parameter eliminates the `getWorkflowMeta` HMGET roundtrip on the
+   * self-feeding hot path — that lookup was firing for every completed
+   * job even when the task had no workflow nodes in flight.
+   */
+  private async advanceWorkflow(
+    jobId: string,
+    result: string,
+    meta: { workflowId: string; nodeIndex: number } | null,
+  ): Promise<void> {
     try {
-      const meta = await this.adapter.getWorkflowMeta(this.task.name, jobId);
-      if (!meta) return;
+      const resolved =
+        meta ?? (await this.adapter.getWorkflowMeta(this.task.name, jobId));
+      if (!resolved) return;
 
       const { toDispatch } = await this.adapter.advanceWorkflow(
-        meta.workflowId,
-        meta.nodeIndex,
+        resolved.workflowId,
+        resolved.nodeIndex,
         result,
       );
 
       for (const node of toDispatch) {
         await this.adapter.enqueue(node.taskName, node.jobId, node.data, {
           _v: node._v,
-          _wf: meta.workflowId,
+          _wf: resolved.workflowId,
           _wfNode: node.nodeIndex,
         });
       }
@@ -567,14 +593,19 @@ export class Worker {
     }
   }
 
-  private async failWorkflow(jobId: string, error: string): Promise<void> {
+  private async failWorkflow(
+    jobId: string,
+    error: string,
+    meta: { workflowId: string; nodeIndex: number } | null,
+  ): Promise<void> {
     try {
-      const meta = await this.adapter.getWorkflowMeta(this.task.name, jobId);
-      if (!meta) return;
+      const resolved =
+        meta ?? (await this.adapter.getWorkflowMeta(this.task.name, jobId));
+      if (!resolved) return;
 
       const { activeJobIds } = await this.adapter.failWorkflow(
-        meta.workflowId,
-        meta.nodeIndex,
+        resolved.workflowId,
+        resolved.nodeIndex,
         error,
       );
 

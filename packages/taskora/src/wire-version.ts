@@ -118,8 +118,22 @@
  *          present and produce identical Redis state. Wire-version-2
  *          readers can safely share a backend with wire-version-3 writers,
  *          so `MIN_COMPAT_VERSION` stays at 2 and rolling upgrades work.
+ *   3 → 4: throughput metric keys moved under the task's `{hash tag}`.
+ *          Old layout: `taskora:[prefix:]metrics:<task>:<type>:<bucket>`.
+ *          New layout: `taskora:[prefix:]{<task>}:metrics:<type>:<bucket>`.
+ *          Motivation: with the new layout the INCR/EXPIRE can live
+ *          inside ACK_AND_MOVE_TO_ACTIVE / FAIL_AND_MOVE_TO_ACTIVE (which
+ *          hash-tag everything they touch to the same slot), removing a
+ *          whole fire-and-forget roundtrip per completed job. Metrics
+ *          have a 24h TTL and are observability-only — old keys orphan
+ *          harmlessly. `getThroughput` was updated to SCAN the new
+ *          pattern, so the board shows the new metrics once deployed.
+ *          Rolling upgrades: wire-3 workers write old keys, wire-4
+ *          workers write new keys; `getThroughput` on a wire-3 reader
+ *          would miss wire-4 metrics and vice versa, but neither side
+ *          corrupts anything — MIN_COMPAT stays at 2.
  */
-export const WIRE_VERSION = 3;
+export const WIRE_VERSION = 4;
 
 /**
  * The oldest wire-format version this build is still willing to coexist

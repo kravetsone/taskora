@@ -233,6 +233,19 @@ export namespace Taskora {
     timestamp: number;
   }
 
+  /**
+   * Result of `ackAndDequeue` / `failAndDequeue`. Carries the next job to
+   * process in this slot (if any) **and** the workflow binding of the job
+   * that was just acked/failed. The worker uses the latter to advance or
+   * fail the workflow without a separate `getWorkflowMeta` roundtrip.
+   */
+  export interface AckAndDequeueResult {
+    /** Next job to process in this slot, or `null` if no work is available. */
+    next: DequeueResult | null;
+    /** Workflow binding of the just-acked/failed job, or `null` if it wasn't part of a workflow. */
+    ackedWorkflow: { workflowId: string; nodeIndex: number } | null;
+  }
+
   export interface LogEntry {
     level: "info" | "warn" | "error";
     message: string;
@@ -434,6 +447,10 @@ export namespace Taskora {
      * implements it as a fused Lua script (ACK_AND_MOVE_TO_ACTIVE) which is
      * critical for high-concurrency throughput: each slot self-feeds without
      * funneling through the worker's poll loop.
+     *
+     * The returned `AckAndDequeueResult` also carries the workflow binding
+     * of the acked job so the worker can advance/cancel the workflow
+     * without a follow-up `getWorkflowMeta` HMGET.
      */
     ackAndDequeue?(
       task: string,
@@ -443,10 +460,12 @@ export namespace Taskora {
       newToken: string,
       newLockTtl: number,
       options?: DequeueOptions,
-    ): Promise<DequeueResult | null>;
+    ): Promise<AckAndDequeueResult>;
     /**
      * Atomically fail the current job and dequeue the next one in a single
-     * roundtrip. Optional — see `ackAndDequeue` for rationale.
+     * roundtrip. Optional — see `ackAndDequeue` for rationale. The workflow
+     * binding is only populated on *permanent* failures (retries don't
+     * cascade).
      */
     failAndDequeue?(
       task: string,
@@ -457,7 +476,7 @@ export namespace Taskora {
       newToken: string,
       newLockTtl: number,
       options?: DequeueOptions,
-    ): Promise<DequeueResult | null>;
+    ): Promise<AckAndDequeueResult>;
     extendLock(
       task: string,
       jobId: string,

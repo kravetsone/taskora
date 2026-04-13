@@ -50,7 +50,7 @@ function collectScriptHashes(): Record<string, string> {
 
 // ── The frozen surface ──────────────────────────────────────────────────
 
-const FROZEN_AT_WIRE_VERSION = 3;
+const FROZEN_AT_WIRE_VERSION = 4;
 
 // buildKeys / buildMetaKey / buildScheduleKeys output for fixed inputs. These
 // strings are persisted in live Redis instances — renaming ANY of them is a
@@ -104,7 +104,7 @@ const FROZEN_KEY_LAYOUT = {
 // than let a drive-by edit slip through.
 const FROZEN_SCRIPT_HASHES: Record<string, string> = {
   ACK: "b283e95480b7ab31",
-  ACK_AND_MOVE_TO_ACTIVE: "ff3ac33a82f00fd2",
+  ACK_AND_MOVE_TO_ACTIVE: "dfe22ce065bac846",
   ACQUIRE_SCHEDULER_LOCK: "362180a86b49ee72",
   ADVANCE_WORKFLOW: "b3535a40f566e08e",
   CANCEL: "d55f37b4d9f9ac00",
@@ -119,7 +119,7 @@ const FROZEN_SCRIPT_HASHES: Record<string, string> = {
   ENQUEUE_DELAYED: "ca754f338ced0aab",
   EXTEND_LOCK: "dc500d7199ee06b1",
   FAIL: "b733a38465348cb8",
-  FAIL_AND_MOVE_TO_ACTIVE: "4e9963d2b45732be",
+  FAIL_AND_MOVE_TO_ACTIVE: "8a1a7aea4d6b009c",
   FAIL_WORKFLOW: "a7762af2ff385164",
   FINISH_CANCEL: "5f78f671ea104896",
   HANDSHAKE: "91898f9a4c4cf5b7",

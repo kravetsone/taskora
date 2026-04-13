@@ -1053,9 +1053,9 @@ export class RedisBackend implements Taskora.Adapter {
     newToken: string,
     newLockTtl: number,
     options?: Taskora.DequeueOptions,
-  ): Promise<Taskora.DequeueResult | null> {
+  ): Promise<Taskora.AckAndDequeueResult> {
     const keys = buildKeys(task, this.prefix);
-    const raw = await this.eval(
+    const raw = (await this.eval(
       "ackAndMoveToActive",
       7,
       keys.wait,
@@ -1074,19 +1074,9 @@ export class RedisBackend implements Taskora.Adapter {
       newToken,
       options?.onExpire ?? "fail",
       options?.singleton ? "1" : "0",
-    );
-    // Throughput counter — outside Lua to avoid hash tag issues
-    this.incrMetric(task, "completed");
+    )) as [string, string, string, string, string, string, string];
 
-    if (!raw) return null;
-    const [id, data, _v, attempt, ts] = raw as [string, string, string, string, string];
-    return {
-      id,
-      data,
-      _v: Number(_v),
-      attempt: Number(attempt),
-      timestamp: Number(ts),
-    };
+    return this.parseAckAndDequeueReply(raw);
   }
 
   async failAndDequeue(
@@ -1098,9 +1088,9 @@ export class RedisBackend implements Taskora.Adapter {
     newToken: string,
     newLockTtl: number,
     options?: Taskora.DequeueOptions,
-  ): Promise<Taskora.DequeueResult | null> {
+  ): Promise<Taskora.AckAndDequeueResult> {
     const keys = buildKeys(task, this.prefix);
-    const raw = await this.eval(
+    const raw = (await this.eval(
       "failAndMoveToActive",
       7,
       keys.wait,
@@ -1120,31 +1110,50 @@ export class RedisBackend implements Taskora.Adapter {
       newToken,
       options?.onExpire ?? "fail",
       options?.singleton ? "1" : "0",
-    );
-    // Only count permanent failures, not retries
-    if (!retry) this.incrMetric(task, "failed");
+    )) as [string, string, string, string, string, string, string];
 
-    if (!raw) return null;
-    const [id, data, _v, attempt, ts] = raw as [string, string, string, string, string];
-    return {
-      id,
-      data,
-      _v: Number(_v),
-      attempt: Number(attempt),
-      timestamp: Number(ts),
-    };
+    return this.parseAckAndDequeueReply(raw);
+  }
+
+  // Parser for the 7-element reply shape emitted by ACK_AND_MOVE_TO_ACTIVE
+  // and FAIL_AND_MOVE_TO_ACTIVE. Empty strings are sentinels for "no
+  // value" in both the acked-workflow group (first 2) and the next-job
+  // group (last 5).
+  private parseAckAndDequeueReply(
+    raw: [string, string, string, string, string, string, string],
+  ): Taskora.AckAndDequeueResult {
+    const [wf, wfNode, id, data, _v, attempt, ts] = raw;
+    const ackedWorkflow =
+      wf && wf !== ""
+        ? { workflowId: wf, nodeIndex: Number(wfNode || "0") }
+        : null;
+    const next =
+      id && id !== ""
+        ? {
+            id,
+            data,
+            _v: Number(_v),
+            attempt: Number(attempt),
+            timestamp: Number(ts),
+          }
+        : null;
+    return { next, ackedWorkflow };
   }
 
   private incrMetric(task: string, type: string): void {
-    const base = this.prefix ? `taskora:${this.prefix}` : "taskora";
-    const bucket = Math.floor(Date.now() / 60000) * 60000;
-    const key = `${base}:metrics:${task}:${type}:${bucket}`;
-    // Fire-and-forget — failures are non-critical (metrics are best-effort).
+    // Metric keys share the task's {hash tag} via `jobPrefix` so the
+    // fused ACK_AND_MOVE_TO_ACTIVE / FAIL_AND_MOVE_TO_ACTIVE scripts can
+    // INCR them inside Lua. This fallback path only runs when the worker
+    // takes the plain ack()/fail() branch (shutdown or legacy adapter).
     //
-    // INCR and EXPIRE MUST ride the same pipeline: a prior implementation chained
-    // the two commands and let EXPIRE fall off `.then()` on connection hiccups,
-    // leaking TTL-less metric keys forever. Pipeline collapses that window — both
-    // commands are sent in one round trip and either both succeed or both fail.
+    // Fire-and-forget — failures are non-critical (metrics are best-effort).
+    // INCR and EXPIRE ride the same pipeline so EXPIRE cannot get dropped
+    // on a connection hiccup (a prior implementation leaked TTL-less metric
+    // keys by chaining .then() and letting EXPIRE fall off). Pipeline makes
+    // both commands one round trip — either both succeed or both fail.
+    const keys = buildKeys(task, this.prefix);
+    const bucket = Math.floor(Date.now() / 60000) * 60000;
+    const key = `${keys.jobPrefix}metrics:${type}:${bucket}`;
     this.driver
       .pipeline()
       .add("incr", [key])
@@ -2080,7 +2089,13 @@ export class RedisBackend implements Taskora.Adapter {
     bucketSize: number,
     count: number,
   ): Promise<Array<{ timestamp: number; completed: number; failed: number }>> {
-    const metricBase = this.prefix ? `taskora:${this.prefix}` : "taskora";
+    // Metric key layout: `<jobPrefix>metrics:<type>:<bucket>` where
+    // jobPrefix is `taskora:[prefix:]{task}:`. The task name lives inside
+    // the `{hash tag}` so the INCR inside ACK_AND_MOVE_TO_ACTIVE is
+    // Cluster-safe. That means the cross-task SCAN below has to match
+    // `taskora:[prefix:]{<any>}:metrics:*` rather than a flat `metrics:*`
+    // prefix.
+    const scanBase = this.prefix ? `taskora:${this.prefix}:` : "taskora:";
     const now = Date.now();
     const currentBucket = Math.floor(now / bucketSize) * bucketSize;
     const timestamps: number[] = [];
@@ -2089,12 +2104,15 @@ export class RedisBackend implements Taskora.Adapter {
       timestamps.push(currentBucket - i * bucketSize);
     }
 
+    const metricKey = (t: string, type: "completed" | "failed", ts: number) =>
+      `${buildKeys(t, this.prefix).jobPrefix}metrics:${type}:${ts}`;
+
     if (task) {
       // Per-task: read directly
       const pipe = this.driver.pipeline();
       for (const ts of timestamps) {
-        pipe.add("get", [`${metricBase}:metrics:${task}:completed:${ts}`]);
-        pipe.add("get", [`${metricBase}:metrics:${task}:failed:${ts}`]);
+        pipe.add("get", [metricKey(task, "completed", ts)]);
+        pipe.add("get", [metricKey(task, "failed", ts)]);
       }
       const results = (await pipe.exec()) as [Error | null, string | null][];
       return timestamps.map((ts, i) => ({
@@ -2104,21 +2122,23 @@ export class RedisBackend implements Taskora.Adapter {
       }));
     }
 
-    // Aggregate across all tasks: scan for metric keys in the first bucket to discover task names
+    // Aggregate across all tasks: SCAN for metric keys to discover task names.
+    // Pattern: `<scanBase>{*}:metrics:completed:*` matches any task's
+    // completed-bucket keys under the optional prefix.
     const taskNames = new Set<string>();
     let cursor = "0";
     do {
       const [next, keys] = (await this.driver.command("scan", [
         cursor,
         "MATCH",
-        `${metricBase}:metrics:*:completed:*`,
+        `${scanBase}{*}:metrics:completed:*`,
         "COUNT",
         200,
       ])) as [string, string[]];
       cursor = next;
       for (const key of keys) {
-        // key format: taskora:metrics:TASK:completed:BUCKET
-        const match = key.match(/metrics:(.+):completed:\d+$/);
+        // key format: taskora:[prefix:]{TASK}:metrics:completed:BUCKET
+        const match = key.match(/\{([^}]+)\}:metrics:completed:\d+$/);
         if (match) taskNames.add(match[1]);
       }
     } while (cursor !== "0");
@@ -2132,8 +2152,8 @@ export class RedisBackend implements Taskora.Adapter {
     const tasks = [...taskNames];
     for (const ts of timestamps) {
       for (const t of tasks) {
-        pipe.add("get", [`${metricBase}:metrics:${t}:completed:${ts}`]);
-        pipe.add("get", [`${metricBase}:metrics:${t}:failed:${ts}`]);
+        pipe.add("get", [metricKey(t, "completed", ts)]);
+        pipe.add("get", [metricKey(t, "failed", ts)]);
       }
     }
     const results = (await pipe.exec()) as [Error | null, string | null][];

@@ -383,6 +383,11 @@ return 1
 // each concurrency slot self-feeds without going back through the poll
 // loop — the key optimisation for high-concurrency throughput.
 //
+// Per-job roundtrips on the happy path: 1 (this script). For comparison
+// the pre-optimisation worker did 3: ack EVALSHA + getWorkflowMeta
+// HMGET + incrMetric pipeline. Both the workflow probe and the metric
+// INCR are now folded in here.
+//
 // KEYS[1] = <task>:wait
 // KEYS[2] = <task>:active
 // KEYS[3] = <task>:delayed
@@ -399,7 +404,11 @@ return 1
 // ARGV[7]  = newToken (for next job's lock)
 // ARGV[8]  = onExpire ("fail" | "discard")
 // ARGV[9]  = singleton ("0" | "1")
-// Returns: {nextId, data, _v, attempt, ts} or nil
+// Returns: {ackedWf, ackedWfNode, nextId, nextData, nextV, nextAttempt, nextTs}
+//   Always a 7-element array. Empty strings fill the slots that do not
+//   apply: ackedWf/ackedWfNode are "" when the acked job was not part of
+//   a workflow; nextId..nextTs are "" when there is no next job to claim.
+//   The caller branches on whether each group is empty.
 export const ACK_AND_MOVE_TO_ACTIVE = `
 local prefix = ARGV[1]
 local jobId = ARGV[2]
@@ -414,6 +423,7 @@ local singleton = tonumber(ARGV[9])
 local jobKey = prefix .. jobId
 local lockKey = jobKey .. ':lock'
 local resultKey = jobKey .. ':result'
+local noNext = {'', '', '', '', ''}
 
 -- ── Phase 1: ACK ─────────────────────────────────────────────────────
 
@@ -428,18 +438,38 @@ redis.call('SET', resultKey, result)
 redis.call('HSET', jobKey, 'state', 'completed', 'finishedOn', tostring(now))
 redis.call('ZADD', KEYS[7], now, jobId)
 
-local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
-if dedupKey then
-  redis.call('DEL', dedupKey)
+-- Single HMGET replaces separate HGETs for dedupKey / concurrencyKey /
+-- _wf / _wfNode. All four are read unconditionally anyway on the hot
+-- path; batching them saves 3 redis.call() invocations per job.
+local ackAux = redis.call('HMGET', jobKey, 'dedupKey', 'concurrencyKey', '_wf', '_wfNode')
+local ackDedupKey = ackAux[1]
+local ackConcKey = ackAux[2]
+local ackedWf = ackAux[3] or ''
+local ackedWfNode = ackAux[4] or ''
+
+if ackDedupKey then
+  redis.call('DEL', ackDedupKey)
 end
 
-local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
-if concKey and concKey ~= '' then
-  local counterKey = prefix .. 'conc:' .. concKey
+if ackConcKey and ackConcKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. ackConcKey
   local val = redis.call('DECR', counterKey)
   if val <= 0 then
     redis.call('DEL', counterKey)
   end
+end
+
+-- Throughput metric — shares the task's {hash tag} via jobPrefix so the
+-- INCR/EXPIRE can live inside this script instead of riding a separate
+-- fire-and-forget pipeline. Saves one roundtrip per completed job. The
+-- EXPIRE only fires on the first increment of each minute bucket so we
+-- amortize its cost across the whole bucket instead of paying it every
+-- job.
+local bucket = math.floor(now / 60000) * 60000
+local metricKey = prefix .. 'metrics:completed:' .. bucket
+local metricVal = redis.call('INCR', metricKey)
+if metricVal == 1 then
+  redis.call('EXPIRE', metricKey, 86400)
 end
 
 redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
@@ -478,7 +508,7 @@ if singleton == 1 then
   local activeLen = redis.call('LLEN', KEYS[2])
   if activeLen > 0 then
     redis.call('ZADD', KEYS[5], now + 1000, '0')
-    return nil
+    return {ackedWf, ackedWfNode, '', '', '', '', ''}
   end
 end
 
@@ -489,8 +519,17 @@ for _attempt = 1, 100 do
 
   local nJobKey = prefix .. id
 
-  local ea = tonumber(redis.call('HGET', nJobKey, 'expireAt') or '0')
-  if ea > 0 and now >= ea then
+  -- Batched aux read for the candidate next job: expireAt, concurrencyKey,
+  -- concurrencyLimit, collectKey, priority. Replaces 4 separate HGETs.
+  local nAux = redis.call('HMGET', nJobKey,
+    'expireAt', 'concurrencyKey', 'concurrencyLimit', 'collectKey', 'priority')
+  local nEa = tonumber(nAux[1] or '0') or 0
+  local nConcKey = nAux[2]
+  local nConcLimit = tonumber(nAux[3] or '0') or 0
+  local nCollectKey = nAux[4]
+  local nPriority = tonumber(nAux[5] or '0') or 0
+
+  if nEa > 0 and now >= nEa then
     if onExpire == 'discard' then
       redis.call('DEL', nJobKey, nJobKey .. ':data')
     else
@@ -501,20 +540,15 @@ for _attempt = 1, 100 do
       'event', 'expired', 'jobId', id)
   else
     local blocked = false
-    local nConcKey = redis.call('HGET', nJobKey, 'concurrencyKey')
-    if nConcKey and nConcKey ~= '' then
-      local nConcLimit = tonumber(redis.call('HGET', nJobKey, 'concurrencyLimit') or '0')
-      if nConcLimit > 0 then
-        local counterKey = prefix .. 'conc:' .. nConcKey
-        local current = tonumber(redis.call('GET', counterKey) or '0')
-        if current >= nConcLimit then
-          blocked = true
-          local blockedPrio = tonumber(redis.call('HGET', nJobKey, 'priority') or '0')
-          local blockedScore = -(blockedPrio) * 1e13 + now
-          redis.call('ZADD', KEYS[1], blockedScore, id)
-        else
-          redis.call('INCR', counterKey)
-        end
+    if nConcKey and nConcKey ~= '' and nConcLimit > 0 then
+      local counterKey = prefix .. 'conc:' .. nConcKey
+      local current = tonumber(redis.call('GET', counterKey) or '0')
+      if current >= nConcLimit then
+        blocked = true
+        local blockedScore = -(nPriority) * 1e13 + now
+        redis.call('ZADD', KEYS[1], blockedScore, id)
+      else
+        redis.call('INCR', counterKey)
       end
     end
 
@@ -527,11 +561,10 @@ for _attempt = 1, 100 do
       redis.call('HSET', nJobKey, 'state', 'active', 'processedOn', tostring(now))
 
       local skipCollect = false
-      local ck = redis.call('HGET', nJobKey, 'collectKey')
-      if ck then
-        local cItemsKey = prefix .. 'collect:' .. ck .. ':items'
-        local cMetaKey  = prefix .. 'collect:' .. ck .. ':meta'
-        local cFlushKey = prefix .. 'collect:' .. ck .. ':job'
+      if nCollectKey then
+        local cItemsKey = prefix .. 'collect:' .. nCollectKey .. ':items'
+        local cMetaKey  = prefix .. 'collect:' .. nCollectKey .. ':meta'
+        local cFlushKey = prefix .. 'collect:' .. nCollectKey .. ':job'
         local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
         if #cItems == 0 then
           redis.call('LREM', KEYS[2], 1, id)
@@ -562,7 +595,7 @@ for _attempt = 1, 100 do
           end
         end
 
-        return {id, data, meta[1], meta[2], meta[3]}
+        return {ackedWf, ackedWfNode, id, data, meta[1], meta[2], meta[3]}
       end
     end
   end
@@ -577,11 +610,16 @@ else
     redis.call('ZADD', KEYS[5], nx[2], '0')
   end
 end
-return nil
+return {ackedWf, ackedWfNode, '', '', '', '', ''}
 `;
 
 // ── failAndMoveToActive ─────────────────────────────────────────────
-// Combined fail + dequeue in a single EVALSHA (same rationale as above).
+// Combined fail + dequeue in a single EVALSHA. Same structure as
+// ACK_AND_MOVE_TO_ACTIVE but Phase 1 writes failure state instead of
+// completion. Returns the same 7-element shape so the TS caller has one
+// parser: {ackedWf, ackedWfNode, nextId, nextData, nextV, nextAttempt,
+// nextTs}. `ackedWf`/`ackedWfNode` are only populated on *permanent*
+// failures — retry paths don't need workflow cascade cancellation yet.
 //
 // KEYS[1] = <task>:wait
 // KEYS[2] = <task>:active
@@ -600,7 +638,7 @@ return nil
 // ARGV[8]  = newToken (for next job's lock)
 // ARGV[9]  = onExpire ("fail" | "discard")
 // ARGV[10] = singleton ("0" | "1")
-// Returns: {nextId, data, _v, attempt, ts} or nil
+// Returns: {ackedWf, ackedWfNode, nextId, nextData, nextV, nextAttempt, nextTs}
 export const FAIL_AND_MOVE_TO_ACTIVE = `
 local prefix = ARGV[1]
 local jobId = ARGV[2]
@@ -626,9 +664,18 @@ end
 redis.call('LREM', KEYS[2], 1, jobId)
 redis.call('DEL', lockKey)
 
-local concKey = redis.call('HGET', jobKey, 'concurrencyKey')
-if concKey and concKey ~= '' then
-  local counterKey = prefix .. 'conc:' .. concKey
+-- Batched aux read: concurrencyKey, dedupKey, _wf, _wfNode. dedupKey and
+-- wf/wfNode are only used on the permanent-fail branch but reading them
+-- unconditionally in one HMGET is still cheaper than branching with
+-- separate HGETs.
+local failAux = redis.call('HMGET', jobKey, 'concurrencyKey', 'dedupKey', '_wf', '_wfNode')
+local failConcKey = failAux[1]
+local failDedupKey = failAux[2]
+local ackedWf = ''
+local ackedWfNode = ''
+
+if failConcKey and failConcKey ~= '' then
+  local counterKey = prefix .. 'conc:' .. failConcKey
   local val = redis.call('DECR', counterKey)
   if val <= 0 then
     redis.call('DEL', counterKey)
@@ -649,10 +696,22 @@ else
   redis.call('HSET', jobKey, 'state', 'failed', 'finishedOn', tostring(now), 'error', errMsg)
   redis.call('ZADD', KEYS[7], now, jobId)
 
-  local dedupKey = redis.call('HGET', jobKey, 'dedupKey')
-  if dedupKey then
-    redis.call('DEL', dedupKey)
+  if failDedupKey then
+    redis.call('DEL', failDedupKey)
   end
+
+  -- Only permanent failures count toward the 'failed' metric bucket and
+  -- only permanent failures need a workflow cascade. Retries stay silent
+  -- on both counts. EXPIRE amortized to first INCR per bucket.
+  local bucket = math.floor(now / 60000) * 60000
+  local metricKey = prefix .. 'metrics:failed:' .. bucket
+  local metricVal = redis.call('INCR', metricKey)
+  if metricVal == 1 then
+    redis.call('EXPIRE', metricKey, 86400)
+  end
+
+  ackedWf = failAux[3] or ''
+  ackedWfNode = failAux[4] or ''
 
   redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
     'event', 'failed', 'jobId', jobId)
@@ -691,7 +750,7 @@ if singleton == 1 then
   local activeLen = redis.call('LLEN', KEYS[2])
   if activeLen > 0 then
     redis.call('ZADD', KEYS[5], now + 1000, '0')
-    return nil
+    return {ackedWf, ackedWfNode, '', '', '', '', ''}
   end
 end
 
@@ -702,8 +761,15 @@ for _attempt = 1, 100 do
 
   local nJobKey = prefix .. id
 
-  local ea = tonumber(redis.call('HGET', nJobKey, 'expireAt') or '0')
-  if ea > 0 and now >= ea then
+  local nAux = redis.call('HMGET', nJobKey,
+    'expireAt', 'concurrencyKey', 'concurrencyLimit', 'collectKey', 'priority')
+  local nEa = tonumber(nAux[1] or '0') or 0
+  local nConcKey = nAux[2]
+  local nConcLimit = tonumber(nAux[3] or '0') or 0
+  local nCollectKey = nAux[4]
+  local nPriority = tonumber(nAux[5] or '0') or 0
+
+  if nEa > 0 and now >= nEa then
     if onExpire == 'discard' then
       redis.call('DEL', nJobKey, nJobKey .. ':data')
     else
@@ -714,20 +780,15 @@ for _attempt = 1, 100 do
       'event', 'expired', 'jobId', id)
   else
     local blocked = false
-    local nConcKey = redis.call('HGET', nJobKey, 'concurrencyKey')
-    if nConcKey and nConcKey ~= '' then
-      local nConcLimit = tonumber(redis.call('HGET', nJobKey, 'concurrencyLimit') or '0')
-      if nConcLimit > 0 then
-        local counterKey = prefix .. 'conc:' .. nConcKey
-        local current = tonumber(redis.call('GET', counterKey) or '0')
-        if current >= nConcLimit then
-          blocked = true
-          local blockedPrio = tonumber(redis.call('HGET', nJobKey, 'priority') or '0')
-          local blockedScore = -(blockedPrio) * 1e13 + now
-          redis.call('ZADD', KEYS[1], blockedScore, id)
-        else
-          redis.call('INCR', counterKey)
-        end
+    if nConcKey and nConcKey ~= '' and nConcLimit > 0 then
+      local counterKey = prefix .. 'conc:' .. nConcKey
+      local current = tonumber(redis.call('GET', counterKey) or '0')
+      if current >= nConcLimit then
+        blocked = true
+        local blockedScore = -(nPriority) * 1e13 + now
+        redis.call('ZADD', KEYS[1], blockedScore, id)
+      else
+        redis.call('INCR', counterKey)
       end
     end
 
@@ -740,11 +801,10 @@ for _attempt = 1, 100 do
       redis.call('HSET', nJobKey, 'state', 'active', 'processedOn', tostring(now))
 
       local skipCollect = false
-      local ck = redis.call('HGET', nJobKey, 'collectKey')
-      if ck then
-        local cItemsKey = prefix .. 'collect:' .. ck .. ':items'
-        local cMetaKey  = prefix .. 'collect:' .. ck .. ':meta'
-        local cFlushKey = prefix .. 'collect:' .. ck .. ':job'
+      if nCollectKey then
+        local cItemsKey = prefix .. 'collect:' .. nCollectKey .. ':items'
+        local cMetaKey  = prefix .. 'collect:' .. nCollectKey .. ':meta'
+        local cFlushKey = prefix .. 'collect:' .. nCollectKey .. ':job'
         local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
         if #cItems == 0 then
           redis.call('LREM', KEYS[2], 1, id)
@@ -775,7 +835,7 @@ for _attempt = 1, 100 do
           end
         end
 
-        return {id, data, meta[1], meta[2], meta[3]}
+        return {ackedWf, ackedWfNode, id, data, meta[1], meta[2], meta[3]}
       end
     end
   end
@@ -790,7 +850,7 @@ else
     redis.call('ZADD', KEYS[5], nx[2], '0')
   end
 end
-return nil
+return {ackedWf, ackedWfNode, '', '', '', '', ''}
 `;
 
 // ── fail ─────────────────────────────────────────────────────────────
