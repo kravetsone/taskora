@@ -39,7 +39,7 @@ Any change to the following is a wire-format change:
 * Bun vs ioredis driver choice
 * The `SCRIPT LOAD` SHA — each process loads its own
 
-## Current surface (wireVersion = 2)
+## Current surface (wireVersion = 5)
 
 ### Keys
 
@@ -47,7 +47,8 @@ Any change to the following is a wire-format change:
 |---|---|---|
 | `taskora:meta` | Hash | Wire-format meta record (this doc's subject) |
 | `taskora:<prefix>:meta` | Hash | Same, per-prefix |
-| `taskora:{<task>}:wait` | Sorted set | Waiting job IDs, keyed by composite score `-(priority * 1e13) + ts` so `ZPOPMIN` always yields a higher-priority job before any lower-priority one. Within a priority band ordering is best-effort (not FIFO) — multi-worker concurrency makes strict ordering unachievable at the execution layer anyway |
+| `taskora:{<task>}:wait` | List | Non-priority waiting job IDs (priority == 0). LPUSH at the head, RPOP from the tail. Strict FIFO. O(1) dequeue — the common-case fast path |
+| `taskora:{<task>}:prioritized` | Sorted set | Priority-dispatched (priority > 0) waiting job IDs, keyed by composite score `-(priority * 1e13) + ts`. `ZPOPMIN` yields the highest-priority job, FIFO within a band. Only consulted when `:wait` is empty |
 | `taskora:{<task>}:active` | List | Claimed-but-not-finished job IDs |
 | `taskora:{<task>}:delayed` | Sorted set | Score = run-at epoch ms |
 | `taskora:{<task>}:completed` | Sorted set | Score = finish epoch ms |

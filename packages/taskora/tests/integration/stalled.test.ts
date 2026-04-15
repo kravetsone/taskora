@@ -67,8 +67,8 @@ describe("stall detection", () => {
 
     const jobId = handle.id;
     // Simulate a dequeue that claimed the job but never set a lock — wait
-    // is a ZSET so we ZREM the specific id instead of LMOVEing.
-    await redis.zrem("taskora:{stall-recover}:wait", jobId);
+    // is a LIST (wireVersion 5) — LREM the specific id.
+    await redis.lrem("taskora:{stall-recover}:wait", 1, jobId);
     await redis.lpush("taskora:{stall-recover}:active", jobId);
     await redis.hset(`taskora:{stall-recover}:${jobId}`, "state", "active");
     // No lock set → will be detected as stalled
@@ -107,8 +107,8 @@ describe("stall detection", () => {
     await adapter.connect();
 
     // Simulate first stall: move to active, no lock, seed stalled set.
-    // Wait is a ZSET — ZREM the specific id, LPUSH active.
-    await redis.zrem("taskora:{stall-fail}:wait", jobId);
+    // Wait is a LIST (wireVersion 5) — LREM the specific id, LPUSH active.
+    await redis.lrem("taskora:{stall-fail}:wait", 1, jobId);
     await redis.lpush("taskora:{stall-fail}:active", jobId);
     await redis.hset(`taskora:{stall-fail}:${jobId}`, "state", "active");
     await redis.sadd("taskora:{stall-fail}:stalled", jobId);
@@ -123,7 +123,7 @@ describe("stall detection", () => {
     expect(stateAfter1).toBe("waiting");
 
     // Simulate second stall: move to active again, no lock
-    await redis.zrem("taskora:{stall-fail}:wait", jobId);
+    await redis.lrem("taskora:{stall-fail}:wait", 1, jobId);
     await redis.lpush("taskora:{stall-fail}:active", jobId);
     await redis.hset(`taskora:{stall-fail}:${jobId}`, "state", "active");
 
@@ -214,8 +214,8 @@ describe("stall detection", () => {
 
     await adapter.connect();
 
-    // Move to active without lock. Wait is a ZSET; ZREM the specific id.
-    await redis.zrem("taskora:{stall-events}:wait", jobId);
+    // Move to active without lock. Wait is a LIST (wireVersion 5); LREM the specific id.
+    await redis.lrem("taskora:{stall-events}:wait", 1, jobId);
     await redis.lpush("taskora:{stall-events}:active", jobId);
     await redis.hset(`taskora:{stall-events}:${jobId}`, "state", "active");
 
@@ -320,8 +320,8 @@ describe("stall detection", () => {
 
     const simulateStallCycle = async (expectedCount: number) => {
       // Move job back to active, no lock, seed stalled set. Wait list is
-      // a ZSET — ZREM the specific id, LPUSH active.
-      await redis.zrem("taskora:{stall-max3}:wait", jobId);
+      // a LIST (wireVersion 5) — LREM the specific id, LPUSH active.
+      await redis.lrem("taskora:{stall-max3}:wait", 1, jobId);
       await redis.lpush("taskora:{stall-max3}:active", jobId);
       await redis.hset(`taskora:{stall-max3}:${jobId}`, "state", "active");
       await redis.sadd("taskora:{stall-max3}:stalled", jobId);

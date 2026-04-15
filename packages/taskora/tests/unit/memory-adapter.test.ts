@@ -358,18 +358,26 @@ describe("memoryAdapter.blockingDequeue", () => {
 });
 
 describe("memoryAdapter.priority", () => {
-  // Priority-aware wait ordering: `tq.wait` is maintained sorted by
-  // (priority desc, ts asc) via `waitInsert`. Higher priority dequeues
-  // first, FIFO preserved within the same priority band by timestamp.
+  // Wait queue is split since wireVersion 5. Priority=0 jobs go into a
+  // FIFO LIST; priority>0 jobs go into a separate sorted ZSET. Dequeue
+  // drains the LIST first, then falls back to the ZSET. This means:
+  //   • Within the prioritized ZSET, higher priority still wins and
+  //     FIFO holds within one band (the old guarantee, unchanged).
+  //   • A priority=0 job already in the wait LIST dispatches BEFORE a
+  //     later-enqueued priority=5 job, because the LIST is checked first.
+  //   • Strict cross-queue priority only applies when the wait LIST is
+  //     empty at the moment of dequeue.
 
-  it("higher priority job dequeues before lower priority", async () => {
+  it("within the prioritized band, higher priority dequeues first", async () => {
     const adapter = memoryAdapter();
     await adapter.connect();
 
-    // Enqueue in the worst possible order: lowest first, highest last.
-    await adapter.enqueue("t1", "low", '"low"', { _v: 1, priority: 0 });
+    // All priority > 0 — these all land in the prioritized ZSET and the
+    // old strict-priority semantics still apply. Enqueue order is
+    // deliberately inverted to prove it's the score that wins.
     await adapter.enqueue("t1", "mid", '"mid"', { _v: 1, priority: 5 });
     await adapter.enqueue("t1", "high", '"high"', { _v: 1, priority: 10 });
+    await adapter.enqueue("t1", "low", '"low"', { _v: 1, priority: 1 });
 
     const r1 = await adapter.dequeue("t1", 30_000, "tok1");
     const r2 = await adapter.dequeue("t1", 30_000, "tok2");
@@ -380,13 +388,16 @@ describe("memoryAdapter.priority", () => {
     expect(r3?.id).toBe("low");
   });
 
-  it("same-priority jobs preserve FIFO ordering within a band", async () => {
+  it("wait LIST drains before prioritized ZSET is consulted", async () => {
     const adapter = memoryAdapter();
     await adapter.connect();
 
+    // lo-a enters the wait LIST first. Subsequent priority=10 dispatches
+    // go into the prioritized ZSET. Dequeue pops lo-a BEFORE the
+    // priority=10 jobs because the LIST is checked first.
+    await adapter.enqueue("t1", "lo-a", '"c"', { _v: 1, priority: 0 });
     await adapter.enqueue("t1", "hi-a", '"a"', { _v: 1, priority: 10 });
     await adapter.enqueue("t1", "hi-b", '"b"', { _v: 1, priority: 10 });
-    await adapter.enqueue("t1", "lo-a", '"c"', { _v: 1, priority: 0 });
     await adapter.enqueue("t1", "hi-c", '"d"', { _v: 1, priority: 10 });
 
     const order: string[] = [];
@@ -395,7 +406,23 @@ describe("memoryAdapter.priority", () => {
       if (r) order.push(r.id);
     }
 
-    // All priority-10 jobs first (FIFO between them), then lo-a last.
-    expect(order).toEqual(["hi-a", "hi-b", "hi-c", "lo-a"]);
+    expect(order).toEqual(["lo-a", "hi-a", "hi-b", "hi-c"]);
+  });
+
+  it("wait LIST is FIFO within priority=0", async () => {
+    const adapter = memoryAdapter();
+    await adapter.connect();
+
+    await adapter.enqueue("t1", "a", '"a"', { _v: 1, priority: 0 });
+    await adapter.enqueue("t1", "b", '"b"', { _v: 1, priority: 0 });
+    await adapter.enqueue("t1", "c", '"c"', { _v: 1, priority: 0 });
+
+    const order: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await adapter.dequeue("t1", 30_000, `tok${i}`);
+      if (r) order.push(r.id);
+    }
+
+    expect(order).toEqual(["a", "b", "c"]);
   });
 });

@@ -50,7 +50,7 @@ function collectScriptHashes(): Record<string, string> {
 
 // ── The frozen surface ──────────────────────────────────────────────────
 
-const FROZEN_AT_WIRE_VERSION = 4;
+const FROZEN_AT_WIRE_VERSION = 5;
 
 // buildKeys / buildMetaKey / buildScheduleKeys output for fixed inputs. These
 // strings are persisted in live Redis instances — renaming ANY of them is a
@@ -58,6 +58,7 @@ const FROZEN_AT_WIRE_VERSION = 4;
 const FROZEN_KEY_LAYOUT = {
   job: {
     wait: "taskora:{sample-task}:wait",
+    prioritized: "taskora:{sample-task}:prioritized",
     active: "taskora:{sample-task}:active",
     delayed: "taskora:{sample-task}:delayed",
     completed: "taskora:{sample-task}:completed",
@@ -72,6 +73,7 @@ const FROZEN_KEY_LAYOUT = {
   },
   jobWithPrefix: {
     wait: "taskora:myapp:{sample-task}:wait",
+    prioritized: "taskora:myapp:{sample-task}:prioritized",
     active: "taskora:myapp:{sample-task}:active",
     delayed: "taskora:myapp:{sample-task}:delayed",
     completed: "taskora:myapp:{sample-task}:completed",
@@ -104,37 +106,38 @@ const FROZEN_KEY_LAYOUT = {
 // than let a drive-by edit slip through.
 const FROZEN_SCRIPT_HASHES: Record<string, string> = {
   ACK: "b283e95480b7ab31",
-  ACK_AND_MOVE_TO_ACTIVE: "dfe22ce065bac846",
+  ACK_AND_MOVE_TO_ACTIVE: "174f2e0bcba3e439",
   ACQUIRE_SCHEDULER_LOCK: "362180a86b49ee72",
   ADVANCE_WORKFLOW: "b3535a40f566e08e",
-  CANCEL: "d55f37b4d9f9ac00",
+  CANCEL: "dd2fac08671df39f",
   CANCEL_WORKFLOW: "409298974cb9f05e",
   CLEAN_JOBS: "c30ae2ee03502165",
-  COLLECT_PUSH: "93e45908c14c30fb",
+  COLLECT_PUSH: "5afcce95fca2cffe",
   CREATE_WORKFLOW: "e32df6d810b9ad4e",
   DEBOUNCE: "261d4950239a6e25",
-  DEDUPLICATE_ENQUEUE: "65dd032030d37e24",
-  ENQUEUE: "0650945babf6ea84",
-  ENQUEUE_BULK: "fab1c9ae9673e679",
+  DEDUPLICATE_ENQUEUE: "7be48f57fce0be0d",
+  ENQUEUE: "e9b49613024ed658",
+  ENQUEUE_BULK: "3c45831daed2d539",
   ENQUEUE_DELAYED: "ca754f338ced0aab",
   EXTEND_LOCK: "dc500d7199ee06b1",
   FAIL: "b733a38465348cb8",
-  FAIL_AND_MOVE_TO_ACTIVE: "8a1a7aea4d6b009c",
+  FAIL_AND_MOVE_TO_ACTIVE: "e51f5216bf44bc63",
   FAIL_WORKFLOW: "a7762af2ff385164",
   FINISH_CANCEL: "5f78f671ea104896",
   HANDSHAKE: "91898f9a4c4cf5b7",
-  LIST_JOB_DETAILS: "c6fd6f76fe41c1e6",
+  LIST_JOB_DETAILS: "78f50791080f0567",
   MIGRATE_WAIT_V1_TO_V2: "dd1209f915452b05",
-  MOVE_TO_ACTIVE: "6c8e670c19c24801",
-  NACK: "de5874937e547c4f",
+  MIGRATE_WAIT_V4_TO_V5: "a6772e24095d3e43",
+  MOVE_TO_ACTIVE: "22a1d11f9a248905",
+  NACK: "65f2aa38487f6c59",
   RENEW_SCHEDULER_LOCK: "96d3ba1e2ef947b6",
-  RETRY_ALL_DLQ: "b316a2f787f03590",
-  RETRY_DLQ: "b32936832eaae7c5",
-  STALLED_CHECK: "40d22e00ae601954",
-  THROTTLE_ENQUEUE: "6b3dc48a61442199",
+  RETRY_ALL_DLQ: "f4cfb1e9f25768dc",
+  RETRY_DLQ: "ea3d316ea5123ece",
+  STALLED_CHECK: "9f6c5cf36b54fe09",
+  THROTTLE_ENQUEUE: "1f8e5c4df63302ed",
   TICK_SCHEDULER: "d77ed41b08630ef8",
   TRIM_DLQ: "97aaf7bb754bcdaf",
-  VERSION_DISTRIBUTION: "40d3a705e520bd5a",
+  VERSION_DISTRIBUTION: "37905d283ee71f59",
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────

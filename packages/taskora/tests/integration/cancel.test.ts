@@ -40,7 +40,7 @@ describe("graceful cancellation", () => {
     expect(cancelledCount).toBe(1);
 
     // Should NOT be in waiting list
-    const waitingCount = await redis.zcard("taskora:{cancel-wait}:wait");
+    const waitingCount = await redis.llen("taskora:{cancel-wait}:wait");
     expect(waitingCount).toBe(0);
 
     await app.close();

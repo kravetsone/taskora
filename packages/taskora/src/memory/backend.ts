@@ -16,7 +16,22 @@ interface Job {
 }
 
 interface TaskQueue {
+  /**
+   * Non-priority wait queue. FIFO list of job IDs — head is the
+   * oldest dispatch, tail is the newest. `shift()` dequeues, new
+   * arrivals `push()`. Mirrors the wireVersion-5 Redis `:wait` LIST
+   * (RPOP-from-tail / LPUSH-at-head) with the head/tail convention
+   * inverted for JS array ergonomics.
+   */
   wait: string[];
+  /**
+   * Priority wait queue, sorted ascending by composite score
+   * `-priority * 1e13 + ts`. Smallest score = highest priority and,
+   * within one priority band, oldest ts. Mirrors the wireVersion-5
+   * Redis `:prioritized` ZSET. Dequeue only happens after `wait` is
+   * empty so priority=0 jobs never pay the sorted-insert cost.
+   */
+  prioritized: ZEntry[];
   active: string[];
   delayed: ZEntry[];
   completed: ZEntry[];
@@ -165,6 +180,7 @@ export class MemoryBackend implements Taskora.Adapter {
     if (!tq) {
       tq = {
         wait: [],
+        prioritized: [],
         active: [],
         delayed: [],
         completed: [],
@@ -212,9 +228,13 @@ export class MemoryBackend implements Taskora.Adapter {
 
   // ── Priority-aware wait insertion ──
   //
-  // Maintains `tq.wait` sorted by (priority desc, ts asc): higher priority
-  // comes out first, within the same priority FIFO by timestamp. Binary
-  // search on insert is O(log n) comparisons + O(n) splice cost.
+  // Since wireVersion 5 the wait queue is split. Priority=0 jobs go into
+  // `tq.wait` FIFO (O(1) push/shift). Priority>0 jobs go into
+  // `tq.prioritized`, a sorted array keyed by `-priority * 1e13 + ts` so
+  // smaller score = higher priority = earlier dequeue. `zAdd`'s binary
+  // search keeps sorted inserts O(log n) comparisons + O(n) splice.
+  // Dequeue drains `wait` first, then `prioritized` — the same fast-path
+  // precedence as the Redis backend.
 
   private waitInsert(tq: TaskQueue, jobId: string): void {
     const job = this.jobStore.get(jobId);
@@ -223,20 +243,12 @@ export class MemoryBackend implements Taskora.Adapter {
       return;
     }
     const newPrio = Number(job.fields.priority || 0);
-    const newTs = Number(job.fields.ts || 0);
-
-    let lo = 0;
-    let hi = tq.wait.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      const other = this.jobStore.get(tq.wait[mid]);
-      const otherPrio = other ? Number(other.fields.priority || 0) : 0;
-      const otherTs = other ? Number(other.fields.ts || 0) : 0;
-      const goesBeforeMid = newPrio > otherPrio || (newPrio === otherPrio && newTs < otherTs);
-      if (goesBeforeMid) hi = mid;
-      else lo = mid + 1;
+    if (newPrio > 0) {
+      const newTs = Number(job.fields.ts || 0);
+      zAdd(tq.prioritized, jobId, -newPrio * 1e13 + newTs);
+    } else {
+      tq.wait.push(jobId);
     }
-    tq.wait.splice(lo, 0, jobId);
   }
 
   // ── Event helper ──
@@ -766,7 +778,19 @@ export class MemoryBackend implements Taskora.Adapter {
 
     if (options?.singleton && tq.active.length > 0) return null;
 
-    const jobId = tq.wait.shift();
+    // Fast path: drain the non-priority wait LIST first. Fall back to
+    // the prioritized ZSET only when wait is empty. Matches the
+    // wireVersion-5 Redis claim order.
+    let jobId: string | undefined;
+    let fromPrioritized = false;
+    jobId = tq.wait.shift();
+    if (!jobId) {
+      const prioEntry = tq.prioritized.shift();
+      if (prioEntry) {
+        jobId = prioEntry.member;
+        fromPrioritized = true;
+      }
+    }
     if (!jobId) return null;
 
     const job = this.jobStore.get(jobId);
@@ -787,9 +811,16 @@ export class MemoryBackend implements Taskora.Adapter {
       return this.dequeue(task, lockTtl, token, options);
     }
 
-    // Concurrency key check
+    // Concurrency key check — put back into whichever queue we popped
+    // from so the next dequeue can pick up a different job.
     if (!this.incrConcurrency(task, jobId)) {
-      tq.wait.unshift(jobId);
+      if (fromPrioritized) {
+        const prio = Number(job.fields.priority || 0);
+        const ts = Number(job.fields.ts || 0);
+        zAdd(tq.prioritized, jobId, -prio * 1e13 + ts);
+      } else {
+        tq.wait.unshift(jobId);
+      }
       return null;
     }
 
@@ -1103,7 +1134,11 @@ export class MemoryBackend implements Taskora.Adapter {
     if (state === "waiting" || state === "delayed" || state === "retrying") {
       if (state === "waiting") {
         const idx = tq.wait.indexOf(jobId);
-        if (idx >= 0) tq.wait.splice(idx, 1);
+        if (idx >= 0) {
+          tq.wait.splice(idx, 1);
+        } else {
+          zRem(tq.prioritized, jobId);
+        }
       } else {
         zRem(tq.delayed, jobId);
       }
@@ -1324,9 +1359,15 @@ export class MemoryBackend implements Taskora.Adapter {
     let ids: string[];
 
     switch (state) {
-      case "waiting":
-        ids = tq.wait.slice(offset, offset + limit);
+      case "waiting": {
+        // Wait queue is split: prioritized ZSET first (higher priority
+        // surfaces earlier), then the FIFO wait LIST. Flatten into one
+        // virtual list and paginate across the boundary.
+        const prioIds = tq.prioritized.map((e) => e.member);
+        const combined = prioIds.concat(tq.wait);
+        ids = combined.slice(offset, offset + limit);
         break;
+      }
       case "active":
         ids = tq.active.slice(offset, offset + limit);
         break;
@@ -1389,7 +1430,7 @@ export class MemoryBackend implements Taskora.Adapter {
   async getQueueStats(task: string): Promise<Taskora.QueueStats> {
     const tq = this.q(task);
     return {
-      waiting: tq.wait.length,
+      waiting: tq.wait.length + tq.prioritized.length,
       active: tq.active.length,
       delayed: tq.delayed.length,
       completed: tq.completed.length,
@@ -1486,6 +1527,10 @@ export class MemoryBackend implements Taskora.Adapter {
     };
 
     count(dist.waiting, tq.wait);
+    count(
+      dist.waiting,
+      tq.prioritized.map((e) => e.member),
+    );
     count(dist.active, tq.active);
     count(
       dist.delayed,

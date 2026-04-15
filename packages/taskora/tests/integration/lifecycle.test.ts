@@ -124,7 +124,7 @@ describe("delayed jobs", () => {
     // Should be in delayed set, not wait list
     const delayedCount = await redis.zcard("taskora:{delayed-task}:delayed");
     expect(delayedCount).toBe(1);
-    const waitCount = await redis.zcard("taskora:{delayed-task}:wait");
+    const waitCount = await redis.llen("taskora:{delayed-task}:wait");
     expect(waitCount).toBe(0);
 
     await app.start();

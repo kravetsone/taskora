@@ -385,22 +385,19 @@ export class RedisBackend implements Taskora.Adapter {
       writtenAt: Number(raw[3]),
     };
 
-    // Auto-migration: if the backend is on wireVersion 1 and we're v2+,
-    // run the in-place wait-list migrator before anything touches the
-    // adapter. Uses the shared migration-lock protocol so a cluster of
-    // v2 instances starting simultaneously doesn't race — exactly one
-    // wins the lock and performs the migration, the losers fall back
-    // through `awaitMigrationLock` and re-handshake (now reading the
-    // freshly-bumped v2 meta, taking the fast path).
-    if (stored.wireVersion === 1 && ours.wireVersion >= 2) {
-      return this.runInPlaceMigration(ours, metaKey, stored, () => this.migrateWaitV1ToV2());
-    }
-
-    // Auto-migration: wireVersion 4 → 5 splits the single wait ZSET
-    // into a LIST (priority=0 fast path) + a separate prioritized
-    // ZSET. Same shared-lock protocol as v1→v2.
-    if (stored.wireVersion === 4 && ours.wireVersion >= 5) {
-      return this.runInPlaceMigration(ours, metaKey, stored, () => this.migrateWaitV4ToV5());
+    // Auto-migration: chain every known in-place wait-queue migration
+    // under a single lock, then bump the meta once. Each Lua migrator
+    // is idempotent (v1→v2 no-ops on a ZSET keyspace; v4→v5 no-ops on
+    // a LIST keyspace), so a stored wireVersion anywhere in [1, 4] is
+    // safely chained up to the current wireVersion 5 layout.
+    //
+    // Shared lock protocol: a cluster of new instances starting
+    // simultaneously against an old keyspace all try `SET NX` on the
+    // migration lock; exactly one wins and runs the migration, the
+    // losers fall back through `awaitMigrationLock` and re-handshake
+    // (now reading the freshly-bumped meta, taking the fast path).
+    if (stored.wireVersion < ours.wireVersion && stored.wireVersion < 5) {
+      return this.runChainedWaitMigration(ours, metaKey, stored);
     }
 
     // The Lua script normalizes every slot to a string; core's `checkCompat`
@@ -410,16 +407,15 @@ export class RedisBackend implements Taskora.Adapter {
   }
 
   /**
-   * Shared plumbing for in-place wait-queue migrations: acquire the
-   * reserved migration lock, run the provided migrator, update the
-   * meta hash, release the lock, broadcast. Losing races fall back
-   * through `awaitMigrationLock` via a recursive `handshake()` call.
+   * Acquire the reserved migration lock, run every applicable wait-queue
+   * migration in sequence (v1→v2, then v4→v5), bump the meta once, and
+   * release the lock. Losing races fall back through `awaitMigrationLock`
+   * via a recursive `handshake()` call.
    */
-  private async runInPlaceMigration(
+  private async runChainedWaitMigration(
     ours: Taskora.SchemaMeta,
     metaKey: string,
     stored: Taskora.SchemaMeta,
-    run: () => Promise<{ keys: number; jobs: number }>,
   ): Promise<Taskora.SchemaMeta> {
     const lockKey = buildMigrationKeys(this.prefix).migrationLock;
     const payload: MigrationLockPayload = {
@@ -439,12 +435,28 @@ export class RedisBackend implements Taskora.Adapter {
     ])) as "OK" | null;
 
     if (acquired !== "OK") {
-      // Another process beat us to it — wait and re-handshake.
       return this.handshake(ours);
     }
 
     try {
-      const migrated = await run();
+      let keysMigrated = 0;
+      let jobsMigrated = 0;
+
+      // v1 → v2: LIST → single ZSET. Idempotent on a ZSET keyspace.
+      if (stored.wireVersion < 2) {
+        const r = await this.migrateWaitV1ToV2();
+        keysMigrated += r.keys;
+        jobsMigrated += r.jobs;
+      }
+      // v4 → v5: ZSET → LIST + prioritized ZSET split. Idempotent on a
+      // LIST keyspace. Runs for any stored wireVersion ≤ 4 because v2
+      // and v3 also have ZSET wait queues.
+      if (stored.wireVersion < 5) {
+        const r = await this.migrateWaitV4ToV5();
+        keysMigrated += r.keys;
+        jobsMigrated += r.jobs;
+      }
+
       await this.driver.command("hset", [
         metaKey,
         "wireVersion",
@@ -458,7 +470,7 @@ export class RedisBackend implements Taskora.Adapter {
       ]);
       // biome-ignore lint/suspicious/noConsole: one-shot operator-visible upgrade signal
       console.log(
-        `[taskora] migrated ${migrated.keys} :wait structure${migrated.keys === 1 ? "" : "s"} (${migrated.jobs} jobs) to wireVersion ${ours.wireVersion}`,
+        `[taskora] migrated ${keysMigrated} :wait structure${keysMigrated === 1 ? "" : "s"} (${jobsMigrated} jobs) from wireVersion ${stored.wireVersion} to ${ours.wireVersion}`,
       );
     } finally {
       await this.driver.command("del", [lockKey]);
