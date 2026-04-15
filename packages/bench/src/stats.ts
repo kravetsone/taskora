@@ -20,11 +20,12 @@ export function buildResult(
   library: string,
   ops: number,
   durations: number[],
+  memorySamples?: number[],
 ): BenchmarkResult {
   const medianMs = median(durations);
   const medianOpsPerSec = medianMs > 0 ? (ops / medianMs) * 1000 : 0;
 
-  return {
+  const result: BenchmarkResult = {
     benchmark,
     library,
     ops,
@@ -33,4 +34,16 @@ export function buildResult(
     iterations: durations,
     medianOpsPerSec,
   };
+
+  if (memorySamples && memorySamples.length > 0) {
+    // Ignore negative deltas (can happen if Redis shrinks allocator chunks
+    // between samples) so they don't pull the median down.
+    const nonNegative = memorySamples.filter((b) => b >= 0);
+    const samples = nonNegative.length > 0 ? nonNegative : memorySamples;
+    const med = median(samples);
+    result.memoryBytes = med;
+    result.memoryPerJob = ops > 0 ? Math.round(med / ops) : 0;
+  }
+
+  return result;
 }

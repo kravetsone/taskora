@@ -1,6 +1,6 @@
 import Redis from "ioredis";
 import type { BenchAdapter, CompletionHandle, LatencyHandle } from "../types.js";
-import { parseRedisUrl } from "../redis.js";
+import { parseRedisUrl, readUsedMemory } from "../redis.js";
 
 export class BullMQAdapter implements BenchAdapter {
   readonly name = "bullmq";
@@ -168,6 +168,11 @@ export class BullMQAdapter implements BenchAdapter {
     if (this.redis) {
       await this.redis.flushdb();
     }
+  }
+
+  async getMemoryUsage(): Promise<number> {
+    if (!this.redis) throw new Error("BullMQAdapter not set up");
+    return readUsedMemory(this.redis);
   }
 
   async teardown(): Promise<void> {

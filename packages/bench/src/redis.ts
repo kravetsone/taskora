@@ -40,3 +40,15 @@ export function parseRedisUrl(url: string): { host: string; port: number } {
   const u = new URL(url);
   return { host: u.hostname, port: Number(u.port) || 6379 };
 }
+
+/**
+ * Parse `used_memory:<bytes>` from Redis `INFO memory` output.
+ * Returns 0 if the section is missing — callers can treat that as "unknown".
+ */
+export async function readUsedMemory(client: {
+  info(section: string): Promise<string>;
+}): Promise<number> {
+  const info = await client.info("memory");
+  const match = /^used_memory:(\d+)/m.exec(info);
+  return match ? Number(match[1]) : 0;
+}

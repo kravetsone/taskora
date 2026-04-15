@@ -35,6 +35,9 @@ export interface BenchAdapter {
 
   /** Close all connections. Called once at end. */
   teardown(): Promise<void>;
+
+  /** Current Redis `used_memory` in bytes (from `INFO memory`). */
+  getMemoryUsage(): Promise<number>;
 }
 
 export interface CompletionHandle {
@@ -58,6 +61,10 @@ export interface BenchmarkResult {
   /** Raw durations (ms) per iteration. */
   iterations: number[];
   medianOpsPerSec: number;
+  /** Median Redis memory delta (bytes) across iterations — only populated for enqueue benchmarks. */
+  memoryBytes?: number;
+  /** memoryBytes / ops, rounded bytes per job. */
+  memoryPerJob?: number;
 }
 
 export interface LatencyBenchmarkResult extends BenchmarkResult {

@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { readUsedMemory } from "../redis.js";
 import type { BenchAdapter, CompletionHandle, LatencyHandle } from "../types.js";
 
 export class TaskoraAdapter implements BenchAdapter {
@@ -146,6 +147,11 @@ export class TaskoraAdapter implements BenchAdapter {
     if (this.redis) {
       await this.redis.flushdb();
     }
+  }
+
+  async getMemoryUsage(): Promise<number> {
+    if (!this.redis) throw new Error("TaskoraAdapter not set up");
+    return readUsedMemory(this.redis);
   }
 
   async teardown(): Promise<void> {

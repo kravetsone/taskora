@@ -56,7 +56,12 @@ export async function run(options: RunOptions): Promise<BenchmarkResult[]> {
 
       process.stdout.write(`    ${benchName}... `);
       const result = await fn(adapter, config);
-      console.log(`${Math.round(result.medianOpsPerSec).toLocaleString("en-US")} ops/sec`);
+      const opsStr = `${Math.round(result.medianOpsPerSec).toLocaleString("en-US")} ops/sec`;
+      const memStr =
+        result.memoryPerJob !== undefined && result.memoryPerJob > 0
+          ? ` (${result.memoryPerJob.toLocaleString("en-US")} B/job)`
+          : "";
+      console.log(`${opsStr}${memStr}`);
 
       results.push(result);
     }

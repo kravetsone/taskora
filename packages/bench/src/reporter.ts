@@ -8,6 +8,13 @@ function fmt(n: number): string {
   return n.toLocaleString("en-US", { maximumFractionDigits: 1 });
 }
 
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${Math.round(n)} B`;
+}
+
 function pad(s: string, len: number): string {
   return s.padEnd(len);
 }
@@ -27,6 +34,8 @@ export function reportTable(results: BenchmarkResult[], redisUrl: string): void 
   const colOps = 12;
   const colMedian = 12;
   const colJobs = 7;
+  const colMem = 12;
+  const colPerJob = 10;
   const colLatency = 22;
 
   const header = [
@@ -35,6 +44,8 @@ export function reportTable(results: BenchmarkResult[], redisUrl: string): void 
     padStart("Ops/sec", colOps),
     padStart("Median(ms)", colMedian),
     padStart("Jobs", colJobs),
+    padStart("Mem Δ", colMem),
+    padStart("B/job", colPerJob),
     padStart("Latency p50/p95/p99", colLatency),
   ].join("  ");
 
@@ -44,6 +55,8 @@ export function reportTable(results: BenchmarkResult[], redisUrl: string): void 
     "─".repeat(colOps),
     "─".repeat(colMedian),
     "─".repeat(colJobs),
+    "─".repeat(colMem),
+    "─".repeat(colPerJob),
     "─".repeat(colLatency),
   ].join("  ");
 
@@ -55,12 +68,18 @@ export function reportTable(results: BenchmarkResult[], redisUrl: string): void 
       ? `${fmt(r.p50)}/${fmt(r.p95)}/${fmt(r.p99)}`
       : "—";
 
+    const memStr = r.memoryBytes !== undefined ? fmtBytes(r.memoryBytes) : "—";
+    const perJobStr =
+      r.memoryPerJob !== undefined && r.memoryPerJob > 0 ? fmtBytes(r.memoryPerJob) : "—";
+
     const row = [
       pad(r.benchmark, colBench),
       pad(r.library, colLib),
       padStart(fmt(r.medianOpsPerSec), colOps),
       padStart(fmt(r.durationMs), colMedian),
       padStart(String(r.ops), colJobs),
+      padStart(memStr, colMem),
+      padStart(perJobStr, colPerJob),
       padStart(latencyStr, colLatency),
     ].join("  ");
 
