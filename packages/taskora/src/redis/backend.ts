@@ -55,6 +55,7 @@ const SCRIPT_MAP: Record<string, string> = {
   cleanJobs: scripts.CLEAN_JOBS,
   handshake: scripts.HANDSHAKE,
   migrateWaitV1ToV2: scripts.MIGRATE_WAIT_V1_TO_V2,
+  migrateWaitV4ToV5: scripts.MIGRATE_WAIT_V4_TO_V5,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -392,70 +393,83 @@ export class RedisBackend implements Taskora.Adapter {
     // through `awaitMigrationLock` and re-handshake (now reading the
     // freshly-bumped v2 meta, taking the fast path).
     if (stored.wireVersion === 1 && ours.wireVersion >= 2) {
-      const lockKey = buildMigrationKeys(this.prefix).migrationLock;
-      const payload: MigrationLockPayload = {
-        by: ours.writtenBy,
-        reason: `wireVersion-${stored.wireVersion}-to-${ours.wireVersion}`,
-        startedAt: Date.now(),
-        // Pessimistic: allow up to 5 minutes for the per-key Lua scripts
-        // to process the entire keyspace. TTL below is 2× this, so a
-        // crashed migrator eventually frees the cluster.
-        expectedDurationMs: 5 * 60_000,
-        targetWireVersion: ours.wireVersion,
-      };
-      const ttlMs = 10 * 60_000;
-      const acquired = (await this.driver.command("set", [
-        lockKey,
-        JSON.stringify(payload),
-        "NX",
-        "PX",
-        String(ttlMs),
-      ])) as "OK" | null;
+      return this.runInPlaceMigration(ours, metaKey, stored, () => this.migrateWaitV1ToV2());
+    }
 
-      if (acquired !== "OK") {
-        // Another v2 process beat us to it — wait for its migration to
-        // finish, then re-handshake. The recursion terminates because
-        // after the winner releases the lock, the persisted meta is
-        // v2 and the `stored.wireVersion === 1` branch no longer fires.
-        return this.handshake(ours);
-      }
-
-      try {
-        const migrated = await this.migrateWaitV1ToV2();
-        await this.driver.command("hset", [
-          metaKey,
-          "wireVersion",
-          String(ours.wireVersion),
-          "minCompat",
-          String(ours.minCompat),
-          "writtenBy",
-          ours.writtenBy,
-          "writtenAt",
-          String(ours.writtenAt),
-        ]);
-        // biome-ignore lint/suspicious/noConsole: one-shot operator-visible upgrade signal
-        console.log(
-          `[taskora] migrated ${migrated.keys} :wait list${migrated.keys === 1 ? "" : "s"} (${migrated.jobs} jobs) to wireVersion ${ours.wireVersion}`,
-        );
-      } finally {
-        // Clear the lock + broadcast so any polling process wakes up
-        // immediately instead of waiting for its next interval tick.
-        await this.driver.command("del", [lockKey]);
-        const { migrationChannel } = buildMigrationKeys(this.prefix);
-        try {
-          await this.driver.command("publish", [migrationChannel, "migration:done"]);
-        } catch {
-          // PUBLISH failure is non-fatal — lock DEL is what actually
-          // releases the gate; the broadcast is only a wake-up hint.
-        }
-      }
-      return { ...ours };
+    // Auto-migration: wireVersion 4 → 5 splits the single wait ZSET
+    // into a LIST (priority=0 fast path) + a separate prioritized
+    // ZSET. Same shared-lock protocol as v1→v2.
+    if (stored.wireVersion === 4 && ours.wireVersion >= 5) {
+      return this.runInPlaceMigration(ours, metaKey, stored, () => this.migrateWaitV4ToV5());
     }
 
     // The Lua script normalizes every slot to a string; core's `checkCompat`
     // will flag any NaN/out-of-range values as `invalid_meta` so operators
     // get a clear error instead of a silent zero.
     return stored;
+  }
+
+  /**
+   * Shared plumbing for in-place wait-queue migrations: acquire the
+   * reserved migration lock, run the provided migrator, update the
+   * meta hash, release the lock, broadcast. Losing races fall back
+   * through `awaitMigrationLock` via a recursive `handshake()` call.
+   */
+  private async runInPlaceMigration(
+    ours: Taskora.SchemaMeta,
+    metaKey: string,
+    stored: Taskora.SchemaMeta,
+    run: () => Promise<{ keys: number; jobs: number }>,
+  ): Promise<Taskora.SchemaMeta> {
+    const lockKey = buildMigrationKeys(this.prefix).migrationLock;
+    const payload: MigrationLockPayload = {
+      by: ours.writtenBy,
+      reason: `wireVersion-${stored.wireVersion}-to-${ours.wireVersion}`,
+      startedAt: Date.now(),
+      expectedDurationMs: 5 * 60_000,
+      targetWireVersion: ours.wireVersion,
+    };
+    const ttlMs = 10 * 60_000;
+    const acquired = (await this.driver.command("set", [
+      lockKey,
+      JSON.stringify(payload),
+      "NX",
+      "PX",
+      String(ttlMs),
+    ])) as "OK" | null;
+
+    if (acquired !== "OK") {
+      // Another process beat us to it — wait and re-handshake.
+      return this.handshake(ours);
+    }
+
+    try {
+      const migrated = await run();
+      await this.driver.command("hset", [
+        metaKey,
+        "wireVersion",
+        String(ours.wireVersion),
+        "minCompat",
+        String(ours.minCompat),
+        "writtenBy",
+        ours.writtenBy,
+        "writtenAt",
+        String(ours.writtenAt),
+      ]);
+      // biome-ignore lint/suspicious/noConsole: one-shot operator-visible upgrade signal
+      console.log(
+        `[taskora] migrated ${migrated.keys} :wait structure${migrated.keys === 1 ? "" : "s"} (${migrated.jobs} jobs) to wireVersion ${ours.wireVersion}`,
+      );
+    } finally {
+      await this.driver.command("del", [lockKey]);
+      const { migrationChannel } = buildMigrationKeys(this.prefix);
+      try {
+        await this.driver.command("publish", [migrationChannel, "migration:done"]);
+      } catch {
+        // PUBLISH failure is non-fatal.
+      }
+    }
+    return { ...ours };
   }
 
   /**
@@ -497,6 +511,56 @@ export class RedisBackend implements Taskora.Adapter {
         // suffix. The script needs it to HMGET each job's priority/ts.
         const jobPrefix = waitKey.slice(0, -"wait".length);
         const migrated = (await this.eval("migrateWaitV1ToV2", 1, waitKey, jobPrefix)) as number;
+        if (migrated > 0) {
+          keys += 1;
+          jobs += migrated;
+        }
+      }
+    } while (cursor !== "0");
+
+    return { keys, jobs };
+  }
+
+  /**
+   * wireVersion 4 → 5 migration: split every `taskora:*:wait` ZSET
+   * into a LIST (priority=0, FIFO by ts) plus a matching
+   * `taskora:*:prioritized` ZSET (priority>0, score preserved).
+   * Atomic per-key via Lua and idempotent — already-migrated keys
+   * (LIST or missing) are no-ops. See `scripts.MIGRATE_WAIT_V4_TO_V5`.
+   *
+   * Hard upgrade: wireVersion 4 workers cannot share a backend with
+   * wireVersion 5 workers (LIST vs ZSET WRONGTYPE at runtime). Drain
+   * queues or flush keyspace before rolling workers.
+   *
+   * @internal — exposed for tests; production code goes through handshake().
+   */
+  async migrateWaitV4ToV5(): Promise<{ keys: number; jobs: number }> {
+    const pattern = this.prefix ? `taskora:${this.prefix}:{*}:wait` : "taskora:{*}:wait";
+    let cursor = "0";
+    let keys = 0;
+    let jobs = 0;
+
+    do {
+      const result = (await this.driver.command("scan", [
+        cursor,
+        "MATCH",
+        pattern,
+        "COUNT",
+        "100",
+      ])) as [string, string[]];
+      cursor = result[0];
+      const waitKeys = result[1] ?? [];
+
+      for (const waitKey of waitKeys) {
+        const prioritizedKey = `${waitKey.slice(0, -"wait".length)}prioritized`;
+        const jobPrefix = waitKey.slice(0, -"wait".length);
+        const migrated = (await this.eval(
+          "migrateWaitV4ToV5",
+          2,
+          waitKey,
+          prioritizedKey,
+          jobPrefix,
+        )) as number;
         if (migrated > 0) {
           keys += 1;
           jobs += migrated;
@@ -618,10 +682,11 @@ export class RedisBackend implements Taskora.Adapter {
 
     await this.eval(
       "enqueue",
-      3,
+      4,
       keys.wait,
       keys.events,
       keys.marker,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       data,
@@ -678,11 +743,12 @@ export class RedisBackend implements Taskora.Adapter {
 
     await this.eval(
       "enqueueBulk",
-      4,
+      5,
       keys.wait,
       keys.delayed,
       keys.events,
       keys.marker,
+      keys.prioritized,
       ...args,
     );
   }
@@ -750,11 +816,12 @@ export class RedisBackend implements Taskora.Adapter {
 
     const result = await this.eval(
       "throttleEnqueue",
-      4,
+      5,
       keys.wait,
       keys.delayed,
       keys.events,
       keys.marker,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       data,
@@ -795,11 +862,12 @@ export class RedisBackend implements Taskora.Adapter {
 
     const result = (await this.eval(
       "deduplicateEnqueue",
-      4,
+      5,
       keys.wait,
       keys.delayed,
       keys.events,
       keys.marker,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       data,
@@ -909,13 +977,14 @@ export class RedisBackend implements Taskora.Adapter {
 
     const result = await this.eval(
       "moveToActive",
-      6,
+      7,
       keys.wait,
       keys.active,
       keys.delayed,
       keys.events,
       keys.marker,
       keys.expired,
+      keys.prioritized,
       keys.jobPrefix,
       String(lockTtl),
       token,
@@ -1057,7 +1126,7 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const raw = (await this.eval(
       "ackAndMoveToActive",
-      7,
+      8,
       keys.wait,
       keys.active,
       keys.delayed,
@@ -1065,6 +1134,7 @@ export class RedisBackend implements Taskora.Adapter {
       keys.marker,
       keys.expired,
       keys.completed,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       token,
@@ -1092,7 +1162,7 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const raw = (await this.eval(
       "failAndMoveToActive",
-      7,
+      8,
       keys.wait,
       keys.active,
       keys.delayed,
@@ -1100,6 +1170,7 @@ export class RedisBackend implements Taskora.Adapter {
       keys.marker,
       keys.expired,
       keys.failed,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       token,
@@ -1166,11 +1237,12 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     await this.eval(
       "nack",
-      4,
+      5,
       keys.active,
       keys.wait,
       keys.events,
       keys.marker,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       token,
@@ -1284,7 +1356,7 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = (await this.eval(
       "stalledCheck",
-      7,
+      8,
       keys.stalled,
       keys.active,
       keys.wait,
@@ -1292,6 +1364,7 @@ export class RedisBackend implements Taskora.Adapter {
       keys.events,
       keys.marker,
       keys.cancelled,
+      keys.prioritized,
       keys.jobPrefix,
       String(maxStalledCount),
       String(Date.now()),
@@ -1321,10 +1394,11 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = (await this.eval(
       "versionDistribution",
-      3,
+      4,
       keys.wait,
       keys.active,
       keys.delayed,
+      keys.prioritized,
       keys.jobPrefix,
     )) as string[];
 
@@ -1365,14 +1439,21 @@ export class RedisBackend implements Taskora.Adapter {
   private static readonly STATE_MODE: Record<
     string,
     {
-      key: "wait" | "active" | "delayed" | "completed" | "failed" | "expired" | "cancelled";
+      key:
+        | "wait"
+        | "active"
+        | "delayed"
+        | "completed"
+        | "failed"
+        | "expired"
+        | "cancelled"
+        | "prioritized";
       mode: string;
     }
   > = {
-    // Wait list is a ZSET (priority desc, ts asc) — ZRANGE gives
-    // dequeue order directly. Active list is still a LIST with
-    // deterministic client-side ts re-sort via the `lrange` mode.
-    waiting: { key: "wait", mode: "wait_zrange" },
+    // Wait queue is split since wireVersion 5: non-priority LIST +
+    // prioritized ZSET. `listJobDetails` for 'waiting' queries both
+    // and concatenates (prioritized first, then LIST FIFO order).
     active: { key: "active", mode: "lrange" },
     delayed: { key: "delayed", mode: "zrange" },
     completed: { key: "completed", mode: "zrevrange" },
@@ -1388,6 +1469,53 @@ export class RedisBackend implements Taskora.Adapter {
     limit: number,
   ): Promise<Array<{ id: string; details: Taskora.RawJobDetails }>> {
     const keys = buildKeys(task, this.prefix);
+
+    // Waiting is the only state that spans two Redis structures. We
+    // read prioritized ZSET first (priority DESC, ts ASC) and then
+    // the wait LIST (FIFO: RPOP tail first → LRANGE with a trailing
+    // offset). Pagination walks across the boundary so the caller
+    // sees one continuous window.
+    if (state === "waiting") {
+      const prioCount = (await this.driver.command("zcard", [keys.prioritized])) as number;
+      const listCount = (await this.driver.command("llen", [keys.wait])) as number;
+      const total = prioCount + listCount;
+      if (offset >= total) return [];
+
+      const results: Array<Array<string | null>> = [];
+      let remaining = limit;
+
+      if (offset < prioCount) {
+        const take = Math.min(remaining, prioCount - offset);
+        const part = (await this.eval(
+          "listJobDetails",
+          1,
+          keys.prioritized,
+          keys.jobPrefix,
+          String(offset),
+          String(take),
+          "zrange",
+        )) as Array<Array<string | null>>;
+        results.push(...(part ?? []));
+        remaining -= take;
+      }
+
+      if (remaining > 0) {
+        const listOffset = Math.max(0, offset - prioCount);
+        const part = (await this.eval(
+          "listJobDetails",
+          1,
+          keys.wait,
+          keys.jobPrefix,
+          String(listOffset),
+          String(remaining),
+          "wait_list",
+        )) as Array<Array<string | null>>;
+        results.push(...(part ?? []));
+      }
+
+      return this.parseListJobDetails(results);
+    }
+
     const { key, mode } = RedisBackend.STATE_MODE[state];
 
     const raw = (await this.eval(
@@ -1401,7 +1529,12 @@ export class RedisBackend implements Taskora.Adapter {
     )) as Array<Array<string | null>>;
 
     if (!raw || raw.length === 0) return [];
+    return this.parseListJobDetails(raw);
+  }
 
+  private parseListJobDetails(
+    raw: Array<Array<string | null>>,
+  ): Array<{ id: string; details: Taskora.RawJobDetails }> {
     // Parse Lua response: each entry = [id, ts, _v, attempt, state,
     //   processedOn, finishedOn, error, progress, data, result, numLogs, ...logs]
     const FIELDS = RedisBackend.DETAIL_FIELDS;
@@ -1455,7 +1588,8 @@ export class RedisBackend implements Taskora.Adapter {
 
     const results = await this.driver
       .pipeline()
-      .add("zcard", [keys.wait])
+      .add("llen", [keys.wait])
+      .add("zcard", [keys.prioritized])
       .add("llen", [keys.active])
       .add("zcard", [keys.delayed])
       .add("zcard", [keys.completed])
@@ -1464,13 +1598,13 @@ export class RedisBackend implements Taskora.Adapter {
       .add("zcard", [keys.cancelled])
       .exec();
     return {
-      waiting: results[0][1] as number,
-      active: results[1][1] as number,
-      delayed: results[2][1] as number,
-      completed: results[3][1] as number,
-      failed: results[4][1] as number,
-      expired: results[5][1] as number,
-      cancelled: results[6][1] as number,
+      waiting: (results[0][1] as number) + (results[1][1] as number),
+      active: results[2][1] as number,
+      delayed: results[3][1] as number,
+      completed: results[4][1] as number,
+      failed: results[5][1] as number,
+      expired: results[6][1] as number,
+      cancelled: results[7][1] as number,
     };
   }
 
@@ -1480,11 +1614,12 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = await this.eval(
       "retryDLQ",
-      4,
+      5,
       keys.failed,
       keys.wait,
       keys.events,
       keys.marker,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       String(Date.now()),
@@ -1496,11 +1631,12 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = await this.eval(
       "retryAllDLQ",
-      4,
+      5,
       keys.failed,
       keys.wait,
       keys.events,
       keys.marker,
+      keys.prioritized,
       keys.jobPrefix,
       String(limit),
       String(Date.now()),
@@ -1677,13 +1813,14 @@ export class RedisBackend implements Taskora.Adapter {
     const keys = buildKeys(task, this.prefix);
     const result = await this.eval(
       "cancel",
-      6,
+      7,
       keys.wait,
       keys.delayed,
       keys.cancelled,
       keys.events,
       keys.marker,
       keys.cancelChannel,
+      keys.prioritized,
       keys.jobPrefix,
       jobId,
       reason ?? "",
@@ -2030,6 +2167,7 @@ export class RedisBackend implements Taskora.Adapter {
     let memoryBytes = 0;
     const structKeys = [
       keys.wait,
+      keys.prioritized,
       keys.active,
       keys.delayed,
       keys.completed,

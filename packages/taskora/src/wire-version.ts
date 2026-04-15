@@ -132,8 +132,33 @@
  *          workers write new keys; `getThroughput` on a wire-3 reader
  *          would miss wire-4 metrics and vice versa, but neither side
  *          corrupts anything — MIN_COMPAT stays at 2.
+ *   4 → 5: wait queue split. Reintroduces a LIST at `:wait` for
+ *          priority=0 jobs (O(1) RPOP fast path) and adds a separate
+ *          `:prioritized` ZSET for priority>0 jobs, mirroring BullMQ's
+ *          layout. Dispatch branches on priority; dequeue tries the
+ *          LIST first and falls back to the ZSET. Restores O(1) wait
+ *          pop on the common path — at 10K queued jobs and c=100 the
+ *          benchmark no longer pays ~140K ZPOPMIN tree-rebalance ops
+ *          per 10K processed jobs.
+ *
+ *          Hard gate: LIST vs ZSET types do not round-trip, so a
+ *          wire-4 worker cannot read a wire-5 `:wait` key without
+ *          `WRONGTYPE` (and vice versa). `MIN_COMPAT_VERSION` bumps
+ *          to 5 so the check fails loud at handshake. Mirrors the
+ *          1 → 2 upgrade exactly; drain queues or flush the keyspace
+ *          before rolling workers. An automatic `MIGRATE_WAIT_V4_TO_V5`
+ *          Lua script runs during handshake to split existing data.
+ *
+ *          Priority semantics change: a priority=0 job already in
+ *          the wait LIST now dispatches BEFORE a just-enqueued
+ *          priority=5 job, because the LIST is checked before the
+ *          prioritized ZSET. Strict priority ordering across the
+ *          whole queue is no longer guaranteed — the existing
+ *          "best-effort within a priority band" documentation widens
+ *          to "best-effort across bands too when both are non-empty
+ *          at dispatch time".
  */
-export const WIRE_VERSION = 4;
+export const WIRE_VERSION = 5;
 
 /**
  * The oldest wire-format version this build is still willing to coexist
@@ -149,8 +174,13 @@ export const WIRE_VERSION = 4;
  *
  * The 1 → 2 bump is such a hard gate. Wait-list type (LIST → ZSET) cannot
  * round-trip between versions, so `MIN_COMPAT_VERSION` must also be 2.
+ *
+ * The 4 → 5 bump is likewise a hard gate. Wait-list type reverts from
+ * ZSET back to LIST (plus a new prioritized ZSET sibling), so again
+ * wire-4 and wire-5 cannot coexist on one backend — `MIN_COMPAT_VERSION`
+ * bumps to 5.
  */
-export const MIN_COMPAT_VERSION = 2;
+export const MIN_COMPAT_VERSION = 5;
 
 /**
  * A taskora wire-format meta record. Persisted once per `(backend, prefix)`

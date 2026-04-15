@@ -3,6 +3,7 @@ export function buildKeys(task: string, prefix?: string) {
 
   return {
     wait: `${base}:wait`,
+    prioritized: `${base}:prioritized`,
     active: `${base}:active`,
     delayed: `${base}:delayed`,
     completed: `${base}:completed`,

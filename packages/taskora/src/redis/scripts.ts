@@ -9,46 +9,51 @@
  *
  * All keys share a {hash tag} for Redis Cluster compatibility.
  *
- * ── Wait-list ordering ─────────────────────────────────────────────
+ * ── Wait queue layout (wireVersion 5) ─────────────────────────────
  *
- * The wait list is a sorted set (not a plain list), keyed by the
- * composite score `waitScore(priority, ts) = -priority * 1e13 + ts`.
+ * Non-priority jobs live in a LIST at `{task}:wait`, dequeued via
+ * `RPOP` (O(1)). Priority jobs live in a separate ZSET at
+ * `{task}:prioritized`, score = `-priority * 1e13 + ts`, dequeued
+ * via `ZPOPMIN` (O(log N)).
  *
- * The ONLY hard guarantee is priority stratification: higher priority
- * produces a LOWER score, so `ZPOPMIN` always yields a higher-priority
- * job before any lower-priority one, regardless of when either was
- * dispatched.
+ * Dispatch branches on the job's priority field:
+ *   • priority == 0 (default) → LPUSH to wait LIST
+ *   • priority  > 0          → ZADD to prioritized ZSET
  *
- * Within a priority band ordering is best-effort. The `ts` term gives
- * dequeue calls a rough wall-clock direction — older dispatches
- * generally go first — but there is no FIFO contract and users must
- * not rely on one. Two reasons it cannot be stronger:
+ * Dequeue always checks the LIST first; only when the LIST is empty
+ * does it fall back to the ZSET. This is the BullMQ layout — it
+ * trades strict cross-queue priority ordering for O(1) dequeue on
+ * the common (non-priority) path.
  *
- *   1. `ts` has 1 ms granularity. Same-millisecond dispatches share
- *      one score and fall back to ZSET lex order on the UUID member,
- *      which is effectively random.
- *   2. Worker concurrency breaks FIFO at the execution layer even if
- *      the dequeue layer were perfectly ordered. With concurrency > 1
- *      multiple workers pop in parallel and finish in handler-duration
- *      order — the observable completion order has nothing to do with
- *      the dispatch order.
+ * The tradeoff: a priority=0 job already in the LIST will be
+ * processed *before* a priority=5 job enqueued after it, because the
+ * LIST pop fires first. Cross-queue priority ordering is not
+ * guaranteed; within each queue ordering is:
+ *   • wait LIST        — strict FIFO (RPOP pops the oldest LPUSH)
+ *   • prioritized ZSET — by priority DESC, then ts ASC, with the
+ *     1 ms `ts` granularity caveat that same-millisecond dispatches
+ *     fall back to ZSET lex order on the UUID member.
  *
- * If strict ordering matters, encode it via priority levels.
+ * Priority is bounded to ~1000 in practice (score stays within 53-bit
+ * double precision safely). `ts` is a ms timestamp around 1.7e12 for
+ * the foreseeable future, so the total score range is comfortably
+ * within double precision.
  *
- * Priority is bounded to ~100 in practice (score stays within 53-bit
- * double precision safely up to priority 1000). `ts` is a ms timestamp
- * around 1.7e12 for the foreseeable future, so the total score range
- * is comfortably within double precision.
+ * Every script that touches the prioritized ZSET inlines the same
+ * `-priority * 1e13 + ts` formula because Redis Lua scripts share no
+ * lexical scope. Search for `-1e13` to find all the sites.
  *
- * Every script that touches the wait list inlines the same formula
- * because Redis Lua scripts share no lexical scope. Search for
- * `-1e13` to find all the sites.
+ * History: in wireVersion 1 the wait queue was a LIST. wireVersion 2
+ * promoted it to a single ZSET for priority ordering. wireVersion 5
+ * splits it back into LIST + prioritized ZSET to restore O(1) dequeue
+ * on the non-priority fast path — the common case.
  */
 
 // ── enqueue ──────────────────────────────────────────────────────────
-// KEYS[1] = <task>:wait      (wait list)
-// KEYS[2] = <task>:events    (event stream)
-// KEYS[3] = <task>:marker    (marker sorted set — wakes blocked workers)
+// KEYS[1] = <task>:wait         (LIST — non-priority fast path)
+// KEYS[2] = <task>:events       (event stream)
+// KEYS[3] = <task>:marker       (marker sorted set — wakes blocked workers)
+// KEYS[4] = <task>:prioritized  (ZSET — priority > 0 slow path)
 // ARGV[1] = jobPrefix        (e.g. "taskora:{send-email}:")
 // ARGV[2] = jobId            (client-generated UUID)
 // ARGV[3] = serialized data
@@ -85,8 +90,13 @@ if ARGV[11] ~= '' then
 end
 
 redis.call('SET', dataKey, ARGV[3])
-local waitScore = -(tonumber(ARGV[6]) or 0) * 1e13 + (tonumber(ARGV[4]) or 0)
-redis.call('ZADD', KEYS[1], waitScore, ARGV[2])
+local priority = tonumber(ARGV[6]) or 0
+if priority > 0 then
+  local waitScore = -priority * 1e13 + (tonumber(ARGV[4]) or 0)
+  redis.call('ZADD', KEYS[4], waitScore, ARGV[2])
+else
+  redis.call('LPUSH', KEYS[1], ARGV[2])
+end
 redis.call('ZADD', KEYS[3], 0, '0')
 
 redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
@@ -146,12 +156,13 @@ return 1
 `;
 
 // ── moveToActive ─────────────────────────────────────────────────────
-// KEYS[1] = <task>:wait
+// KEYS[1] = <task>:wait         (LIST)
 // KEYS[2] = <task>:active
 // KEYS[3] = <task>:delayed
 // KEYS[4] = <task>:events
 // KEYS[5] = <task>:marker
-// KEYS[6] = <task>:expired    (sorted set, score = finishedOn)
+// KEYS[6] = <task>:expired      (sorted set, score = finishedOn)
+// KEYS[7] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // ARGV[2] = lock TTL (ms)
 // ARGV[3] = lock token (UUID)
@@ -187,8 +198,13 @@ if #delayed > 0 then
         'event', 'expired', 'jobId', jid)
     else
       local pMeta = redis.call('HMGET', jKey, 'priority', 'ts')
-      local pScore = -(tonumber(pMeta[1]) or 0) * 1e13 + (tonumber(pMeta[2]) or 0)
-      redis.call('ZADD', KEYS[1], pScore, jid)
+      local pPrio = tonumber(pMeta[1]) or 0
+      if pPrio > 0 then
+        local pScore = -pPrio * 1e13 + (tonumber(pMeta[2]) or 0)
+        redis.call('ZADD', KEYS[7], pScore, jid)
+      else
+        redis.call('LPUSH', KEYS[1], jid)
+      end
       redis.call('HSET', jKey, 'state', 'waiting')
       redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
         'event', 'promoted', 'jobId', jid)
@@ -205,15 +221,22 @@ if singleton == 1 then
   end
 end
 
--- Try to claim a job (loop for TTL/concurrency filtering, up to 100)
+-- Try to claim a job (loop for TTL/concurrency filtering, up to 100).
+-- Fast path: RPOP the wait LIST (O(1)). Slow path: if empty, ZPOPMIN
+-- the prioritized ZSET. The LIST is checked first so non-priority jobs
+-- dequeue without paying the O(log N) sorted-set cost.
 for _attempt = 1, 100 do
-  -- ZPOPMIN returns { member, score } — take the highest-priority job.
-  local popped = redis.call('ZPOPMIN', KEYS[1], 1)
-  if #popped == 0 then break end
-  local id = popped[1]
+  local id
+  local popId = redis.call('RPOP', KEYS[1])
+  if popId then
+    id = popId
+  else
+    local popped = redis.call('ZPOPMIN', KEYS[7], 1)
+    if #popped == 0 then break end
+    id = popped[1]
+  end
 
   local jobKey = prefix .. id
-  local claimed = false
 
   -- TTL check
   local ea = tonumber(redis.call('HGET', jobKey, 'expireAt') or '0')
@@ -237,15 +260,19 @@ for _attempt = 1, 100 do
         local current = tonumber(redis.call('GET', counterKey) or '0')
         if current >= concLimit then
           blocked = true
-          -- Put back at the TAIL of the blocked priority band: use
-          -- \`now\` instead of the original \`ts\` so the next ZPOPMIN
-          -- in the same moveToActive loop pops a DIFFERENT job and
-          -- doesnt immediately re-pop the blocked one (which would
-          -- spin the up-to-100 retry loop until it gives up). Matches
-          -- the old LIST-based LPUSH-head+RPOP-tail put-back.
+          -- Put back at the TAIL of its queue so the next iteration of
+          -- this loop pops a DIFFERENT job rather than immediately
+          -- re-popping the blocked one. For wait LIST that's LPUSH
+          -- (RPOP pops from the tail, LPUSH pushes to the head);
+          -- for prioritized ZSET we re-insert with \`now\` as the ts
+          -- component so it sits at the back of its priority band.
           local blockedPrio = tonumber(redis.call('HGET', jobKey, 'priority') or '0')
-          local blockedScore = -(blockedPrio) * 1e13 + now
-          redis.call('ZADD', KEYS[1], blockedScore, id)
+          if blockedPrio > 0 then
+            local blockedScore = -blockedPrio * 1e13 + now
+            redis.call('ZADD', KEYS[7], blockedScore, id)
+          else
+            redis.call('LPUSH', KEYS[1], id)
+          end
         else
           redis.call('INCR', counterKey)
         end
@@ -291,7 +318,7 @@ for _attempt = 1, 100 do
           'event', 'active', 'jobId', id)
 
         -- Re-add marker if more work exists
-        local waitLen = redis.call('ZCARD', KEYS[1])
+        local waitLen = redis.call('LLEN', KEYS[1]) + redis.call('ZCARD', KEYS[7])
         if waitLen > 0 then
           redis.call('ZADD', KEYS[5], 0, '0')
         else
@@ -308,7 +335,7 @@ for _attempt = 1, 100 do
 end
 
 -- No claimable job found
-local waitLen = redis.call('ZCARD', KEYS[1])
+local waitLen = redis.call('LLEN', KEYS[1]) + redis.call('ZCARD', KEYS[7])
 if waitLen > 0 then
   redis.call('ZADD', KEYS[5], now + 1000, '0')
 else
@@ -388,13 +415,14 @@ return 1
 // HMGET + incrMetric pipeline. Both the workflow probe and the metric
 // INCR are now folded in here.
 //
-// KEYS[1] = <task>:wait
+// KEYS[1] = <task>:wait         (LIST)
 // KEYS[2] = <task>:active
 // KEYS[3] = <task>:delayed
 // KEYS[4] = <task>:events
 // KEYS[5] = <task>:marker
 // KEYS[6] = <task>:expired
 // KEYS[7] = <task>:completed
+// KEYS[8] = <task>:prioritized  (ZSET)
 // ARGV[1]  = jobPrefix
 // ARGV[2]  = jobId (current job to ack)
 // ARGV[3]  = lock token (current)
@@ -495,8 +523,13 @@ if #delayed > 0 then
         'event', 'expired', 'jobId', jid)
     else
       local pMeta = redis.call('HMGET', jKey, 'priority', 'ts')
-      local pScore = -(tonumber(pMeta[1]) or 0) * 1e13 + (tonumber(pMeta[2]) or 0)
-      redis.call('ZADD', KEYS[1], pScore, jid)
+      local pPrio = tonumber(pMeta[1]) or 0
+      if pPrio > 0 then
+        local pScore = -pPrio * 1e13 + (tonumber(pMeta[2]) or 0)
+        redis.call('ZADD', KEYS[8], pScore, jid)
+      else
+        redis.call('LPUSH', KEYS[1], jid)
+      end
       redis.call('HSET', jKey, 'state', 'waiting')
       redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
         'event', 'promoted', 'jobId', jid)
@@ -513,9 +546,15 @@ if singleton == 1 then
 end
 
 for _attempt = 1, 100 do
-  local popped = redis.call('ZPOPMIN', KEYS[1], 1)
-  if #popped == 0 then break end
-  local id = popped[1]
+  local id
+  local popId = redis.call('RPOP', KEYS[1])
+  if popId then
+    id = popId
+  else
+    local popped = redis.call('ZPOPMIN', KEYS[8], 1)
+    if #popped == 0 then break end
+    id = popped[1]
+  end
 
   local nJobKey = prefix .. id
 
@@ -545,8 +584,12 @@ for _attempt = 1, 100 do
       local current = tonumber(redis.call('GET', counterKey) or '0')
       if current >= nConcLimit then
         blocked = true
-        local blockedScore = -(nPriority) * 1e13 + now
-        redis.call('ZADD', KEYS[1], blockedScore, id)
+        if nPriority > 0 then
+          local blockedScore = -nPriority * 1e13 + now
+          redis.call('ZADD', KEYS[8], blockedScore, id)
+        else
+          redis.call('LPUSH', KEYS[1], id)
+        end
       else
         redis.call('INCR', counterKey)
       end
@@ -585,7 +628,7 @@ for _attempt = 1, 100 do
         redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
           'event', 'active', 'jobId', id)
 
-        local waitLen = redis.call('ZCARD', KEYS[1])
+        local waitLen = redis.call('LLEN', KEYS[1]) + redis.call('ZCARD', KEYS[8])
         if waitLen > 0 then
           redis.call('ZADD', KEYS[5], 0, '0')
         else
@@ -601,7 +644,7 @@ for _attempt = 1, 100 do
   end
 end
 
-local waitLen = redis.call('ZCARD', KEYS[1])
+local waitLen = redis.call('LLEN', KEYS[1]) + redis.call('ZCARD', KEYS[8])
 if waitLen > 0 then
   redis.call('ZADD', KEYS[5], now + 1000, '0')
 else
@@ -621,13 +664,14 @@ return {ackedWf, ackedWfNode, '', '', '', '', ''}
 // nextTs}. `ackedWf`/`ackedWfNode` are only populated on *permanent*
 // failures — retry paths don't need workflow cascade cancellation yet.
 //
-// KEYS[1] = <task>:wait
+// KEYS[1] = <task>:wait         (LIST)
 // KEYS[2] = <task>:active
 // KEYS[3] = <task>:delayed
 // KEYS[4] = <task>:events
 // KEYS[5] = <task>:marker
 // KEYS[6] = <task>:expired
 // KEYS[7] = <task>:failed
+// KEYS[8] = <task>:prioritized  (ZSET)
 // ARGV[1]  = jobPrefix
 // ARGV[2]  = jobId
 // ARGV[3]  = lock token
@@ -737,8 +781,13 @@ if #delayed > 0 then
         'event', 'expired', 'jobId', jid)
     else
       local pMeta = redis.call('HMGET', jKey, 'priority', 'ts')
-      local pScore = -(tonumber(pMeta[1]) or 0) * 1e13 + (tonumber(pMeta[2]) or 0)
-      redis.call('ZADD', KEYS[1], pScore, jid)
+      local pPrio = tonumber(pMeta[1]) or 0
+      if pPrio > 0 then
+        local pScore = -pPrio * 1e13 + (tonumber(pMeta[2]) or 0)
+        redis.call('ZADD', KEYS[8], pScore, jid)
+      else
+        redis.call('LPUSH', KEYS[1], jid)
+      end
       redis.call('HSET', jKey, 'state', 'waiting')
       redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
         'event', 'promoted', 'jobId', jid)
@@ -755,9 +804,15 @@ if singleton == 1 then
 end
 
 for _attempt = 1, 100 do
-  local popped = redis.call('ZPOPMIN', KEYS[1], 1)
-  if #popped == 0 then break end
-  local id = popped[1]
+  local id
+  local popId = redis.call('RPOP', KEYS[1])
+  if popId then
+    id = popId
+  else
+    local popped = redis.call('ZPOPMIN', KEYS[8], 1)
+    if #popped == 0 then break end
+    id = popped[1]
+  end
 
   local nJobKey = prefix .. id
 
@@ -785,8 +840,12 @@ for _attempt = 1, 100 do
       local current = tonumber(redis.call('GET', counterKey) or '0')
       if current >= nConcLimit then
         blocked = true
-        local blockedScore = -(nPriority) * 1e13 + now
-        redis.call('ZADD', KEYS[1], blockedScore, id)
+        if nPriority > 0 then
+          local blockedScore = -nPriority * 1e13 + now
+          redis.call('ZADD', KEYS[8], blockedScore, id)
+        else
+          redis.call('LPUSH', KEYS[1], id)
+        end
       else
         redis.call('INCR', counterKey)
       end
@@ -825,7 +884,7 @@ for _attempt = 1, 100 do
         redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
           'event', 'active', 'jobId', id)
 
-        local waitLen = redis.call('ZCARD', KEYS[1])
+        local waitLen = redis.call('LLEN', KEYS[1]) + redis.call('ZCARD', KEYS[8])
         if waitLen > 0 then
           redis.call('ZADD', KEYS[5], 0, '0')
         else
@@ -841,7 +900,7 @@ for _attempt = 1, 100 do
   end
 end
 
-local waitLen = redis.call('ZCARD', KEYS[1])
+local waitLen = redis.call('LLEN', KEYS[1]) + redis.call('ZCARD', KEYS[8])
 if waitLen > 0 then
   redis.call('ZADD', KEYS[5], now + 1000, '0')
 else
@@ -925,9 +984,10 @@ return 1
 
 // ── nack ─────────────────────────────────────────────────────────────
 // KEYS[1] = <task>:active
-// KEYS[2] = <task>:wait
+// KEYS[2] = <task>:wait         (LIST)
 // KEYS[3] = <task>:events
 // KEYS[4] = <task>:marker
+// KEYS[5] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobId
 // ARGV[3] = lock token
@@ -960,8 +1020,13 @@ end
 
 redis.call('HSET', jobKey, 'state', 'waiting')
 local nMeta = redis.call('HMGET', jobKey, 'priority', 'ts')
-local nScore = -(tonumber(nMeta[1]) or 0) * 1e13 + (tonumber(nMeta[2]) or 0)
-redis.call('ZADD', KEYS[2], nScore, jobId)
+local nPrio = tonumber(nMeta[1]) or 0
+if nPrio > 0 then
+  local nScore = -nPrio * 1e13 + (tonumber(nMeta[2]) or 0)
+  redis.call('ZADD', KEYS[5], nScore, jobId)
+else
+  redis.call('LPUSH', KEYS[2], jobId)
+end
 redis.call('ZADD', KEYS[4], 0, '0')
 
 redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
@@ -971,13 +1036,14 @@ return 1
 `;
 
 // ── stalledCheck ────────────────────────────────────────────────
-// KEYS[1] = <task>:stalled   (Set: candidate stalled IDs from last check)
-// KEYS[2] = <task>:active    (List: currently active jobs)
-// KEYS[3] = <task>:wait      (List: for re-queuing recovered jobs)
-// KEYS[4] = <task>:failed    (Sorted Set: permanently failed jobs)
-// KEYS[5] = <task>:events    (Stream)
-// KEYS[6] = <task>:marker    (Sorted Set: wake workers)
-// KEYS[7] = <task>:cancelled (Sorted Set: cancelled jobs)
+// KEYS[1] = <task>:stalled     (Set: candidate stalled IDs from last check)
+// KEYS[2] = <task>:active      (List: currently active jobs)
+// KEYS[3] = <task>:wait        (LIST: for re-queuing recovered non-priority jobs)
+// KEYS[4] = <task>:failed      (Sorted Set: permanently failed jobs)
+// KEYS[5] = <task>:events      (Stream)
+// KEYS[6] = <task>:marker      (Sorted Set: wake workers)
+// KEYS[7] = <task>:cancelled   (Sorted Set: cancelled jobs)
+// KEYS[8] = <task>:prioritized (ZSET: for re-queuing recovered priority jobs)
 // ARGV[1] = jobPrefix
 // ARGV[2] = maxStalledCount
 // ARGV[3] = current timestamp (ms)
@@ -1058,12 +1124,17 @@ for _, jobId in ipairs(candidates) do
 
         table.insert(failed, jobId)
       else
-        -- Recover: move back to wait
+        -- Recover: move back to wait (LIST or prioritized ZSET by priority)
         redis.call('LREM', KEYS[2], 1, jobId)
         redis.call('HSET', jobKey, 'state', 'waiting')
         local sMeta = redis.call('HMGET', jobKey, 'priority', 'ts')
-        local sScore = -(tonumber(sMeta[1]) or 0) * 1e13 + (tonumber(sMeta[2]) or 0)
-        redis.call('ZADD', KEYS[3], sScore, jobId)
+        local sPrio = tonumber(sMeta[1]) or 0
+        if sPrio > 0 then
+          local sScore = -sPrio * 1e13 + (tonumber(sMeta[2]) or 0)
+          redis.call('ZADD', KEYS[8], sScore, jobId)
+        else
+          redis.call('LPUSH', KEYS[3], jobId)
+        end
         redis.call('ZADD', KEYS[6], 0, '0')
 
         redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*',
@@ -1186,9 +1257,10 @@ return 0
 
 // ── versionDistribution ─────────────────────────────────────────────
 // Collect _v counts for all jobs in waiting, active, and delayed sets.
-// KEYS[1] = <task>:wait      (List)
-// KEYS[2] = <task>:active    (List)
-// KEYS[3] = <task>:delayed   (Sorted Set)
+// KEYS[1] = <task>:wait         (LIST)
+// KEYS[2] = <task>:active       (List)
+// KEYS[3] = <task>:delayed      (Sorted Set)
+// KEYS[4] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // Returns: flat array [section, version, count, ..., "END", section, ...]
 export const VERSION_DISTRIBUTION = `
@@ -1213,8 +1285,12 @@ end
 
 local result = {}
 
--- Waiting (wait list is a ZSET)
-local waitIds = redis.call('ZRANGE', KEYS[1], 0, -1)
+-- Waiting (union of non-priority LIST and priority ZSET)
+local waitIds = redis.call('LRANGE', KEYS[1], 0, -1)
+local prioIds = redis.call('ZRANGE', KEYS[4], 0, -1)
+for _, id in ipairs(prioIds) do
+  waitIds[#waitIds + 1] = id
+end
 table.insert(result, 'waiting')
 local wv = countVersions(waitIds)
 for _, x in ipairs(wv) do table.insert(result, x) end
@@ -1239,13 +1315,18 @@ return result
 
 // ── listJobDetails ──────────────────────────────────────────────────
 // Fetch job IDs from a queue + all details in one script (1 RTT).
-// KEYS[1] = queue key (wait/active/delayed/completed/failed)
+// KEYS[1] = queue key (wait/active/delayed/completed/failed/prioritized)
 // ARGV[1] = jobPrefix
 // ARGV[2] = offset
 // ARGV[3] = limit
-// ARGV[4] = mode: "lrange" | "zrange" | "zrevrange"
+// ARGV[4] = mode: "wait_list" | "lrange" | "zrange" | "zrevrange"
 // Returns: nested array — each entry is [id, ts, _v, attempt, state,
 //   processedOn, finishedOn, error, progress, data, result, numLogs, ...logs]
+//
+// Note: since wireVersion 5 the wait queue is split across a LIST
+// (non-priority) and a prioritized ZSET. This script queries one key
+// at a time; the TS caller is responsible for merging the two sides
+// when the user asks for the combined 'waiting' view.
 export const LIST_JOB_DETAILS = `
 local prefix = ARGV[1]
 local offset = tonumber(ARGV[2])
@@ -1253,11 +1334,23 @@ local limit = tonumber(ARGV[3])
 local mode = ARGV[4]
 
 local ids
-if mode == 'wait_zrange' then
-  -- Wait list is a sorted set keyed by the composite (priority, ts)
-  -- score. ZRANGE gives the dequeue order directly (highest priority
-  -- first, FIFO within the same priority).
-  ids = redis.call('ZRANGE', KEYS[1], offset, offset + limit - 1)
+if mode == 'wait_list' then
+  -- Wait LIST: RPOP is the dequeue end, so the "first to be dequeued"
+  -- order is the tail. LRANGE from -limit to -1 then reverse for a
+  -- head-of-queue-first view. Use an offset from the tail so the
+  -- caller can paginate from the dequeue end.
+  local len = redis.call('LLEN', KEYS[1])
+  local start = math.max(0, len - offset - limit)
+  local stop  = len - offset - 1
+  if stop < start then
+    ids = {}
+  else
+    local raw = redis.call('LRANGE', KEYS[1], start, stop)
+    ids = {}
+    for i = #raw, 1, -1 do
+      ids[#ids + 1] = raw[i]
+    end
+  end
 elseif mode == 'lrange' then
   -- Active list is still a LIST (LPUSH-ordered, newest at head). Sort by
   -- ts for a deterministic chronological view regardless of driver.
@@ -1309,10 +1402,11 @@ return result
 
 // ── retryDLQ ────────────────────────────────────────────────────────
 // Atomically move a single job from failed back to waiting.
-// KEYS[1] = <task>:failed    (sorted set)
-// KEYS[2] = <task>:wait      (sorted set)
-// KEYS[3] = <task>:events    (stream)
-// KEYS[4] = <task>:marker    (sorted set)
+// KEYS[1] = <task>:failed       (sorted set)
+// KEYS[2] = <task>:wait         (LIST)
+// KEYS[3] = <task>:events       (stream)
+// KEYS[4] = <task>:marker       (sorted set)
+// KEYS[5] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobId
 // ARGV[3] = now (ms) — fresh ts for the recovered job's wait score
@@ -1335,8 +1429,12 @@ redis.call('DEL', prefix .. jobId .. ':result')
 -- cutting ahead of jobs enqueued while they sat in :failed).
 redis.call('HSET', jobKey, 'ts', ARGV[3])
 local rPrio = tonumber(redis.call('HGET', jobKey, 'priority') or '0')
-local rScore = -(rPrio) * 1e13 + tonumber(ARGV[3])
-redis.call('ZADD', KEYS[2], rScore, jobId)
+if rPrio > 0 then
+  local rScore = -rPrio * 1e13 + tonumber(ARGV[3])
+  redis.call('ZADD', KEYS[5], rScore, jobId)
+else
+  redis.call('LPUSH', KEYS[2], jobId)
+end
 redis.call('ZADD', KEYS[4], 0, '0')
 
 redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
@@ -1348,9 +1446,10 @@ return 1
 // ── retryAllDLQ ─────────────────────────────────────────────────────
 // Atomically move a batch of failed jobs back to waiting.
 // KEYS[1] = <task>:failed
-// KEYS[2] = <task>:wait
+// KEYS[2] = <task>:wait         (LIST)
 // KEYS[3] = <task>:events
 // KEYS[4] = <task>:marker
+// KEYS[5] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // ARGV[2] = limit (max jobs to retry per call)
 // ARGV[3] = now (ms) — fresh ts for recovered jobs' wait score
@@ -1372,8 +1471,12 @@ for _, jobId in ipairs(ids) do
   redis.call('HDEL', jobKey, 'error', 'finishedOn')
   redis.call('DEL', prefix .. jobId .. ':result')
   local bPrio = tonumber(redis.call('HGET', jobKey, 'priority') or '0')
-  local bScore = -(bPrio) * 1e13 + now
-  redis.call('ZADD', KEYS[2], bScore, jobId)
+  if bPrio > 0 then
+    local bScore = -bPrio * 1e13 + now
+    redis.call('ZADD', KEYS[5], bScore, jobId)
+  else
+    redis.call('LPUSH', KEYS[2], jobId)
+  end
 
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
     'event', 'waiting', 'jobId', jobId)
@@ -1511,10 +1614,11 @@ return 1
 
 // ── throttleEnqueue ─────────────────────────────────────────────────
 // Atomically check throttle counter and enqueue if under limit.
-// KEYS[1] = <task>:wait      (wait list)
-// KEYS[2] = <task>:delayed   (sorted set — for delayed jobs)
-// KEYS[3] = <task>:events    (stream)
-// KEYS[4] = <task>:marker    (sorted set)
+// KEYS[1] = <task>:wait         (LIST)
+// KEYS[2] = <task>:delayed      (sorted set — for delayed jobs)
+// KEYS[3] = <task>:events       (stream)
+// KEYS[4] = <task>:marker       (sorted set)
+// KEYS[5] = <task>:prioritized  (ZSET)
 // ARGV[1]  = jobPrefix
 // ARGV[2]  = jobId
 // ARGV[3]  = serialized data
@@ -1584,8 +1688,13 @@ else
     'state', 'waiting',
     'priority', priority)
   redis.call('SET', dataKey, data)
-  local tScore = -(tonumber(priority) or 0) * 1e13 + ts
-  redis.call('ZADD', KEYS[1], tScore, jobId)
+  local tPrio = tonumber(priority) or 0
+  if tPrio > 0 then
+    local tScore = -tPrio * 1e13 + ts
+    redis.call('ZADD', KEYS[5], tScore, jobId)
+  else
+    redis.call('LPUSH', KEYS[1], jobId)
+  end
   redis.call('ZADD', KEYS[4], 0, '0')
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
     'event', 'waiting', 'jobId', jobId)
@@ -1603,10 +1712,11 @@ return 1
 
 // ── deduplicateEnqueue ──────────────────────────────────────────────
 // Atomically check dedup key + existing job state, enqueue if no dupe.
-// KEYS[1] = <task>:wait      (wait list)
-// KEYS[2] = <task>:delayed   (sorted set)
-// KEYS[3] = <task>:events    (stream)
-// KEYS[4] = <task>:marker    (sorted set)
+// KEYS[1] = <task>:wait         (LIST)
+// KEYS[2] = <task>:delayed      (sorted set)
+// KEYS[3] = <task>:events       (stream)
+// KEYS[4] = <task>:marker       (sorted set)
+// KEYS[5] = <task>:prioritized  (ZSET)
 // ARGV[1]  = jobPrefix
 // ARGV[2]  = jobId
 // ARGV[3]  = serialized data
@@ -1679,8 +1789,13 @@ else
     'priority', priority,
     'dedupKey', dedupKey)
   redis.call('SET', dataKey, data)
-  local dScore = -(tonumber(priority) or 0) * 1e13 + ts
-  redis.call('ZADD', KEYS[1], dScore, jobId)
+  local dPrio = tonumber(priority) or 0
+  if dPrio > 0 then
+    local dScore = -dPrio * 1e13 + ts
+    redis.call('ZADD', KEYS[5], dScore, jobId)
+  else
+    redis.call('LPUSH', KEYS[1], jobId)
+  end
   redis.call('ZADD', KEYS[4], 0, '0')
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
     'event', 'waiting', 'jobId', jobId)
@@ -1702,10 +1817,12 @@ return {1}
 // ── collectPush ─────────────────────────────────────────────────────
 // Accumulate an item into a collect buffer. Manages debounce flush
 // sentinel in the delayed sorted set. On maxSize: immediate flush.
+// Collect flush jobs always have priority 0, so they go into the
+// non-priority wait LIST path only (no prioritized ZSET slot needed).
 // KEYS[1] = <task>:delayed   (sorted set — flush sentinel lives here)
 // KEYS[2] = <task>:events    (stream)
 // KEYS[3] = <task>:marker    (sorted set — wakes workers)
-// KEYS[4] = <task>:wait      (wait list — for maxSize immediate flush)
+// KEYS[4] = <task>:wait      (LIST — for maxSize immediate flush)
 // ARGV[1]  = jobPrefix       (e.g. "taskora:{task}:")
 // ARGV[2]  = jobId           (UUID for new flush sentinel / real job)
 // ARGV[3]  = serialized item (single, already serialized by caller)
@@ -1767,8 +1884,8 @@ if maxSize > 0 and count >= maxSize then
     'state', 'waiting',
     'priority', '0')
   redis.call('SET', jobKey .. ':data', arr)
-  -- Collect flush jobs default to priority 0; score = -(0 * 1e13) + now = now.
-  redis.call('ZADD', KEYS[4], now, jobId)
+  -- Collect flush jobs are always priority 0, so LPUSH into the wait LIST.
+  redis.call('LPUSH', KEYS[4], jobId)
   redis.call('ZADD', KEYS[3], 0, '0')
   redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
     'event', 'waiting', 'jobId', jobId)
@@ -1817,12 +1934,13 @@ return {0, count}
 
 // ── cancel ──────────────────────────────────────────────────────────
 // Cancel a job. Immediate for waiting/delayed/retrying; flags active + PUBLISH.
-// KEYS[1] = <task>:wait
+// KEYS[1] = <task>:wait         (LIST)
 // KEYS[2] = <task>:delayed
-// KEYS[3] = <task>:cancelled  (sorted set, score = finishedOn)
+// KEYS[3] = <task>:cancelled    (sorted set, score = finishedOn)
 // KEYS[4] = <task>:events
 // KEYS[5] = <task>:marker
-// KEYS[6] = <task>:cancel     (pub/sub channel — instant notification to worker)
+// KEYS[6] = <task>:cancel       (pub/sub channel — instant notification to worker)
+// KEYS[7] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobId
 // ARGV[3] = reason ("" = none)
@@ -1842,7 +1960,11 @@ if not state then
 end
 
 if state == 'waiting' then
-  redis.call('ZREM', KEYS[1], jobId)
+  -- Remove from wait LIST first; fall back to prioritized ZSET.
+  local removed = redis.call('LREM', KEYS[1], 1, jobId)
+  if removed == 0 then
+    redis.call('ZREM', KEYS[7], jobId)
+  end
   redis.call('HSET', jobKey, 'state', 'cancelled', 'finishedOn', now)
   if reason ~= '' then
     redis.call('HSET', jobKey, 'cancelReason', reason)
@@ -2050,6 +2172,89 @@ redis.call('ZADD', waitKey, unpack(zaddArgs))
 return #ids
 `;
 
+// ── migrateWaitV4ToV5 ───────────────────────────────────────────────
+// Per-key atomic migration of one `:wait` ZSET into a LIST plus a
+// separate `:prioritized` ZSET, for the wireVersion 4 → 5 upgrade.
+//
+// wireVersion 4 kept the whole wait queue in a single ZSET scored by
+// `-priority * 1e13 + ts`. wireVersion 5 splits that back into:
+//   • a LIST at `:wait` for priority=0 jobs (FIFO, O(1) RPOP)
+//   • a ZSET at `:prioritized` for priority>0 jobs (same score)
+//
+// This script reads the old ZSET in score order and either LPUSHes
+// the id (priority 0 — LIST preserves FIFO because we walk score DESC
+// and LPUSH from the tail) or ZADDs it with its existing score to the
+// new `:prioritized` key. Runs as a single Lua script so no concurrent
+// writer can interleave between the ZRANGE phase and the DEL+swap.
+// Idempotent per-key: when `:wait` is already a LIST (or missing) we
+// return 0.
+//
+// KEYS[1] = wait key         (old: ZSET; new: LIST)
+// KEYS[2] = prioritized key  (new: ZSET)
+// ARGV[1] = jobPrefix        (unused currently; reserved)
+// Returns: number of jobs migrated (0 if already a LIST or missing)
+export const MIGRATE_WAIT_V4_TO_V5 = `
+local waitKey = KEYS[1]
+local prioritizedKey = KEYS[2]
+
+-- Idempotent: LIST or missing → nothing to do. Anything other than
+-- ZSET is corrupt or not ours — fail loud.
+local keyType = redis.call('TYPE', waitKey)
+if type(keyType) == 'table' then keyType = keyType.ok end
+if keyType == 'list' or keyType == 'none' then
+  return 0
+end
+if keyType ~= 'zset' then
+  return redis.error_reply('MIGRATE_WAIT: unexpected type ' .. keyType .. ' at ' .. waitKey)
+end
+
+-- ZRANGE WITHSCORES returns [member, score, member, score, ...] in
+-- score-ascending order. The wait-score formula is -priority*1e13+ts,
+-- so score < 0 means priority > 0 (prioritized) and score >= 0 means
+-- priority == 0 (FIFO by ts). Negative scores come first.
+local withScores = redis.call('ZRANGE', waitKey, 0, -1, 'WITHSCORES')
+if #withScores == 0 then
+  redis.call('DEL', waitKey)
+  return 0
+end
+
+local migrated = 0
+local listIds = {}
+local zaddArgs = {}
+
+for i = 1, #withScores, 2 do
+  local id = withScores[i]
+  local score = tonumber(withScores[i + 1])
+  if score < 0 then
+    -- Priority > 0: preserve the original composite score.
+    zaddArgs[#zaddArgs + 1] = score
+    zaddArgs[#zaddArgs + 1] = id
+  else
+    -- Priority == 0: destination LIST, FIFO by ts. RPOP dequeues
+    -- from the TAIL, so the ts-smallest (oldest) job must end up
+    -- there. Since we walk the ZSET in score-ascending order
+    -- (oldest first for priority 0, where score == ts), a single
+    -- LPUSH call over the resulting list produces tail=oldest.
+    listIds[#listIds + 1] = id
+  end
+  migrated = migrated + 1
+end
+
+-- Atomic swap: DEL old ZSET, then LPUSH all non-priority ids in
+-- score-ascending (oldest→newest) order. LPUSH with N args is
+-- equivalent to N sequential LPUSH(1)s, so the final list is
+-- [last, ..., first] — head=newest, tail=oldest. RPOP = FIFO.
+redis.call('DEL', waitKey)
+if #listIds > 0 then
+  redis.call('LPUSH', waitKey, unpack(listIds))
+end
+if #zaddArgs > 0 then
+  redis.call('ZADD', prioritizedKey, unpack(zaddArgs))
+end
+
+return migrated
+`;
+
 // ── handshake ────────────────────────────────────────────────────────
 // Atomically read-or-initialize the wire-format meta hash.
 //
@@ -2091,10 +2296,11 @@ return {raw[1] or '', raw[2] or '', raw[3] or '', raw[4] or '0'}
 // Handles both immediate and delayed jobs; emits one marker ZADD at the
 // end instead of N.
 //
-// KEYS[1] = <task>:wait
+// KEYS[1] = <task>:wait         (LIST)
 // KEYS[2] = <task>:delayed
 // KEYS[3] = <task>:events
 // KEYS[4] = <task>:marker
+// KEYS[5] = <task>:prioritized  (ZSET)
 // ARGV[1] = jobPrefix
 // ARGV[2] = jobCount
 // ARGV[3..] = per-job args, fixed stride of 12:
@@ -2175,9 +2381,13 @@ for i = 0, count - 1 do
       redis.call('HSET', jobKey, '_wf', wf, '_wfNode', wfNode)
     end
     redis.call('SET', dataKey, data)
-    local waitScore = -(tonumber(priority) or 0) * 1e13
-                      + (tonumber(ts) or 0)
-    redis.call('ZADD', KEYS[1], waitScore, jobId)
+    local bPrio = tonumber(priority) or 0
+    if bPrio > 0 then
+      local waitScore = -bPrio * 1e13 + (tonumber(ts) or 0)
+      redis.call('ZADD', KEYS[5], waitScore, jobId)
+    else
+      redis.call('LPUSH', KEYS[1], jobId)
+    end
     redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
       'event', 'waiting', 'jobId', jobId)
   end
