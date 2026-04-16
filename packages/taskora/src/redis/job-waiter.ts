@@ -196,7 +196,7 @@ export class JobWaiter {
     const jobKey = `${keys.jobPrefix}${jobId}`;
 
     if (state === "completed") {
-      const result = (await this.mainDriver.command("get", [`${jobKey}:result`])) as string | null;
+      const result = (await this.mainDriver.command("hget", [jobKey, "result"])) as string | null;
       return { state, result: result ?? undefined };
     }
     if (state === "failed") {

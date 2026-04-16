@@ -39,7 +39,7 @@ Any change to the following is a wire-format change:
 * Bun vs ioredis driver choice
 * The `SCRIPT LOAD` SHA — each process loads its own
 
-## Current surface (wireVersion = 5)
+## Current surface (wireVersion = 6)
 
 ### Keys
 
@@ -59,10 +59,8 @@ Any change to the following is a wire-format change:
 | `taskora:{<task>}:events` | Stream | XADD stream of job lifecycle events |
 | `taskora:{<task>}:stalled` | Set | Active IDs checked by stall sweep |
 | `taskora:{<task>}:marker` | Sorted set | BZPOPMIN wake-up marker |
-| `taskora:{<task>}:<id>` | Hash | Job metadata (see fields below) |
-| `taskora:{<task>}:<id>:data` | String | Serialized input |
-| `taskora:{<task>}:<id>:result` | String | Serialized output |
-| `taskora:{<task>}:<id>:lock` | String (PX) | Distributed lock token |
+| `taskora:{<task>}:<id>` | Hash | Job metadata + serialized `data` + serialized `result` (see fields below) |
+| `taskora:{<task>}:<id>:lock` | String (PX) | Distributed lock token (stays separate — needs `SET … PX` atomicity) |
 | `taskora:{<task>}:<id>:logs` | List | `ctx.log.*` entries (capped) |
 | `taskora:{<task>}:debounce:<key>` | String | Debounce placeholder job ID |
 | `taskora:{<task>}:throttle:<key>` | Sorted set | Throttle window timestamps |
@@ -110,6 +108,8 @@ Stable fields (reading or writing any of these by a new name is a wire change):
 | `_wf` | string | Owning workflow ID (empty = not in a workflow) |
 | `_wfNode` | integer | Owning workflow node index |
 | `collectKey` | string | Collect-flush sentinel marker |
+| `data` | string | Serialized input payload (lives in the hash since wireVersion 6) |
+| `result` | string | Serialized output payload (lives in the hash since wireVersion 6; present on completed jobs) |
 
 ### Stream events (`<task>:events`)
 
@@ -221,3 +221,73 @@ wireVersion=1 keyspace, and nothing more. `MIN_COMPAT_VERSION` is still
 bumped to 2 so two processes running the old and new versions side by
 side against the same Redis can never observe each other mid-migration
 — the handshake refuses the mismatched pair.
+
+### 5 → 6 (single-hash job storage)
+
+Every job used to occupy four Redis keys:
+
+* `taskora:{<task>}:<id>` — metadata hash (`state`, `_v`, `attempt`, …)
+* `taskora:{<task>}:<id>:data` — serialized input string
+* `taskora:{<task>}:<id>:result` — serialized output string
+* `taskora:{<task>}:<id>:lock` — worker lock string (PX)
+
+wireVersion 6 collapses `:data` and `:result` into fields named `data`
+and `result` on the metadata hash itself. The lock stays separate —
+Redis `SET key val PX ttl` is the only atomic "set + millisecond
+expiration" primitive, and the lock is on the critical path. Moving it
+into the hash would require `HEXPIRE` (Redis 7.4+), which taskora
+intentionally does not mandate.
+
+Hot-path impact (see `docs/IMPLEMENTATION.md` §phase-3b for full
+numbers):
+
+* **Enqueue** — one fewer `redis.call()` (the `SET <id>:data` collapses
+  into the same `HSET` that writes the other metadata fields).
+* **Claim** — one fewer (`GET <id>:data` folds into the same `HMGET`
+  that already reads `_v`, `attempt`, `ts`).
+* **Ack** — one fewer (`SET <id>:result` folds into the `HSET` that
+  writes `state`, `finishedOn`).
+
+Three calls per job vanish on the happy path. At c=100 that's ~16 % of
+the per-script Redis CPU, stacked on top of Phase 3A's O(1) wait-list
+dequeue.
+
+**Memory tradeoff** — for payloads that fit inside the hash listpack
+encoding, the new layout uses ~50 % less Redis memory per job (one
+hash at ~150 B vs hash + two strings + keyspace overhead at ~320 B).
+Redis 7 keeps a hash in listpack form as long as:
+
+* number of fields ≤ `hash-max-listpack-entries` (default 128)
+* every value ≤ `hash-max-listpack-value` bytes (default 64)
+
+If any job's `data` or `result` exceeds 64 bytes, the hash flips to
+`hashtable` encoding, where the per-field overhead jumps from ~2 B to
+~80 B. Under that encoding the single-hash layout can briefly be
+*larger* than the old split layout for payloads in the 64-to-1024 B
+window. The cure is operator-side, one line in `redis.conf`:
+
+```
+hash-max-listpack-value 1024
+```
+
+BullMQ gives the same recommendation (implicitly, because it has
+always used single-hash storage). With that tuning, payloads up to
+~1 KB stay in listpack and single-hash is a memory win across the
+board.
+
+**Upgrade is a hard gate.** A wireVersion=5 worker that issues
+`GET <id>:data` against a wireVersion=6 job hits `nil` — the string
+sibling no longer exists — and silently drops the payload.
+`MIN_COMPAT_VERSION` bumps to 6 so `handshake()` refuses the
+mismatched pair. Drain queues or flush the keyspace before rolling
+workers.
+
+**Automatic migration.** The first wireVersion=6 process to connect
+acquires the shared migration lock and runs `MIGRATE_JOBS_V5_TO_V6`:
+it SCANs the keyspace for `:data` and `:result` string siblings and
+invokes a small per-key Lua script for each hit, copying the string
+value into the sibling hash as the matching field and deleting the
+string. The script is idempotent (already-migrated jobs and orphaned
+siblings are no-ops), so a partial run followed by a retry picks up
+where it left off. See `RedisBackend.migrateJobsV5ToV6` and
+`scripts.MIGRATE_JOBS_V5_TO_V6` for details.

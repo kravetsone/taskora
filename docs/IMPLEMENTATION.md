@@ -30,12 +30,10 @@ Queue-level keys:
   taskora:<pfx>:<task>:stalled-check    — String (PX): stall detection throttle
   taskora:<pfx>:<task>:events           — Stream: event log (~10k cap)
 
-Per-job keys (split storage for ziplist optimization):
-  {taskora:<pfx>:<task>:<jobId>}        — Hash (ziplist): metadata only
-                                            ts, delay, priority, attempt, _v, state
-                                            all values < 64 bytes → ziplist encoding
-  {taskora:<pfx>:<task>:<jobId>}:data   — String: serialized input (via Taskora.Serializer)
-  {taskora:<pfx>:<task>:<jobId>}:result — String: serialized output (after complete)
+Per-job keys (single-hash storage since wireVersion 6):
+  {taskora:<pfx>:<task>:<jobId>}        — Hash: metadata + data + result
+                                            ts, delay, priority, attempt, _v, state,
+                                            data, result (serialized via Taskora.Serializer)
   {taskora:<pfx>:<task>:<jobId>}:lock   — String (PX): per-job distributed lock
   {taskora:<pfx>:<task>:<jobId>}:logs   — List: structured log entries from ctx.log
 
@@ -45,7 +43,7 @@ Schedule keys:
   taskora:<pfx>:schedules:lock          — String (PX): leader election lock
 ```
 
-**Why split storage:** Keeping serialized `data` and `result` out of the metadata hash ensures all hash values stay under 64 bytes. Redis uses ziplist encoding for such hashes — **3-4x less memory overhead** than hashtable encoding. In Lua scripts, accessing 3 keys costs the same as 1 (server-side, zero RTT).
+**Why single-hash storage:** Up to wireVersion 5 every job lived across four Redis keys (metadata hash + `:data` + `:result` + `:lock`) on the theory that keeping serialized payloads out of the metadata hash would let all hash values stay under 64 bytes and enjoy `listpack` encoding. In practice that cost three extra `redis.call()` invocations per job on the happy path — one on enqueue (`SET :data`), one on claim (`GET :data`), one on ack (`SET :result`) — and every job claimed four Redis keyspace slots' worth of dictEntry overhead (~100 B each). Phase 3B collapses `data` and `result` into hash fields, trading one `listpack` constraint for three fewer Redis operations. For payloads that still fit in listpack (set `hash-max-listpack-value 1024` in `redis.conf` for medium-sized jobs) this is a strict memory and CPU win; see `docs/WIRE_FORMAT.md` §5 → 6 for the full tradeoff table. The `:lock` key stays separate because Redis 7.4+ is the first release with `HEXPIRE`, which taskora intentionally does not mandate.
 
 ## Source Layout
 
@@ -1043,16 +1041,16 @@ Workflows (Canvas) with durable steps, wait-for-event, fan-out/fan-in as graph p
 
 Every multi-step state transition MUST be a Lua script. No exceptions. If enqueue does `INCR` + `HMSET` + `LPUSH` as separate commands, a crash between them leaves orphan data.
 
-**Required Lua scripts** (minimum for Phase 1, all use split storage):
+**Required Lua scripts** (minimum for Phase 1, layout as of wireVersion 6 — `data` and `result` now live as hash fields, not separate keys):
 
 | Script | Keys touched | Operations | Why atomic |
 |--------|-------------|-----------|------------|
-| `enqueue` | meta hash, :data, wait list, events stream | INCR id + HMSET meta + SET :data + LPUSH wait + XADD | No orphan data |
-| `enqueueDelayed` | meta hash, :data, delayed zset, events stream | INCR id + HMSET meta + SET :data + ZADD delayed + XADD | No orphan delayed |
-| `dequeue` | wait list, active list, meta hash, :data, :lock | Promote delayed + RPOPLPUSH wait→active + SET lock PX + GET :data | No double-processing |
-| `ack` | :lock, active list, :result, completed zset, meta hash, events | Verify lock + LREM active + SET :result + ZADD completed + XADD | No lost completions |
+| `enqueue` | meta hash, wait list, events stream | HSET meta + data + LPUSH wait + XADD | No orphan data |
+| `enqueueDelayed` | meta hash, delayed zset, events stream | HSET meta + data + ZADD delayed + XADD | No orphan delayed |
+| `dequeue` | wait list, active list, meta hash, :lock | Promote delayed + RPOPLPUSH wait→active + SET lock PX + HMGET meta + data | No double-processing |
+| `ack` | :lock, active list, completed zset, meta hash, events | Verify lock + LREM active + HSET state + finishedOn + result + ZADD completed + XADD | No lost completions |
 | `fail` | :lock, active list, failed zset, meta hash, events | Verify lock + LREM active + (re-enqueue OR ZADD failed) + XADD | No lost failures |
-| `nack` | :lock, active list, wait list | Verify lock + LREM active + RPUSH wait | Future jobs back to queue |
+| `nack` | :lock, active list, wait list | Verify lock + LREM active + LPUSH wait | Future jobs back to queue |
 | `extendLock` | :lock, stalled set | GET lock (verify token) + SET PX + SREM stalled | Lock stays consistent |
 
 All keys for one job share a `{hash tag}` — safe in Redis Cluster. Accessing multiple keys in one Lua script = zero extra RTT (server-side, in-memory).

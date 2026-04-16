@@ -156,9 +156,11 @@ describe("wire-format handshake", () => {
 //
 //   • v1 → v2: wait LIST → wait ZSET         (`migrateWaitV1ToV2`)
 //   • v4 → v5: wait ZSET → LIST + prioritized (`migrateWaitV4ToV5`)
+//   • v5 → v6: :data / :result strings → hash fields
+//                                             (`migrateJobsV5ToV6`)
 //
 // Each script is idempotent per-key, so the chain safely upgrades any
-// stored version in [1, 4] to the current wire version in one shot.
+// stored version in [1, 5] to the current wire version in one shot.
 // These tests seed a fake wireVersion=1 keyspace by hand and verify
 // the chained auto-migration runs correctly under several shapes:
 // empty waits, single-job waits, multi-job waits with mixed
@@ -212,15 +214,30 @@ describe("wire-format chained migration (v1 → current)", () => {
     const app = createTaskora({ adapter: redisAdapter(url()) });
     await app.ensureConnected();
 
-    // Post-migration (chained v1 → v2 → v5): j1 (priority=0) ends up in
-    // the wait LIST, j2 (priority=10) and j3 (priority=5) live in the
-    // prioritized ZSET. Meta is bumped to the current wire version.
+    // Post-migration (chained v1 → v2 → v5 → v6): j1 (priority=0) ends
+    // up in the wait LIST, j2 (priority=10) and j3 (priority=5) live in
+    // the prioritized ZSET. Meta is bumped to the current wire version.
+    // The :data string siblings were migrated into the job hashes as
+    // `data` fields, and the original string keys no longer exist.
     expect(await redis.type("taskora:{migr-small}:wait")).toBe("list");
     expect(await redis.llen("taskora:{migr-small}:wait")).toBe(1);
     expect(await redis.type("taskora:{migr-small}:prioritized")).toBe("zset");
     expect(await redis.zcard("taskora:{migr-small}:prioritized")).toBe(2);
     const meta = await redis.hgetall("taskora:meta");
     expect(meta.wireVersion).toBe(String(WIRE_VERSION));
+
+    // v5 → v6: every :data string sibling is gone, and its value is
+    // now stored inside the owning job hash under the `data` field.
+    for (const jid of ["j1", "j2", "j3"]) {
+      const stringKey = `taskora:{migr-small}:${jid}:data`;
+      expect(await redis.exists(stringKey)).toBe(0);
+      const dataField = await redis.hget(`taskora:{migr-small}:${jid}`, "data");
+      expect(dataField).not.toBeNull();
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      expect(JSON.parse(dataField as string).n).toBe(
+        jid === "j1" ? 1 : jid === "j2" ? 2 : 3,
+      );
+    }
 
     // Dequeue via a worker. wireVersion-5 semantics: wait LIST is
     // checked first, so j1 (n=1, priority=0) dispatches BEFORE j2 and

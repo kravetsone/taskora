@@ -419,8 +419,9 @@ describe("stall detection", () => {
       "active",
       "ts",
       String(Date.now()),
+      "data",
+      '"test"',
     );
-    await redis.set(`taskora:{stall-idempotent}:${jobId}:data`, '"test"');
     await redis.sadd("taskora:{stall-idempotent}:stalled", jobId);
 
     // Run two stall checks concurrently

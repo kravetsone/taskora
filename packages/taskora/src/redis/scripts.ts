@@ -1,11 +1,13 @@
 /**
  * Lua scripts for atomic Redis state transitions.
  *
- * All scripts use split storage:
- *   {prefix}<jobId>       — Hash (ziplist): metadata (< 64 bytes per value)
- *   {prefix}<jobId>:data  — String: serialized input
- *   {prefix}<jobId>:result — String: serialized output
+ * Since wireVersion 6 every job lives in exactly two Redis keys:
+ *   {prefix}<jobId>       — Hash: metadata + `data` field + `result` field
  *   {prefix}<jobId>:lock  — String (PX): distributed lock
+ *
+ * The lock stays separate because `SET key val PX ttl` is the only atomic
+ * way to set a value with a millisecond expiration, and Redis 7.4+ is the
+ * first release with `HEXPIRE` — which we intentionally don't mandate.
  *
  * All keys share a {hash tag} for Redis Cluster compatibility.
  *
@@ -69,7 +71,6 @@
 // Returns: 1
 export const ENQUEUE = `
 local jobKey = ARGV[1] .. ARGV[2]
-local dataKey = jobKey .. ':data'
 
 redis.call('HSET', jobKey,
   'ts', ARGV[4],
@@ -77,7 +78,8 @@ redis.call('HSET', jobKey,
   'attempt', 1,
   'maxAttempts', ARGV[7],
   'state', 'waiting',
-  'priority', ARGV[6])
+  'priority', ARGV[6],
+  'data', ARGV[3])
 
 if tonumber(ARGV[8]) > 0 then
   redis.call('HSET', jobKey, 'expireAt', ARGV[8])
@@ -89,7 +91,6 @@ if ARGV[11] ~= '' then
   redis.call('HSET', jobKey, '_wf', ARGV[11], '_wfNode', ARGV[12])
 end
 
-redis.call('SET', dataKey, ARGV[3])
 local priority = tonumber(ARGV[6]) or 0
 if priority > 0 then
   local waitScore = -priority * 1e13 + (tonumber(ARGV[4]) or 0)
@@ -123,7 +124,6 @@ return 1
 // Returns: 1
 export const ENQUEUE_DELAYED = `
 local jobKey = ARGV[1] .. ARGV[2]
-local dataKey = jobKey .. ':data'
 
 local ts = tonumber(ARGV[4])
 local delay = tonumber(ARGV[6])
@@ -136,7 +136,8 @@ redis.call('HSET', jobKey,
   'attempt', 1,
   'maxAttempts', ARGV[8],
   'state', 'delayed',
-  'priority', ARGV[7])
+  'priority', ARGV[7],
+  'data', ARGV[3])
 
 if tonumber(ARGV[9]) > 0 then
   redis.call('HSET', jobKey, 'expireAt', ARGV[9])
@@ -145,7 +146,6 @@ if ARGV[10] ~= '' then
   redis.call('HSET', jobKey, 'concurrencyKey', ARGV[10], 'concurrencyLimit', ARGV[11])
 end
 
-redis.call('SET', dataKey, ARGV[3])
 redis.call('ZADD', KEYS[1], score, ARGV[2])
 redis.call('ZADD', KEYS[3], 'LT', score, '0')
 
@@ -189,7 +189,7 @@ if #delayed > 0 then
     local ea = tonumber(redis.call('HGET', jKey, 'expireAt') or '0')
     if ea > 0 and now >= ea then
       if onExpire == 'discard' then
-        redis.call('DEL', jKey, jKey .. ':data')
+        redis.call('DEL', jKey)
       else
         redis.call('HSET', jKey, 'state', 'expired', 'finishedOn', tostring(now))
         redis.call('ZADD', KEYS[6], now, jid)
@@ -242,7 +242,7 @@ for _attempt = 1, 100 do
   local ea = tonumber(redis.call('HGET', jobKey, 'expireAt') or '0')
   if ea > 0 and now >= ea then
     if onExpire == 'discard' then
-      redis.call('DEL', jobKey, jobKey .. ':data')
+      redis.call('DEL', jobKey)
     else
       redis.call('HSET', jobKey, 'state', 'expired', 'finishedOn', tostring(now))
       redis.call('ZADD', KEYS[6], now, id)
@@ -283,12 +283,12 @@ for _attempt = 1, 100 do
       -- Claim the job
       redis.call('LPUSH', KEYS[2], id)
       local lockKey = jobKey .. ':lock'
-      local dataKey = jobKey .. ':data'
 
       redis.call('SET', lockKey, token, 'PX', lockTtl)
       redis.call('HSET', jobKey, 'state', 'active', 'processedOn', tostring(now))
 
-      -- Collect drain: if this is a flush sentinel, drain the buffer into :data
+      -- Collect drain: if this is a flush sentinel, drain the buffer into the
+      -- job hash's data field so the handler sees the accumulated items.
       local skipCollect = false
       local ck = redis.call('HGET', jobKey, 'collectKey')
       if ck then
@@ -299,11 +299,11 @@ for _attempt = 1, 100 do
         if #cItems == 0 then
           -- Already flushed (race) — unclaim and skip
           redis.call('LREM', KEYS[2], 1, id)
-          redis.call('DEL', jobKey, jobKey .. ':data', lockKey)
+          redis.call('DEL', jobKey, lockKey)
           skipCollect = true
         else
           local arr = '[' .. table.concat(cItems, ',') .. ']'
-          redis.call('SET', jobKey .. ':data', arr)
+          redis.call('HSET', jobKey, 'data', arr)
           redis.call('DEL', cItemsKey, cMetaKey, cFlushKey)
           -- Clear collectKey so retries don't try to drain again
           redis.call('HDEL', jobKey, 'collectKey')
@@ -311,8 +311,8 @@ for _attempt = 1, 100 do
       end
 
       if not skipCollect then
-        local data = redis.call('GET', dataKey)
-        local meta = redis.call('HMGET', jobKey, '_v', 'attempt', 'ts')
+        local meta = redis.call('HMGET', jobKey, 'data', '_v', 'attempt', 'ts')
+        local data = meta[1]
 
         redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
           'event', 'active', 'jobId', id)
@@ -328,7 +328,7 @@ for _attempt = 1, 100 do
           end
         end
 
-        return {id, data, meta[1], meta[2], meta[3]}
+        return {id, data, meta[2], meta[3], meta[4]}
       end
     end
   end
@@ -367,7 +367,6 @@ local now = ARGV[5]
 
 local jobKey = prefix .. jobId
 local lockKey = jobKey .. ':lock'
-local resultKey = jobKey .. ':result'
 
 -- Verify lock ownership
 local lockVal = redis.call('GET', lockKey)
@@ -377,8 +376,7 @@ end
 
 redis.call('LREM', KEYS[1], 1, jobId)
 redis.call('DEL', lockKey)
-redis.call('SET', resultKey, result)
-redis.call('HSET', jobKey, 'state', 'completed', 'finishedOn', now)
+redis.call('HSET', jobKey, 'state', 'completed', 'finishedOn', now, 'result', result)
 redis.call('ZADD', KEYS[2], tonumber(now), jobId)
 
 -- Clean dedup key if present
@@ -450,7 +448,6 @@ local singleton = tonumber(ARGV[9])
 
 local jobKey = prefix .. jobId
 local lockKey = jobKey .. ':lock'
-local resultKey = jobKey .. ':result'
 local noNext = {'', '', '', '', ''}
 
 -- ── Phase 1: ACK ─────────────────────────────────────────────────────
@@ -462,8 +459,10 @@ end
 
 redis.call('LREM', KEYS[2], 1, jobId)
 redis.call('DEL', lockKey)
-redis.call('SET', resultKey, result)
-redis.call('HSET', jobKey, 'state', 'completed', 'finishedOn', tostring(now))
+redis.call('HSET', jobKey,
+  'state', 'completed',
+  'finishedOn', tostring(now),
+  'result', result)
 redis.call('ZADD', KEYS[7], now, jobId)
 
 -- Single HMGET replaces separate HGETs for dedupKey / concurrencyKey /
@@ -514,7 +513,7 @@ if #delayed > 0 then
     local ea = tonumber(redis.call('HGET', jKey, 'expireAt') or '0')
     if ea > 0 and now >= ea then
       if onExpire == 'discard' then
-        redis.call('DEL', jKey, jKey .. ':data')
+        redis.call('DEL', jKey)
       else
         redis.call('HSET', jKey, 'state', 'expired', 'finishedOn', tostring(now))
         redis.call('ZADD', KEYS[6], now, jid)
@@ -570,7 +569,7 @@ for _attempt = 1, 100 do
 
   if nEa > 0 and now >= nEa then
     if onExpire == 'discard' then
-      redis.call('DEL', nJobKey, nJobKey .. ':data')
+      redis.call('DEL', nJobKey)
     else
       redis.call('HSET', nJobKey, 'state', 'expired', 'finishedOn', tostring(now))
       redis.call('ZADD', KEYS[6], now, id)
@@ -598,7 +597,6 @@ for _attempt = 1, 100 do
     if not blocked then
       redis.call('LPUSH', KEYS[2], id)
       local nLockKey = nJobKey .. ':lock'
-      local dataKey = nJobKey .. ':data'
 
       redis.call('SET', nLockKey, newToken, 'PX', newLockTtl)
       redis.call('HSET', nJobKey, 'state', 'active', 'processedOn', tostring(now))
@@ -611,19 +609,19 @@ for _attempt = 1, 100 do
         local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
         if #cItems == 0 then
           redis.call('LREM', KEYS[2], 1, id)
-          redis.call('DEL', nJobKey, nJobKey .. ':data', nLockKey)
+          redis.call('DEL', nJobKey, nLockKey)
           skipCollect = true
         else
           local arr = '[' .. table.concat(cItems, ',') .. ']'
-          redis.call('SET', nJobKey .. ':data', arr)
+          redis.call('HSET', nJobKey, 'data', arr)
           redis.call('DEL', cItemsKey, cMetaKey, cFlushKey)
           redis.call('HDEL', nJobKey, 'collectKey')
         end
       end
 
       if not skipCollect then
-        local data = redis.call('GET', dataKey)
-        local meta = redis.call('HMGET', nJobKey, '_v', 'attempt', 'ts')
+        local meta = redis.call('HMGET', nJobKey, 'data', '_v', 'attempt', 'ts')
+        local data = meta[1]
 
         redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
           'event', 'active', 'jobId', id)
@@ -638,7 +636,7 @@ for _attempt = 1, 100 do
           end
         end
 
-        return {ackedWf, ackedWfNode, id, data, meta[1], meta[2], meta[3]}
+        return {ackedWf, ackedWfNode, id, data, meta[2], meta[3], meta[4]}
       end
     end
   end
@@ -772,7 +770,7 @@ if #delayed > 0 then
     local ea = tonumber(redis.call('HGET', jKey, 'expireAt') or '0')
     if ea > 0 and now >= ea then
       if onExpire == 'discard' then
-        redis.call('DEL', jKey, jKey .. ':data')
+        redis.call('DEL', jKey)
       else
         redis.call('HSET', jKey, 'state', 'expired', 'finishedOn', tostring(now))
         redis.call('ZADD', KEYS[6], now, jid)
@@ -826,7 +824,7 @@ for _attempt = 1, 100 do
 
   if nEa > 0 and now >= nEa then
     if onExpire == 'discard' then
-      redis.call('DEL', nJobKey, nJobKey .. ':data')
+      redis.call('DEL', nJobKey)
     else
       redis.call('HSET', nJobKey, 'state', 'expired', 'finishedOn', tostring(now))
       redis.call('ZADD', KEYS[6], now, id)
@@ -854,7 +852,6 @@ for _attempt = 1, 100 do
     if not blocked then
       redis.call('LPUSH', KEYS[2], id)
       local nLockKey = nJobKey .. ':lock'
-      local dataKey = nJobKey .. ':data'
 
       redis.call('SET', nLockKey, newToken, 'PX', newLockTtl)
       redis.call('HSET', nJobKey, 'state', 'active', 'processedOn', tostring(now))
@@ -867,19 +864,19 @@ for _attempt = 1, 100 do
         local cItems = redis.call('LRANGE', cItemsKey, 0, -1)
         if #cItems == 0 then
           redis.call('LREM', KEYS[2], 1, id)
-          redis.call('DEL', nJobKey, nJobKey .. ':data', nLockKey)
+          redis.call('DEL', nJobKey, nLockKey)
           skipCollect = true
         else
           local arr = '[' .. table.concat(cItems, ',') .. ']'
-          redis.call('SET', nJobKey .. ':data', arr)
+          redis.call('HSET', nJobKey, 'data', arr)
           redis.call('DEL', cItemsKey, cMetaKey, cFlushKey)
           redis.call('HDEL', nJobKey, 'collectKey')
         end
       end
 
       if not skipCollect then
-        local data = redis.call('GET', dataKey)
-        local meta = redis.call('HMGET', nJobKey, '_v', 'attempt', 'ts')
+        local meta = redis.call('HMGET', nJobKey, 'data', '_v', 'attempt', 'ts')
+        local data = meta[1]
 
         redis.call('XADD', KEYS[4], 'MAXLEN', '~', 10000, '*',
           'event', 'active', 'jobId', id)
@@ -894,7 +891,7 @@ for _attempt = 1, 100 do
           end
         end
 
-        return {ackedWf, ackedWfNode, id, data, meta[1], meta[2], meta[3]}
+        return {ackedWf, ackedWfNode, id, data, meta[2], meta[3], meta[4]}
       end
     end
   end
@@ -1379,15 +1376,16 @@ local result = {}
 for _, jobId in ipairs(ids) do
   local jobKey = prefix .. jobId
   local meta = redis.call('HMGET', jobKey,
-    'ts', '_v', 'attempt', 'state', 'processedOn', 'finishedOn', 'error', 'progress')
+    'ts', '_v', 'attempt', 'state', 'processedOn', 'finishedOn', 'error', 'progress',
+    'data', 'result')
 
   if meta[4] then
     local entry = { jobId }
     for i = 1, 8 do
       entry[i + 1] = meta[i] or false
     end
-    entry[10] = redis.call('GET', jobKey .. ':data') or false
-    entry[11] = redis.call('GET', jobKey .. ':result') or false
+    entry[10] = meta[9] or false
+    entry[11] = meta[10] or false
     local logs = redis.call('LRANGE', jobKey .. ':logs', 0, -1)
     entry[12] = #logs
     for i = 1, #logs do
@@ -1422,8 +1420,7 @@ if removed == 0 then
 end
 
 redis.call('HSET', jobKey, 'state', 'waiting', 'attempt', 1)
-redis.call('HDEL', jobKey, 'error', 'finishedOn')
-redis.call('DEL', prefix .. jobId .. ':result')
+redis.call('HDEL', jobKey, 'error', 'finishedOn', 'result')
 -- Recovered DLQ jobs re-enter with a fresh ts so they land at the tail
 -- of their priority band (vs. keeping their original ts and potentially
 -- cutting ahead of jobs enqueued while they sat in :failed).
@@ -1468,8 +1465,7 @@ for _, jobId in ipairs(ids) do
   local jobKey = prefix .. jobId
   redis.call('ZREM', KEYS[1], jobId)
   redis.call('HSET', jobKey, 'state', 'waiting', 'attempt', 1, 'ts', ARGV[3])
-  redis.call('HDEL', jobKey, 'error', 'finishedOn')
-  redis.call('DEL', prefix .. jobId .. ':result')
+  redis.call('HDEL', jobKey, 'error', 'finishedOn', 'result')
   local bPrio = tonumber(redis.call('HGET', jobKey, 'priority') or '0')
   if bPrio > 0 then
     local bScore = -bPrio * 1e13 + now
@@ -1506,8 +1502,6 @@ if cutoff > 0 then
     redis.call('ZREM', KEYS[1], jobId)
     local jobKey = prefix .. jobId
     redis.call('DEL', jobKey,
-      jobKey .. ':data',
-      jobKey .. ':result',
       jobKey .. ':lock',
       jobKey .. ':logs')
     trimmed = trimmed + 1
@@ -1524,8 +1518,6 @@ if maxItems > 0 then
       redis.call('ZREM', KEYS[1], jobId)
       local jobKey = prefix .. jobId
       redis.call('DEL', jobKey,
-        jobKey .. ':data',
-        jobKey .. ':result',
         jobKey .. ':lock',
         jobKey .. ':logs')
       trimmed = trimmed + 1
@@ -1573,7 +1565,7 @@ if oldJobId then
   local removed = redis.call('ZREM', KEYS[1], oldJobId)
   if removed > 0 then
     local oldJobKey = prefix .. oldJobId
-    redis.call('DEL', oldJobKey, oldJobKey .. ':data')
+    redis.call('DEL', oldJobKey)
     redis.call('XADD', KEYS[2], 'MAXLEN', '~', 10000, '*',
       'event', 'debounced', 'jobId', oldJobId, 'replacedBy', jobId)
   end
@@ -1581,7 +1573,6 @@ end
 
 -- Create new delayed job
 local jobKey = prefix .. jobId
-local dataKey = jobKey .. ':data'
 
 redis.call('HSET', jobKey,
   'ts', ARGV[4],
@@ -1590,7 +1581,8 @@ redis.call('HSET', jobKey,
   'attempt', 1,
   'maxAttempts', maxAttempts,
   'state', 'delayed',
-  'priority', priority)
+  'priority', priority,
+  'data', data)
 
 if tonumber(ARGV[10]) > 0 then
   redis.call('HSET', jobKey, 'expireAt', ARGV[10])
@@ -1599,7 +1591,6 @@ if ARGV[11] ~= '' then
   redis.call('HSET', jobKey, 'concurrencyKey', ARGV[11], 'concurrencyLimit', ARGV[12])
 end
 
-redis.call('SET', dataKey, data)
 redis.call('ZADD', KEYS[1], score, jobId)
 redis.call('ZADD', KEYS[3], 'LT', score, '0')
 
@@ -1662,7 +1653,6 @@ end
 
 -- Enqueue the job
 local jobKey = prefix .. jobId
-local dataKey = jobKey .. ':data'
 
 if delay > 0 then
   local score = ts + delay
@@ -1673,8 +1663,8 @@ if delay > 0 then
     'attempt', 1,
     'maxAttempts', maxAttempts,
     'state', 'delayed',
-    'priority', priority)
-  redis.call('SET', dataKey, data)
+    'priority', priority,
+    'data', data)
   redis.call('ZADD', KEYS[2], score, jobId)
   redis.call('ZADD', KEYS[4], 'LT', score, '0')
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
@@ -1686,8 +1676,8 @@ else
     'attempt', 1,
     'maxAttempts', maxAttempts,
     'state', 'waiting',
-    'priority', priority)
-  redis.call('SET', dataKey, data)
+    'priority', priority,
+    'data', data)
   local tPrio = tonumber(priority) or 0
   if tPrio > 0 then
     local tScore = -tPrio * 1e13 + ts
@@ -1761,7 +1751,6 @@ end
 
 -- Enqueue the job
 local jobKey = prefix .. jobId
-local dataKey = jobKey .. ':data'
 
 if delay > 0 then
   local score = ts + delay
@@ -1773,8 +1762,8 @@ if delay > 0 then
     'maxAttempts', maxAttempts,
     'state', 'delayed',
     'priority', priority,
-    'dedupKey', dedupKey)
-  redis.call('SET', dataKey, data)
+    'dedupKey', dedupKey,
+    'data', data)
   redis.call('ZADD', KEYS[2], score, jobId)
   redis.call('ZADD', KEYS[4], 'LT', score, '0')
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
@@ -1787,8 +1776,8 @@ else
     'maxAttempts', maxAttempts,
     'state', 'waiting',
     'priority', priority,
-    'dedupKey', dedupKey)
-  redis.call('SET', dataKey, data)
+    'dedupKey', dedupKey,
+    'data', data)
   local dPrio = tonumber(priority) or 0
   if dPrio > 0 then
     local dScore = -dPrio * 1e13 + ts
@@ -1867,7 +1856,7 @@ if maxSize > 0 and count >= maxSize then
   if oldFlushId then
     redis.call('ZREM', KEYS[1], oldFlushId)
     local oldKey = prefix .. oldFlushId
-    redis.call('DEL', oldKey, oldKey .. ':data')
+    redis.call('DEL', oldKey)
   end
 
   -- Drain buffer into a real job
@@ -1882,8 +1871,8 @@ if maxSize > 0 and count >= maxSize then
     'attempt', 1,
     'maxAttempts', maxAttempts,
     'state', 'waiting',
-    'priority', '0')
-  redis.call('SET', jobKey .. ':data', arr)
+    'priority', '0',
+    'data', arr)
   -- Collect flush jobs are always priority 0, so LPUSH into the wait LIST.
   redis.call('LPUSH', KEYS[4], jobId)
   redis.call('ZADD', KEYS[3], 0, '0')
@@ -1898,7 +1887,7 @@ local oldFlushId = redis.call('GET', flushIdKey)
 if oldFlushId then
   redis.call('ZREM', KEYS[1], oldFlushId)
   local oldKey = prefix .. oldFlushId
-  redis.call('DEL', oldKey, oldKey .. ':data')
+  redis.call('DEL', oldKey)
 end
 
 -- Compute flush score: min(now + delay, firstAt + maxWait)
@@ -1919,9 +1908,10 @@ redis.call('HSET', jobKey,
   'attempt', 1,
   'maxAttempts', maxAttempts,
   'state', 'delayed',
-  'collectKey', collectKey)
--- No :data yet — moveToActive will drain the buffer
-redis.call('SET', jobKey .. ':data', '[]')
+  'collectKey', collectKey,
+  'data', '[]')
+-- data is a placeholder — moveToActive drains the real buffer into the
+-- hash field at claim time, replacing this stub.
 redis.call('ZADD', KEYS[1], flushScore, jobId)
 redis.call('ZADD', KEYS[3], 'LT', flushScore, '0')
 redis.call('SET', flushIdKey, jobId, 'PX', math.max(delayMs, maxWaitMs > 0 and maxWaitMs or delayMs) * 2)
@@ -2088,8 +2078,6 @@ for _, jobId in ipairs(ids) do
   redis.call('ZREM', KEYS[1], jobId)
   local jobKey = prefix .. jobId
   redis.call('DEL', jobKey,
-    jobKey .. ':data',
-    jobKey .. ':result',
     jobKey .. ':lock',
     jobKey .. ':logs')
   cleaned = cleaned + 1
@@ -2255,6 +2243,61 @@ end
 return migrated
 `;
 
+// ── migrateJobsV5ToV6 ───────────────────────────────────────────────
+// Per-key atomic migration of one `:data` or `:result` string sibling
+// into a field on the job hash, for the wireVersion 5 → 6 upgrade.
+//
+// wireVersion 5 split every job across four Redis keys:
+//   {prefix}<id>          — metadata hash
+//   {prefix}<id>:data     — serialized input (string)
+//   {prefix}<id>:result   — serialized output (string)
+//   {prefix}<id>:lock     — worker lock (string PX)
+// wireVersion 6 collapses `:data` and `:result` into fields on the
+// metadata hash. Three fewer redis.call()s per job on the happy path
+// (enqueue, claim, ack).
+//
+// The TS-side driver SCANs for `:data` / `:result` string siblings and
+// invokes this script once per sibling. We can't SCAN inside Lua, and
+// the per-key script runs fast enough that the extra round-trips are
+// acceptable during a one-shot upgrade.
+//
+// Idempotent: if the string key no longer exists (already migrated or
+// never set) we return 0. If the hash field is already populated we
+// skip the HSET but still DEL the string sibling, so a partial earlier
+// run can't leave behind an orphaned key. Anything other than a string
+// at the sibling slot is a corruption signal — we bail loud.
+//
+// KEYS[1] = job hash key       (e.g. "taskora:{<task>}:<uuid>")
+// KEYS[2] = string sibling key (same prefix + ":data" or ":result")
+// ARGV[1] = hash field name    ("data" or "result")
+// Returns: 1 (migrated or orphan-deleted), 0 (already clean)
+export const MIGRATE_JOBS_V5_TO_V6 = `
+local hashKey = KEYS[1]
+local stringKey = KEYS[2]
+local fieldName = ARGV[1]
+
+if redis.call('EXISTS', stringKey) == 0 then
+  return 0
+end
+
+local keyType = redis.call('TYPE', stringKey)
+if type(keyType) == 'table' then keyType = keyType.ok end
+if keyType ~= 'string' then
+  return redis.error_reply('MIGRATE_JOBS: unexpected type ' .. keyType .. ' at ' .. stringKey)
+end
+
+if redis.call('EXISTS', hashKey) == 1 then
+  local existing = redis.call('HGET', hashKey, fieldName)
+  if not existing or existing == false then
+    local value = redis.call('GET', stringKey)
+    redis.call('HSET', hashKey, fieldName, value)
+  end
+end
+
+redis.call('DEL', stringKey)
+return 1
+`;
+
 // ── handshake ────────────────────────────────────────────────────────
 // Atomically read-or-initialize the wire-format meta hash.
 //
@@ -2341,7 +2384,6 @@ for i = 0, count - 1 do
   local wfNode      = ARGV[off + 11]
 
   local jobKey  = prefix .. jobId
-  local dataKey = jobKey .. ':data'
 
   if delay > 0 then
     local score = tonumber(ts) + delay
@@ -2352,7 +2394,8 @@ for i = 0, count - 1 do
     redis.call('HSET', jobKey,
       'ts', ts, 'delay', ARGV[off + 9], '_v', version,
       'attempt', 1, 'maxAttempts', maxAttempts,
-      'state', 'delayed', 'priority', priority)
+      'state', 'delayed', 'priority', priority,
+      'data', data)
     if tonumber(expireAt) > 0 then
       redis.call('HSET', jobKey, 'expireAt', expireAt)
     end
@@ -2360,7 +2403,6 @@ for i = 0, count - 1 do
       redis.call('HSET', jobKey, 'concurrencyKey', concKey,
                                   'concurrencyLimit', concLimit)
     end
-    redis.call('SET', dataKey, data)
     redis.call('ZADD', KEYS[2], score, jobId)
     redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*',
       'event', 'delayed', 'jobId', jobId)
@@ -2369,7 +2411,8 @@ for i = 0, count - 1 do
     redis.call('HSET', jobKey,
       'ts', ts, '_v', version,
       'attempt', 1, 'maxAttempts', maxAttempts,
-      'state', 'waiting', 'priority', priority)
+      'state', 'waiting', 'priority', priority,
+      'data', data)
     if tonumber(expireAt) > 0 then
       redis.call('HSET', jobKey, 'expireAt', expireAt)
     end
@@ -2380,7 +2423,6 @@ for i = 0, count - 1 do
     if wf ~= '' then
       redis.call('HSET', jobKey, '_wf', wf, '_wfNode', wfNode)
     end
-    redis.call('SET', dataKey, data)
     local bPrio = tonumber(priority) or 0
     if bPrio > 0 then
       local waitScore = -bPrio * 1e13 + (tonumber(ts) or 0)

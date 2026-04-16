@@ -50,7 +50,7 @@ function collectScriptHashes(): Record<string, string> {
 
 // ── The frozen surface ──────────────────────────────────────────────────
 
-const FROZEN_AT_WIRE_VERSION = 5;
+const FROZEN_AT_WIRE_VERSION = 6;
 
 // buildKeys / buildMetaKey / buildScheduleKeys output for fixed inputs. These
 // strings are persisted in live Redis instances — renaming ANY of them is a
@@ -105,38 +105,39 @@ const FROZEN_KEY_LAYOUT = {
 // design — reviewers must consciously acknowledge every Lua change rather
 // than let a drive-by edit slip through.
 const FROZEN_SCRIPT_HASHES: Record<string, string> = {
-  ACK: "b283e95480b7ab31",
-  ACK_AND_MOVE_TO_ACTIVE: "174f2e0bcba3e439",
+  ACK: "b32ce5bea037561b",
+  ACK_AND_MOVE_TO_ACTIVE: "528e9499e74f04c2",
   ACQUIRE_SCHEDULER_LOCK: "362180a86b49ee72",
   ADVANCE_WORKFLOW: "b3535a40f566e08e",
   CANCEL: "dd2fac08671df39f",
   CANCEL_WORKFLOW: "409298974cb9f05e",
-  CLEAN_JOBS: "c30ae2ee03502165",
-  COLLECT_PUSH: "5afcce95fca2cffe",
+  CLEAN_JOBS: "3e41dd29bccf2a5c",
+  COLLECT_PUSH: "d7ab6db82b1ffa5d",
   CREATE_WORKFLOW: "e32df6d810b9ad4e",
-  DEBOUNCE: "261d4950239a6e25",
-  DEDUPLICATE_ENQUEUE: "7be48f57fce0be0d",
-  ENQUEUE: "e9b49613024ed658",
-  ENQUEUE_BULK: "3c45831daed2d539",
-  ENQUEUE_DELAYED: "ca754f338ced0aab",
+  DEBOUNCE: "8d9dde44713a9891",
+  DEDUPLICATE_ENQUEUE: "8a6ca60de6dbdb7c",
+  ENQUEUE: "6e1a57efb6f1d142",
+  ENQUEUE_BULK: "b1a0823e656cdb86",
+  ENQUEUE_DELAYED: "609c1e2014ce9d6d",
   EXTEND_LOCK: "dc500d7199ee06b1",
   FAIL: "b733a38465348cb8",
-  FAIL_AND_MOVE_TO_ACTIVE: "e51f5216bf44bc63",
+  FAIL_AND_MOVE_TO_ACTIVE: "671d1bf695b6dd4f",
   FAIL_WORKFLOW: "a7762af2ff385164",
   FINISH_CANCEL: "5f78f671ea104896",
   HANDSHAKE: "91898f9a4c4cf5b7",
-  LIST_JOB_DETAILS: "78f50791080f0567",
+  LIST_JOB_DETAILS: "d2db7d0f20cadddf",
+  MIGRATE_JOBS_V5_TO_V6: "68ac319cf64ff94f",
   MIGRATE_WAIT_V1_TO_V2: "dd1209f915452b05",
   MIGRATE_WAIT_V4_TO_V5: "a6772e24095d3e43",
-  MOVE_TO_ACTIVE: "22a1d11f9a248905",
+  MOVE_TO_ACTIVE: "bfa78047822b82d8",
   NACK: "65f2aa38487f6c59",
   RENEW_SCHEDULER_LOCK: "96d3ba1e2ef947b6",
-  RETRY_ALL_DLQ: "f4cfb1e9f25768dc",
-  RETRY_DLQ: "ea3d316ea5123ece",
+  RETRY_ALL_DLQ: "a85b332ac5d98193",
+  RETRY_DLQ: "a5ec711e00cfe252",
   STALLED_CHECK: "9f6c5cf36b54fe09",
-  THROTTLE_ENQUEUE: "1f8e5c4df63302ed",
+  THROTTLE_ENQUEUE: "eba402f084edf5f0",
   TICK_SCHEDULER: "d77ed41b08630ef8",
-  TRIM_DLQ: "97aaf7bb754bcdaf",
+  TRIM_DLQ: "d0d60a045c8c87e8",
   VERSION_DISTRIBUTION: "37905d283ee71f59",
 };
 

@@ -78,6 +78,39 @@ You should see a one-line log entry the first time a wireVersion=2 process start
 
 **If you'd rather migrate manually.** The auto-migrator is idempotent and you can skip it by draining the `:wait` lists yourself before switching versions: stop dispatching, wait for in-flight work to finish, confirm `LLEN taskora:{<task>}:wait` is zero on every task, then deploy. Nothing breaks if you do — the new version just finds an empty keyspace and writes fresh sorted sets from scratch.
 
+### wireVersion 5 → 6 — single-hash job storage
+
+**What changed.** Every job used to occupy four Redis keys: the metadata hash, a `:data` string sibling holding the serialized input, a `:result` string sibling holding the serialized output, and a `:lock` string (still separate — it needs `SET … PX` atomicity). wireVersion 6 collapses `:data` and `:result` into fields on the metadata hash itself, so the common path is one hash plus an optional lock, full stop.
+
+Hot-path wins — three fewer `redis.call()` invocations per job on the happy path:
+
+| Operation | wireVersion 5 (split) | wireVersion 6 (single hash) |
+|---|---|---|
+| Enqueue | `HSET fields` + `SET :data` | `HSET fields + data` |
+| Claim  | `RPOPLPUSH` + `HMGET meta` + `GET :data` | `RPOPLPUSH` + `HMGET meta + data` |
+| Ack    | `SET :result` + `HSET state + finishedOn` | `HSET state + finishedOn + result` |
+
+At c=100 that's roughly 16 % less Lua-script Redis CPU per job, stacked on top of Phase 3A's O(1) wait-list dequeue. Enqueue and bench memory per job drop ~40–50 % for payloads that fit inside the hash listpack encoding, because one keyspace slot now holds what three used to.
+
+**Upgrade is a hard gate.** A wireVersion 5 worker that issues `GET <id>:data` against a wireVersion 6 job hits `nil` — the string sibling no longer exists — and would silently drop the payload. `MIN_COMPAT_VERSION` bumps to 6 so the handshake refuses the mismatched pair: a v5 worker starting against a v6 keyspace throws `SchemaVersionMismatchError` before any job touches disk. Drain queues or flush the keyspace before rolling workers — same protocol as 1 → 2 and 4 → 5.
+
+**Automatic migration.** The first wireVersion 6 process to connect acquires the shared migration lock and runs `MIGRATE_JOBS_V5_TO_V6`: it `SCAN`s the keyspace for `:data` and `:result` string siblings and invokes a per-key Lua script for each hit, copying the string value into the matching hash field and deleting the string. The script is idempotent — jobs whose hash already carries the field and orphaned string siblings are both no-ops — so a partial run followed by a retry picks up where it left off. You should see a one-line log entry the first time a wireVersion 6 process connects, and nothing more.
+
+**Redis tuning for large job payloads.** Redis 7 keeps a hash in compact `listpack` encoding as long as:
+
+- number of fields ≤ `hash-max-listpack-entries` (default `128`)
+- every value ≤ `hash-max-listpack-value` bytes (default `64`)
+
+If your jobs routinely carry `data` or `result` larger than 64 bytes, the hash flips to `hashtable` encoding at the first oversize value, and the per-field overhead jumps from ~2 B to ~80 B. Inside that narrow window (roughly 64 B–1 KB per field) the single-hash layout can end up ~20–30 % larger than the old split layout. The cure is one line in `redis.conf`:
+
+```
+hash-max-listpack-value 1024
+```
+
+With that setting, payloads up to ~1 KB stay in listpack and wireVersion 6 is a memory win across the board. BullMQ — which has always used single-hash job storage — gives the same recommendation implicitly; we're calling it out explicitly because taskora's default (split storage) masked the need until now. See [Redis Tuning](/operations/redis-tuning) for the full guide on memory-efficient Redis settings.
+
+**If you'd rather migrate manually.** Same as 1 → 2: drain your queues, confirm the task keyspace is empty, then deploy wireVersion 6. The new version finds a clean keyspace and writes fresh single-hash jobs from scratch.
+
 ## Not to be confused with task payload versioning
 
 There are two independent versioning systems in taskora. They solve different problems and you'll interact with them at very different frequencies.

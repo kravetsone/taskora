@@ -56,6 +56,7 @@ const SCRIPT_MAP: Record<string, string> = {
   handshake: scripts.HANDSHAKE,
   migrateWaitV1ToV2: scripts.MIGRATE_WAIT_V1_TO_V2,
   migrateWaitV4ToV5: scripts.MIGRATE_WAIT_V4_TO_V5,
+  migrateJobsV5ToV6: scripts.MIGRATE_JOBS_V5_TO_V6,
 };
 
 export class RedisBackend implements Taskora.Adapter {
@@ -385,18 +386,19 @@ export class RedisBackend implements Taskora.Adapter {
       writtenAt: Number(raw[3]),
     };
 
-    // Auto-migration: chain every known in-place wait-queue migration
-    // under a single lock, then bump the meta once. Each Lua migrator
-    // is idempotent (v1→v2 no-ops on a ZSET keyspace; v4→v5 no-ops on
-    // a LIST keyspace), so a stored wireVersion anywhere in [1, 4] is
-    // safely chained up to the current wireVersion 5 layout.
+    // Auto-migration: chain every known in-place upgrade under a single
+    // lock, then bump the meta once. Each Lua migrator is idempotent
+    // (v1→v2 no-ops on a ZSET keyspace; v4→v5 no-ops on a LIST keyspace;
+    // v5→v6 no-ops on a job where data/result already live inside the
+    // hash), so a stored wireVersion anywhere in [1, ours-1] is safely
+    // chained up to the current layout.
     //
     // Shared lock protocol: a cluster of new instances starting
     // simultaneously against an old keyspace all try `SET NX` on the
     // migration lock; exactly one wins and runs the migration, the
     // losers fall back through `awaitMigrationLock` and re-handshake
     // (now reading the freshly-bumped meta, taking the fast path).
-    if (stored.wireVersion < ours.wireVersion && stored.wireVersion < 5) {
+    if (stored.wireVersion < ours.wireVersion) {
       return this.runChainedWaitMigration(ours, metaKey, stored);
     }
 
@@ -453,6 +455,14 @@ export class RedisBackend implements Taskora.Adapter {
       // and v3 also have ZSET wait queues.
       if (stored.wireVersion < 5) {
         const r = await this.migrateWaitV4ToV5();
+        keysMigrated += r.keys;
+        jobsMigrated += r.jobs;
+      }
+      // v5 → v6: job data + result move from separate string keys into
+      // fields on the job hash. Idempotent: jobs whose hash already has
+      // the field are left alone; orphaned string siblings are deleted.
+      if (stored.wireVersion < 6) {
+        const r = await this.migrateJobsV5ToV6();
         keysMigrated += r.keys;
         jobsMigrated += r.jobs;
       }
@@ -579,6 +589,77 @@ export class RedisBackend implements Taskora.Adapter {
         }
       }
     } while (cursor !== "0");
+
+    return { keys, jobs };
+  }
+
+  /**
+   * wireVersion 5 → 6 migration: collapse every `{prefix}<id>:data` and
+   * `{prefix}<id>:result` string sibling into a field on the job hash.
+   *
+   * SCANs the keyspace twice (once for `:data`, once for `:result`) and
+   * invokes the per-key `MIGRATE_JOBS_V5_TO_V6` Lua script for each hit.
+   * The script is idempotent — if the hash already carries the field it
+   * leaves it alone, and orphaned string keys whose hash parent is gone
+   * are simply deleted.
+   *
+   * This is not a hot-path script, so the extra round-trips per key are
+   * cheap relative to the total migration window, and the per-key form
+   * keeps each script invocation bounded (unlike a batched variant that
+   * would hold Redis for an unpredictable stretch).
+   *
+   * @internal — exposed for tests; production code goes through handshake().
+   */
+  async migrateJobsV5ToV6(): Promise<{ keys: number; jobs: number }> {
+    let keys = 0;
+    let jobs = 0;
+
+    for (const suffix of [":data", ":result"] as const) {
+      const field = suffix.slice(1); // "data" | "result"
+      const pattern = this.prefix
+        ? `taskora:${this.prefix}:{*}:*${suffix}`
+        : `taskora:{*}:*${suffix}`;
+      let cursor = "0";
+
+      do {
+        const result = (await this.driver.command("scan", [
+          cursor,
+          "MATCH",
+          pattern,
+          "COUNT",
+          "100",
+        ])) as [string, string[]];
+        cursor = result[0];
+        const stringKeys = result[1] ?? [];
+
+        for (const stringKey of stringKeys) {
+          // Defensive — a taskora key whose name happens to also end in
+          // `:data`/`:result` but isn't a job sibling (e.g. `:collect:data`)
+          // would mis-trigger without the length check. In practice no
+          // taskora key matches this pattern, but the guard is cheap.
+          if (
+            stringKey.endsWith(":lock:data") ||
+            stringKey.endsWith(":lock:result") ||
+            stringKey.endsWith(":logs:data") ||
+            stringKey.endsWith(":logs:result")
+          ) {
+            continue;
+          }
+          const jobKey = stringKey.slice(0, -suffix.length);
+          const migrated = (await this.eval(
+            "migrateJobsV5ToV6",
+            2,
+            jobKey,
+            stringKey,
+            field,
+          )) as number;
+          if (migrated > 0) {
+            keys += 1;
+            jobs += 1;
+          }
+        }
+      } while (cursor !== "0");
+    }
 
     return { keys, jobs };
   }
@@ -1301,7 +1382,7 @@ export class RedisBackend implements Taskora.Adapter {
 
   async getResult(task: string, jobId: string): Promise<string | null> {
     const keys = buildKeys(task, this.prefix);
-    return (await this.driver.command("get", [`${keys.jobPrefix}${jobId}:result`])) as
+    return (await this.driver.command("hget", [`${keys.jobPrefix}${jobId}`, "result"])) as
       | string
       | null;
   }
@@ -1579,19 +1660,19 @@ export class RedisBackend implements Taskora.Adapter {
     const results = await this.driver
       .pipeline()
       .add("hgetall", [jobKey])
-      .add("get", [`${jobKey}:data`])
-      .add("get", [`${jobKey}:result`])
       .add("lrange", [`${jobKey}:logs`, 0, -1])
       .exec();
     const fields = results[0][1] as Record<string, string>;
 
     if (!fields || Object.keys(fields).length === 0) return null;
 
+    const { data = null, result = null, ...metaFields } = fields;
+
     return {
-      fields,
-      data: results[1][1] as string | null,
-      result: results[2][1] as string | null,
-      logs: results[3][1] as string[],
+      fields: metaFields,
+      data: data ?? null,
+      result: result ?? null,
+      logs: results[1][1] as string[],
     };
   }
 

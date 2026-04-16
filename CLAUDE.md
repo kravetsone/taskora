@@ -147,6 +147,10 @@ bun run format           # biome format --write
 
 Phases 1–14, 17a, 18, and 19 complete. Phases 15 (OpenTelemetry) and 16 (React Hooks) deferred. Next: Phase 17b (Durable Steps, Wait-for-Event). See `docs/IMPLEMENTATION.md` for full phase breakdown.
 
+Performance work on top of the delivered phases:
+- **Phase 3A** (`bdbc5b4`) — wait queue split: LIST at `:wait` for priority=0 (O(1) `RPOP` fast path) plus a separate `:prioritized` ZSET for priority>0. Every enqueue/dequeue Lua script branches on priority. wireVersion 4 → 5, hard gate, auto-migration at handshake.
+- **Phase 3B** — single-hash job storage: `:data` and `:result` string siblings collapse into fields on the job hash. Hot path drops three `redis.call()` invocations per job (enqueue, claim, ack) and enqueue memory per job falls ~32% for payloads that fit in listpack. wireVersion 5 → 6, hard gate, `MIGRATE_JOBS_V5_TO_V6` auto-migration during handshake, operator-side `hash-max-listpack-value 1024` recommended for medium payloads.
+
 Phase 19 delivered:
 - Task contracts: producer/consumer split via `defineTask()` / `staticContract()`
 - `TaskContract<TInput, TOutput>` — pure, serializable task declaration with no runtime dependency on App/Worker/Adapter. Plain object with phantom types via `declare const ... unique symbol` for inference.

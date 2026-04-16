@@ -43,7 +43,7 @@ describe("job lifecycle", () => {
     expect(completedCount).toBe(1);
 
     // Verify result is stored
-    const result = await redis.get(`taskora:{send-email}:${jobId}:result`);
+    const result = await redis.hget(`taskora:{send-email}:${jobId}`, "result");
     expect(result).toBeDefined();
     expect(JSON.parse(result as string)).toEqual({ ok: true });
 

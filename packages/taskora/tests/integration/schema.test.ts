@@ -96,7 +96,7 @@ describe("schema validation — worker output", () => {
       return completedCount === 1;
     });
 
-    const result = await redis.get(`taskora:{good-output}:${jobId}:result`);
+    const result = await redis.hget(`taskora:{good-output}:${jobId}`, "result");
     expect(JSON.parse(result as string)).toEqual({ greeting: "Hello, Alice!" });
 
     await app.close();

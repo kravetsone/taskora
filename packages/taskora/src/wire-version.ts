@@ -6,10 +6,10 @@
  * The *wire format* is everything taskora writes into its storage backend
  * (Redis, and future Postgres) that another taskora process might read:
  *
- *   • Key layout and naming — `taskora:{task}:wait`, `{id}:data`, `{id}:result`, …
+ *   • Key layout and naming — `taskora:{task}:wait`, `{id}:lock`, …
  *   • Job hash field names and their expected encodings
  *     (`state`, `attempt`, `_v`, `stalledCount`, `cancelledAt`, `_wf`, `_wfNode`,
- *     `expireAt`, `maxAttempts`, `processedOn`, `finishedOn`, …)
+ *     `expireAt`, `maxAttempts`, `processedOn`, `finishedOn`, `data`, `result`, …)
  *   • Stream event shapes — the fields attached to XADD entries on `<task>:events`
  *     (completed/failed/retrying/progress/stalled/cancelled)
  *   • Lua script semantics over shared state (ACK/FAIL/NACK/…) — renaming a
@@ -157,8 +157,38 @@
  *          "best-effort within a priority band" documentation widens
  *          to "best-effort across bands too when both are non-empty
  *          at dispatch time".
+ *   5 → 6: single-hash job storage. Every job used to occupy four
+ *          Redis keys: the metadata hash, a `:data` string for the
+ *          serialized input, a `:result` string for the serialized
+ *          output, and a `:lock` string for the worker lock. This
+ *          bump collapses `:data` and `:result` into fields on the
+ *          metadata hash, removing two Redis calls per job on the
+ *          happy path (enqueue, claim, ack) and saving one Redis
+ *          keyspace slot (~100–150 B) per job for payloads that
+ *          fit in the hash's listpack encoding. The lock stays
+ *          separate — it needs `SET key val PX ttl` atomicity that
+ *          hashes can't match until Redis 7.4+'s `HEXPIRE`, which
+ *          we intentionally don't mandate.
+ *
+ *          Hard gate: wire-5 workers doing `GET <id>:data` will hit
+ *          `nil` after the migration runs, so `MIN_COMPAT_VERSION`
+ *          bumps to 6 and the handshake fails loud instead. Drain
+ *          queues or flush the keyspace before rolling workers.
+ *          `MIGRATE_JOBS_V5_TO_V6` runs automatically during the
+ *          handshake migration window: it SCANs `*:data` and
+ *          `*:result` siblings and moves each value into the hash.
+ *
+ *          Memory tradeoff: for payloads that stay inside the
+ *          hash's listpack threshold (default
+ *          `hash-max-listpack-value 64`) the new layout uses ~50%
+ *          less memory per job. For payloads above that threshold
+ *          Redis promotes the hash to `hashtable` encoding (per-
+ *          field overhead jumps from ~2 B to ~80 B) and the new
+ *          layout can end up ~20–30% larger until the operator
+ *          raises `hash-max-listpack-value` to something like 1024.
+ *          Upgrade docs cover the tuning in detail.
  */
-export const WIRE_VERSION = 5;
+export const WIRE_VERSION = 6;
 
 /**
  * The oldest wire-format version this build is still willing to coexist
@@ -179,8 +209,14 @@ export const WIRE_VERSION = 5;
  * ZSET back to LIST (plus a new prioritized ZSET sibling), so again
  * wire-4 and wire-5 cannot coexist on one backend — `MIN_COMPAT_VERSION`
  * bumps to 5.
+ *
+ * The 5 → 6 bump (single-hash job storage) is also a hard gate. A
+ * wire-5 worker that issues `GET <id>:data` for a wire-6 job hits
+ * `nil` — the string sibling no longer exists — and silently drops the
+ * payload. Fail loud at handshake instead: `MIN_COMPAT_VERSION` bumps
+ * to 6 so wire-5 and wire-6 cannot share one backend.
  */
-export const MIN_COMPAT_VERSION = 5;
+export const MIN_COMPAT_VERSION = 6;
 
 /**
  * A taskora wire-format meta record. Persisted once per `(backend, prefix)`

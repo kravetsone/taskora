@@ -161,9 +161,8 @@ export class EventReader {
   ): { kind: EnrichKind; count: number } {
     switch (event) {
       case "completed":
-        pipe.add("hmget", [jobKey, "attempt", "processedOn", "finishedOn"]);
-        pipe.add("get", [`${jobKey}:result`]);
-        return { kind: "completed", count: 2 };
+        pipe.add("hmget", [jobKey, "attempt", "processedOn", "finishedOn", "result"]);
+        return { kind: "completed", count: 1 };
       case "failed":
         pipe.add("hmget", [jobKey, "attempt", "error"]);
         return { kind: "failed", count: 1 };
@@ -190,9 +189,8 @@ function applyEnrichment(p: PendingEvent, results: PipelineResult): void {
         if (meta[1] && meta[2]) {
           p.fields.duration = String(Number(meta[2]) - Number(meta[1]));
         }
+        if (meta[3]) p.fields.result = meta[3];
       }
-      const resultVal = results[p.start + 1]?.[1] as string | null;
-      if (resultVal) p.fields.result = resultVal;
       return;
     }
     case "failed": {

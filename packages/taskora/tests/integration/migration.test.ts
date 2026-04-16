@@ -71,7 +71,7 @@ describe("migration — old version job processes correctly", () => {
       "maxAttempts",
       "1",
     );
-    await redis.set(`taskora:{email}:${jobId}:data`, JSON.stringify({ to: "alice@test.com" }));
+    await redis.hset(`taskora:{email}:${jobId}`, "data", JSON.stringify({ to: "alice@test.com" }));
     await redis.lpush("taskora:{email}:wait", jobId);
     // Wake marker
     await redis.zadd("taskora:{email}:marker", "0", "0");
@@ -131,7 +131,7 @@ describe("migration — old version job processes correctly", () => {
       "maxAttempts",
       "1",
     );
-    await redis.set(`taskora:{sparse}:${jobId}:data`, JSON.stringify({ name: "test" }));
+    await redis.hset(`taskora:{sparse}:${jobId}`, "data", JSON.stringify({ name: "test" }));
     await redis.lpush("taskora:{sparse}:wait", jobId);
     await redis.zadd("taskora:{sparse}:marker", "0", "0");
 
@@ -191,7 +191,7 @@ describe("migration — future version nack", () => {
       "maxAttempts",
       "1",
     );
-    await redis.set(`taskora:{future}:${jobId}:data`, JSON.stringify({ x: 1 }));
+    await redis.hset(`taskora:{future}:${jobId}`, "data", JSON.stringify({ x: 1 }));
     await redis.lpush("taskora:{future}:wait", jobId);
     await redis.zadd("taskora:{future}:marker", "0", "0");
 
@@ -247,7 +247,7 @@ describe("migration — expired version fail", () => {
       "maxAttempts",
       "1",
     );
-    await redis.set(`taskora:{expired}:${jobId}:data`, JSON.stringify({ x: 1 }));
+    await redis.hset(`taskora:{expired}:${jobId}`, "data", JSON.stringify({ x: 1 }));
     await redis.lpush("taskora:{expired}:wait", jobId);
     await redis.zadd("taskora:{expired}:marker", "0", "0");
 
@@ -317,7 +317,7 @@ describe("inspect().migrations()", () => {
         "maxAttempts",
         "1",
       );
-      await redis.set(`taskora:{inspect-test}:${jobId}:data`, JSON.stringify({ x: 1 }));
+      await redis.hset(`taskora:{inspect-test}:${jobId}`, "data", JSON.stringify({ x: 1 }));
       if (list === "wait") {
         await redis.lpush("taskora:{inspect-test}:wait", jobId);
       }
@@ -340,7 +340,7 @@ describe("inspect().migrations()", () => {
       "maxAttempts",
       "1",
     );
-    await redis.set(`taskora:{inspect-test}:${delayedId}:data`, JSON.stringify({ x: 1 }));
+    await redis.hset(`taskora:{inspect-test}:${delayedId}`, "data", JSON.stringify({ x: 1 }));
     await redis.zadd("taskora:{inspect-test}:delayed", String(Date.now() + 60000), delayedId);
 
     await app.ensureConnected();
