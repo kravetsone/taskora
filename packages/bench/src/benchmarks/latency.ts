@@ -11,7 +11,7 @@ export async function latency(
   const queueName = `bench-latency-${Date.now()}`;
 
   // Warmup
-  console.log("warmup...");
+  console.error("warmup...");
   const warmupHandle = await adapter.startLatencyRun(queueName, config.concurrency, config.warmup);
   for (let i = 0; i < config.warmup; i++) {
     await warmupHandle.dispatchOne({ i, t: performance.now() });
@@ -24,7 +24,7 @@ export async function latency(
   const allLatencies: number[] = [];
 
   for (let iter = 0; iter < config.iterations; iter++) {
-    console.log(`  iter ${iter + 1}/${config.iterations}...`);
+    console.error(`  iter ${iter + 1}/${config.iterations}...`);
     const handle = await adapter.startLatencyRun(
       `${queueName}-${iter}`,
       config.concurrency,

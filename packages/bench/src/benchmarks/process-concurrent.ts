@@ -11,7 +11,7 @@ export async function processConcurrent(
   const queueName = `bench-process-concurrent-${Date.now()}`;
 
   // Warmup
-  console.log("warmup...");
+  console.error("warmup...");
   const warmupHandle = await adapter.startProcessing(
     queueName,
     config.concurrency,
@@ -23,7 +23,7 @@ export async function processConcurrent(
   // Measured iterations
   const durations: number[] = [];
   for (let i = 0; i < config.iterations; i++) {
-    console.log(`  iter ${i + 1}/${config.iterations}...`);
+    console.error(`  iter ${i + 1}/${config.iterations}...`);
     const handle = await adapter.startProcessing(
       `${queueName}-${i}`,
       config.concurrency,

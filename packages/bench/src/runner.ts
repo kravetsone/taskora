@@ -46,29 +46,32 @@ export interface RunOptions {
   benchmarks: BenchmarkName[];
   iterations: number;
   redisUrl: string;
+  /** Where to send progress output. Defaults to stdout. */
+  log?: (msg: string) => void;
 }
 
 export async function run(options: RunOptions): Promise<BenchmarkResult[]> {
+  const log = options.log ?? ((msg: string) => process.stderr.write(msg));
   const results: BenchmarkResult[] = [];
 
   for (const lib of options.libraries) {
     const adapter = await createAdapter(lib);
     await adapter.setup(options.redisUrl);
 
-    console.log(`\n  Running benchmarks for ${adapter.name}...`);
+    log(`\n  Running benchmarks for ${adapter.name}...\n`);
 
     for (const benchName of options.benchmarks) {
       const config = { ...DEFAULT_CONFIGS[benchName], iterations: options.iterations };
       const fn = BENCHMARK_FNS[benchName];
 
-      process.stdout.write(`    ${benchName}... `);
+      log(`    ${benchName}... `);
       const result = await fn(adapter, config);
       const opsStr = `${Math.round(result.medianOpsPerSec).toLocaleString("en-US")} ops/sec`;
       const memStr =
         result.memoryPerJob !== undefined && result.memoryPerJob > 0
           ? ` (${result.memoryPerJob.toLocaleString("en-US")} B/job)`
           : "";
-      console.log(`${opsStr}${memStr}`);
+      log(`${opsStr}${memStr}\n`);
 
       results.push(result);
     }

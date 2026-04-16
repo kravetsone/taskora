@@ -1,0 +1,145 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      store:
+        description: "Redis-compatible server"
+        type: choice
+        options: [redis, valkey, dragonfly]
+        default: redis
+      libraries:
+        description: "Libraries to benchmark (comma-separated)"
+        type: string
+        default: "taskora,bullmq"
+      benchmarks:
+        description: "Benchmarks to run (comma-separated, empty = all)"
+        type: string
+        default: ""
+      iterations:
+        description: "Measured iterations per benchmark"
+        type: number
+        default: 5
+
+concurrency:
+  group: benchmark
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # sequential — no resource contention between jobs
+      matrix:
+        include:
+          - { runtime: node, name: "Node.js" }
+          - { runtime: bun,  name: "Bun" }
+          - { runtime: deno, name: "Deno" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build taskora
+        run: bun run build
+        working-directory: packages/taskora
+
+      - name: Prepare flags
+        id: flags
+        run: |
+          FLAGS="--store ${{ inputs.store }} --iterations ${{ inputs.iterations }} --json"
+
+          # Split libraries and run each one isolated
+          IFS=',' read -ra LIBS <<< "${{ inputs.libraries }}"
+          echo "libs=${LIBS[*]}" >> "$GITHUB_OUTPUT"
+
+          BENCH_FLAG=""
+          if [ -n "${{ inputs.benchmarks }}" ]; then
+            BENCH_FLAG="--benchmarks ${{ inputs.benchmarks }}"
+          fi
+          echo "bench_flag=$BENCH_FLAG" >> "$GITHUB_OUTPUT"
+          echo "base_flags=$FLAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run benchmarks (isolated per library)
+        working-directory: packages/bench
+        run: |
+          mkdir -p results
+
+          IFS=' ' read -ra LIBS <<< "${{ steps.flags.outputs.libs }}"
+          for lib in "${LIBS[@]}"; do
+            echo "::group::$lib"
+            ARGS="--libraries $lib ${{ steps.flags.outputs.base_flags }} ${{ steps.flags.outputs.bench_flag }}"
+
+            case "${{ matrix.runtime }}" in
+              node)
+                npx tsx src/index.ts $ARGS > "results/${lib}.json"
+                ;;
+              bun)
+                bun run src/index.ts $ARGS > "results/${lib}.json"
+                ;;
+              deno)
+                deno run -A --unstable-sloppy-imports src/index.ts $ARGS > "results/${lib}.json"
+                ;;
+            esac
+
+            echo "::endgroup::"
+          done
+
+      - name: Generate summary
+        working-directory: packages/bench
+        run: |
+          node --input-type=module << 'SCRIPT'
+          import { readFileSync, readdirSync } from "node:fs";
+
+          const dir = "results";
+          const files = readdirSync(dir).filter(f => f.endsWith(".json")).sort();
+
+          let md = `## Benchmark — ${{ matrix.name }}\n\n`;
+          md += `| Benchmark | Library | ops/sec | Median (ms) | Mem/job | p50 | p95 | p99 |\n`;
+          md += `|---|---|---:|---:|---|---:|---:|---:|\n`;
+
+          for (const file of files) {
+            const raw = readFileSync(`${dir}/${file}`, "utf8");
+            let data;
+            try {
+              data = JSON.parse(raw);
+            } catch {
+              md += `| _parse error_ | ${file} | | | | | | |\n`;
+              continue;
+            }
+
+            for (const r of data.results) {
+              const ops = Math.round(r.medianOpsPerSec).toLocaleString("en-US");
+              const dur = r.durationMs.toFixed(1);
+              const mem = r.memoryPerJob ? r.memoryPerJob + " B" : "—";
+              const p50 = r.p50 != null ? r.p50.toFixed(2) : "—";
+              const p95 = r.p95 != null ? r.p95.toFixed(2) : "—";
+              const p99 = r.p99 != null ? r.p99.toFixed(2) : "—";
+              md += `| ${r.benchmark} | ${r.library} | ${ops} | ${dur} | ${mem} | ${p50} | ${p95} | ${p99} |\n`;
+            }
+          }
+
+          md += `\n_Store: ${{ inputs.store }}, Iterations: ${{ inputs.iterations }}, Runner: ubuntu-latest_\n`;
+
+          process.stdout.write(md);
+          SCRIPT >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.runtime }}-${{ inputs.store }}
+          path: packages/bench/results/
+          retention-days: 90

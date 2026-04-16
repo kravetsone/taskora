@@ -73,11 +73,13 @@ async function main() {
   const config = parseArgs();
   const runtime = detectRuntime();
 
-  console.log(`  Runtime: ${runtime}`);
-  console.log(`  Store:   ${config.store}`);
+  // When --json, send progress to stderr so stdout is clean JSON.
+  const info = config.json ? console.error : console.log;
+  info(`  Runtime: ${runtime}`);
+  info(`  Store:   ${config.store}`);
 
   const redisUrl = await setupRedis(config.store);
-  console.log(`  URL:     ${redisUrl}`);
+  info(`  URL:     ${redisUrl}`);
 
   try {
     const results = await run({
