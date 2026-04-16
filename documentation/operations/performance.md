@@ -2,7 +2,48 @@
 
 Taskora's performance depends on three axes: which Redis-compatible server you use, which Node.js runtime, and how Redis is configured. This page covers all three with real benchmark data and practical tuning advice.
 
-All numbers below are from taskora's built-in benchmark suite (`@taskora/bench`) running against Docker containers on the same machine. They reflect relative differences — absolute numbers depend on hardware, network, and payload size.
+All numbers below are from taskora's built-in benchmark suite (`@taskora/bench`), each run isolated (one library, one runtime, one fresh Redis container at a time). They reflect relative differences — absolute numbers depend on hardware, network, and payload size.
+
+## taskora vs BullMQ
+
+### Throughput (ops/sec, Redis 7, isolated runs, median of 3 iterations)
+
+| Benchmark | taskora (Bun) | BullMQ (Bun) | taskora (Node) | BullMQ (Node) |
+|---|---:|---:|---:|---:|
+| enqueue (single) | 9,307 | 9,025 | **9,250** | 8,228 |
+| enqueue (bulk, batch=50) | **106,586** | 49,136 | **89,677** | 49,781 |
+| process (c=1) | 6,964 | 6,873 | **8,273** | 6,464 |
+| process (c=100) | **31,955** | 27,879 | **43,320** | 27,635 |
+| latency throughput | 5,292 | 5,155 | **7,643** | 4,029 |
+
+### Latency (ms, Bun)
+
+| Library | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| taskora | 0.27 | 0.83 | 1.39 |
+| BullMQ | 0.56 | 1.85 | 2.80 |
+
+### Latency (ms, Node.js v22)
+
+| Library | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| taskora | 0.23 | 0.40 | 0.72 |
+| BullMQ | 0.49 | 1.85 | 3.50 |
+
+### Memory per job
+
+| Library | B/job (single) | B/job (bulk) |
+|---|---:|---:|
+| taskora | 355 | 360 |
+| BullMQ | 279 | 254 |
+
+### Takeaways
+
+- **Single enqueue** is close — both libraries are limited by one Lua round trip per job. taskora is ~10% faster on Node.
+- **Bulk enqueue**: taskora is **~2x faster** thanks to `dispatchMany()` batching multiple jobs into a single pipeline round trip, while BullMQ's `addBulk()` issues a separate `EVALSHA` per job.
+- **Processing**: taskora is 1.1–1.6x faster. The gap comes from taskora's fused ack+dequeue Lua script — one `EVALSHA` per job vs. BullMQ's separate ack and dequeue calls.
+- **Latency**: taskora has **2–5x lower tail latency** (p95/p99) due to fewer Redis round trips in the hot path.
+- **Memory**: BullMQ uses ~20% less memory per job. BullMQ stores fewer metadata fields per job hash. The gap narrows with larger payloads where the data field dominates.
 
 ## Redis-Compatible Servers
 
@@ -54,29 +95,29 @@ Use **Redis** or **Valkey** — whichever your team is more comfortable operatin
 
 Taskora runs on Bun, Node.js, and Deno. The runtime affects client-side overhead — serialization, event loop scheduling, and ioredis internals.
 
-### Throughput (ops/sec, Redis 7, median of 3 runs)
+### Throughput (ops/sec, taskora, Redis 7, isolated runs, median of 3 iterations)
 
 | Benchmark | Bun | Node.js v22 | Deno |
 |---|---:|---:|---:|
-| enqueue (single) | 11,928 | 5,275 | 13,479 |
-| enqueue (bulk, batch=50) | 128,407 | 80,798 | 135,077 |
-| process (c=1) | 10,333 | 5,306 | 11,368 |
-| process (c=100) | 42,594 | 30,799 | 52,008 |
-| latency throughput | 8,053 | 4,429 | 8,958 |
+| enqueue (single) | 9,307 | 9,250 | **13,045** |
+| enqueue (bulk, batch=50) | 106,586 | 89,677 | **123,870** |
+| process (c=1) | 6,964 | 8,273 | **10,860** |
+| process (c=100) | 31,955 | 43,320 | **47,311** |
+| latency throughput | 5,292 | 7,643 | **8,483** |
 
 ### Latency (ms, Redis 7)
 
 | Runtime | p50 | p95 | p99 |
 |---|---:|---:|---:|
-| Bun | 0.21 | 0.31 | 0.93 |
-| Node.js v22 | 0.39 | 0.74 | 1.20 |
-| Deno | 0.19 | 0.47 | 0.76 |
+| Bun | 0.27 | 0.83 | 1.39 |
+| Node.js v22 | 0.23 | 0.40 | 0.72 |
+| Deno | **0.18** | **0.35** | **0.62** |
 
 ### Takeaways
 
-- **Deno** is the fastest runtime across all benchmarks — 1.1–1.7x Bun, 1.4–2.5x Node. It also has the best p50 latency (0.19ms). Deno runs ioredis through its Node.js compatibility layer. Use `deno run -A --unstable-sloppy-imports` to run.
-- **Bun** is close to Deno on throughput and has the tightest p95 (0.31ms). Roughly 2x Node on enqueue and single-threaded processing.
-- **Node.js** is the slowest on raw throughput but has consistent, predictable performance. For production deployments where stability matters more than peak speed, Node is solid.
+- **Deno** is the fastest runtime across all benchmarks — 1.3–1.6x Bun, 1.1–1.4x Node. It also has the best latency profile. Deno runs ioredis through its Node.js compatibility layer. Use `deno run -A --unstable-sloppy-imports` to run.
+- **Node.js** is competitive with Bun and beats it on concurrent processing (43k vs 32k ops/sec) and latency. Node's event loop scheduling handles high concurrency well.
+- **Bun** has the fastest single enqueue but trails on concurrent workloads. Bun's event loop overhead grows with many in-flight promises.
 
 ::: info
 These benchmarks measure the full queue pipeline (serialize → Lua script → Redis → deserialize). The runtime difference is only the client-side overhead — Redis is the same in all cases.
