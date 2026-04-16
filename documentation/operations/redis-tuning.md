@@ -2,6 +2,46 @@
 
 Production tuning for taskora's Redis backend. These settings affect memory efficiency and throughput — they're optional but recommended.
 
+## Redis vs Valkey vs Dragonfly
+
+Taskora works with any Redis-protocol-compatible server. Here's how the three main options compare on real taskora workloads (Node.js v22, Docker containers, default settings):
+
+### Throughput (ops/sec, median of 3 runs)
+
+| Benchmark | Redis 7 | Valkey 8 | Dragonfly |
+|---|---:|---:|---:|
+| enqueue (single) | 5,275 | 5,402 | 1,229 |
+| enqueue (bulk, batch=50) | 80,798 | 93,345 | 10,622 |
+| process (c=1) | 5,306 | 5,563 | 1,404 |
+| process (c=100) | 30,799 | 36,152 | 1,781 |
+| latency throughput | 4,429 | 5,169 | 807 |
+
+### Latency (ms)
+
+| Store | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| Redis 7 | 0.39 | 0.74 | 1.20 |
+| Valkey 8 | 0.33 | 0.60 | 0.93 |
+| Dragonfly | 2.09 | 2.97 | 4.14 |
+
+### Memory per job
+
+| Store | B/job (enqueue-single) |
+|---|---:|
+| Redis 7 | 355 |
+| Valkey 8 | 324 |
+| Dragonfly | 274 |
+
+### Takeaways
+
+- **Redis and Valkey** are both excellent choices. Valkey is slightly faster at high concurrency and has better tail latency. Both are fully compatible — switching is a drop-in image swap.
+- **Dragonfly** is 5–15x slower on taskora workloads. Dragonfly is multi-threaded but serializes Lua script execution. Since taskora (and BullMQ) use atomic Lua scripts for every state transition, this becomes the bottleneck. Dragonfly also requires `--default_lua_flags=allow-undeclared-keys` because taskora constructs keys inside Lua scripts.
+- **Memory**: Dragonfly uses the least memory per job (274 B), Valkey is in the middle (324 B), Redis uses the most (355 B). The difference is modest — all three stay compact with small payloads.
+
+::: tip
+If you're choosing between Redis and Valkey, either works. If you're considering Dragonfly for its memory efficiency or multi-threaded architecture, be aware that Lua-heavy workloads like task queues don't benefit from Dragonfly's threading model.
+:::
+
 ## `hash-max-listpack-value`
 
 **This is the single most impactful Redis tuning knob for taskora.**
@@ -50,10 +90,6 @@ services:
     image: redis:7-alpine
     command: redis-server --hash-max-listpack-value 1024
 ```
-
-::: tip BullMQ gives the same recommendation
-BullMQ has always used single-hash job storage and implicitly assumes operators tune this threshold. Taskora's pre-0.x split-storage layout masked the need, but since the single-hash migration (wireVersion 6) the same tuning applies.
-:::
 
 ## Connection pool sizing
 

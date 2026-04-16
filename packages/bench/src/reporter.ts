@@ -23,10 +23,18 @@ function padStart(s: string, len: number): string {
   return s.padStart(len);
 }
 
-export function reportTable(results: BenchmarkResult[], redisUrl: string): void {
+export interface ReportContext {
+  store: string;
+  runtime: string;
+  redisUrl?: string;
+}
+
+export function reportTable(results: BenchmarkResult[], ctx: ReportContext): void {
   console.log();
   console.log("  Benchmark Suite: taskora vs BullMQ");
-  console.log(`  Redis: ${redisUrl}`);
+  console.log(`  Store:   ${ctx.store}`);
+  console.log(`  Runtime: ${ctx.runtime}`);
+  if (ctx.redisUrl) console.log(`  Redis:   ${ctx.redisUrl}`);
   console.log();
 
   const colBench = 24;
@@ -89,6 +97,6 @@ export function reportTable(results: BenchmarkResult[], redisUrl: string): void 
   console.log();
 }
 
-export function reportJSON(results: BenchmarkResult[]): void {
-  console.log(JSON.stringify(results, null, 2));
+export function reportJSON(results: BenchmarkResult[], ctx: ReportContext): void {
+  console.log(JSON.stringify({ store: ctx.store, runtime: ctx.runtime, results }, null, 2));
 }

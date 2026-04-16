@@ -90,9 +90,12 @@ export type BenchmarkName =
 
 export type LibraryName = "taskora" | "bullmq";
 
+export type StoreName = "redis" | "valkey" | "dragonfly";
+
 export interface RunConfig {
   libraries: LibraryName[];
   benchmarks: BenchmarkName[];
+  store: StoreName;
   iterations: number;
   json: boolean;
 }

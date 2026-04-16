@@ -1,20 +1,52 @@
 import Redis from "ioredis";
+import type { StoreName } from "./types.js";
 
-let containerModule: typeof import("@testcontainers/redis") | undefined;
-let container: Awaited<ReturnType<(typeof containerModule)["RedisContainer"]["prototype"]["start"]>> | undefined;
+const STORE_IMAGES: Record<StoreName, string> = {
+  redis: "redis:7-alpine",
+  valkey: "valkey/valkey:8-alpine",
+  dragonfly: "docker.dragonflydb.io/dragonflydb/dragonfly:latest",
+};
+
+let container: { stop(opts?: { timeout?: number }): Promise<void> } | undefined;
 let redisUrl: string | undefined;
 
-export async function setupRedis(): Promise<string> {
+export async function setupRedis(store: StoreName = "redis"): Promise<string> {
   if (process.env.REDIS_URL) {
     redisUrl = process.env.REDIS_URL;
     return redisUrl;
   }
 
-  const { RedisContainer } = await import("@testcontainers/redis");
-  container = await new RedisContainer("redis:7-alpine")
+  const { GenericContainer, Wait } = await import("testcontainers");
+  const image = STORE_IMAGES[store];
+
+  const READY_LOG: Record<StoreName, RegExp> = {
+    redis: /Ready to accept connections/,
+    valkey: /Ready to accept connections/,
+    dragonfly: /listening on 0\.0\.0\.0:6379/,
+  };
+
+  let builder = new GenericContainer(image)
+    .withExposedPorts(6379)
     .withStartupTimeout(60_000)
-    .start();
-  redisUrl = container.getConnectionUrl();
+    .withWaitStrategy(Wait.forLogMessage(READY_LOG[store]));
+
+  // Dragonfly needs --logtostderr to emit startup messages to Docker logs,
+  // and --default_lua_flags=allow-undeclared-keys because taskora (and BullMQ)
+  // construct Redis keys inside Lua scripts rather than passing all via KEYS[].
+  if (store === "dragonfly") {
+    builder = builder.withCommand([
+      "dragonfly",
+      "--logtostderr",
+      "--default_lua_flags=allow-undeclared-keys",
+    ]);
+  }
+
+  const started = await builder.start();
+  container = started;
+
+  const host = started.getHost();
+  const port = started.getMappedPort(6379);
+  redisUrl = `redis://${host}:${port}`;
   return redisUrl;
 }
 

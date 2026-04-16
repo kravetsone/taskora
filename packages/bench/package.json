@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "bench": "bun run src/index.ts",
+    "bench:node": "node --import tsx src/index.ts",
+    "bench:deno": "deno run -A --unstable-sloppy-imports src/index.ts",
     "bench:taskora": "bun run src/index.ts --libraries taskora",
     "bench:bullmq": "bun run src/index.ts --libraries bullmq",
     "bench:json": "bun run src/index.ts --json"
@@ -16,6 +18,8 @@
   "devDependencies": {
     "@testcontainers/redis": "^10.18.0",
     "@types/node": "^22.0.0",
+    "testcontainers": "^10.18.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.7.2"
   }
 }
