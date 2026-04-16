@@ -58,30 +58,65 @@ Taskora runs on Bun, Node.js, and Deno. The runtime affects client-side overhead
 
 | Benchmark | Bun | Node.js v22 | Deno |
 |---|---:|---:|---:|
-| enqueue (single) | 11,267 | 5,275 | 12,183 \* |
-| enqueue (bulk, batch=50) | 124,340 | 80,798 | — |
-| process (c=1) | 10,421 | 5,306 | — |
-| process (c=100) | 29,097 | 30,799 | — |
-| latency throughput | 3,746 | 4,429 | — |
-
-\* Deno number is from a single-iteration run; full suite data pending.
+| enqueue (single) | 11,928 | 5,275 | 13,479 |
+| enqueue (bulk, batch=50) | 128,407 | 80,798 | 135,077 |
+| process (c=1) | 10,333 | 5,306 | 11,368 |
+| process (c=100) | 42,594 | 30,799 | 52,008 |
+| latency throughput | 8,053 | 4,429 | 8,958 |
 
 ### Latency (ms, Redis 7)
 
 | Runtime | p50 | p95 | p99 |
 |---|---:|---:|---:|
-| Bun | 0.40 | 1.06 | 1.78 |
+| Bun | 0.21 | 0.31 | 0.93 |
 | Node.js v22 | 0.39 | 0.74 | 1.20 |
+| Deno | 0.19 | 0.47 | 0.76 |
 
 ### Takeaways
 
-- **Bun** has the fastest enqueue and single-threaded processing — roughly 2x Node on those paths. The difference comes from Bun's faster `crypto.randomUUID()`, tighter event loop, and optimized ioredis import.
-- **Node.js** has slightly better tail latency (p95/p99) and matches Bun on high-concurrency processing. For production deployments where latency consistency matters, Node is solid.
-- **Deno** runs taskora via its Node.js compatibility layer. Early numbers look competitive. Use `deno run -A --unstable-sloppy-imports` to run.
+- **Deno** is the fastest runtime across all benchmarks — 1.1–1.7x Bun, 1.4–2.5x Node. It also has the best p50 latency (0.19ms). Deno runs ioredis through its Node.js compatibility layer. Use `deno run -A --unstable-sloppy-imports` to run.
+- **Bun** is close to Deno on throughput and has the tightest p95 (0.31ms). Roughly 2x Node on enqueue and single-threaded processing.
+- **Node.js** is the slowest on raw throughput but has consistent, predictable performance. For production deployments where stability matters more than peak speed, Node is solid.
 
 ::: info
 These benchmarks measure the full queue pipeline (serialize → Lua script → Redis → deserialize). The runtime difference is only the client-side overhead — Redis is the same in all cases.
 :::
+
+## Redis Drivers
+
+Taskora ships two Redis drivers: **ioredis** (Node.js library, works on all runtimes) and a **Bun native driver** (`taskora/redis/bun`) that uses `Bun.RedisClient` — Bun's built-in Redis client with auto-pipelining.
+
+### Throughput (ops/sec, Bun runtime, Redis 7, median of 3 runs)
+
+| Benchmark | ioredis | Bun native |
+|---|---:|---:|
+| enqueue (single) | 11,928 | 11,391 |
+| enqueue (bulk, batch=50) | 128,407 | 125,853 |
+| process (c=1) | 10,333 | 10,310 |
+| process (c=100) | 42,594 | 42,700 |
+| latency throughput | 8,053 | 8,001 |
+
+### Latency (ms)
+
+| Driver | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| ioredis | 0.21 | 0.31 | 0.93 |
+| Bun native | 0.21 | 0.29 | 0.91 |
+
+### Takeaways
+
+The two drivers are **effectively identical** in performance. Bun's auto-pipelining (batching same-tick `.send()` calls into one round trip) matches ioredis's pipeline behavior, and the overhead of RESP parsing is negligible vs. the Lua script execution time on the server.
+
+Choose based on operational constraints:
+
+| | ioredis (`taskora/redis`) | Bun native (`taskora/redis/bun`) |
+|---|---|---|
+| **Runtimes** | Bun, Node.js, Deno | Bun only |
+| **Cluster** | Yes | No |
+| **Sentinel** | Yes | No |
+| **Peer deps** | `ioredis` | None (built-in) |
+
+If you need Cluster or Sentinel, use ioredis. If you're on Bun and want zero peer deps, the Bun driver is a safe choice with no performance trade-off.
 
 ## Redis Tuning
 
@@ -177,6 +212,9 @@ bun run bench -- --store dragonfly
 bun run bench:node               # Node.js (via tsx)
 bun run bench:deno               # Deno
 
+# Compare ioredis vs Bun native driver (Bun only)
+bun run bench -- --libraries taskora,taskora-bun
+
 # Filter libraries and benchmarks
 bun run bench -- --libraries taskora --benchmarks enqueue-single,enqueue-bulk
 
@@ -189,7 +227,7 @@ bun run bench -- --json
 | Flag | Default | Values |
 |---|---|---|
 | `--store` | `redis` | `redis`, `valkey`, `dragonfly` |
-| `--libraries` | `taskora,bullmq` | comma-separated |
+| `--libraries` | `taskora,bullmq` | `taskora`, `taskora-bun`, `bullmq` (comma-separated) |
 | `--benchmarks` | all | `enqueue-single`, `enqueue-bulk`, `process-single`, `process-concurrent`, `latency` |
 | `--iterations` | `3` | number of measured runs per benchmark |
 | `--json` | off | machine-readable output |

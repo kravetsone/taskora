@@ -88,7 +88,7 @@ export type BenchmarkName =
   | "process-concurrent"
   | "latency";
 
-export type LibraryName = "taskora" | "bullmq";
+export type LibraryName = "taskora" | "taskora-bun" | "bullmq";
 
 export type StoreName = "redis" | "valkey" | "dragonfly";
 

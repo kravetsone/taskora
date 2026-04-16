@@ -7,6 +7,11 @@ import { processConcurrent } from "./benchmarks/process-concurrent.js";
 import { processSingle } from "./benchmarks/process-single.js";
 import type { BenchAdapter, BenchmarkConfig, BenchmarkName, BenchmarkResult, LibraryName } from "./types.js";
 
+async function createTaskoraBunAdapter(): Promise<BenchAdapter> {
+  const { TaskoraBunAdapter } = await import("./adapters/taskora-bun.js");
+  return new TaskoraBunAdapter();
+}
+
 const DEFAULT_CONFIGS: Record<BenchmarkName, BenchmarkConfig> = {
   "enqueue-single": { n: 1000, warmup: 500, batchSize: 50, concurrency: 1, iterations: 3 },
   "enqueue-bulk": { n: 10_000, warmup: 500, batchSize: 50, concurrency: 1, iterations: 3 },
@@ -25,10 +30,12 @@ const BENCHMARK_FNS: Record<BenchmarkName, BenchmarkFn> = {
   latency: latency,
 };
 
-function createAdapter(name: LibraryName): BenchAdapter {
+async function createAdapter(name: LibraryName): Promise<BenchAdapter> {
   switch (name) {
     case "taskora":
       return new TaskoraAdapter();
+    case "taskora-bun":
+      return createTaskoraBunAdapter();
     case "bullmq":
       return new BullMQAdapter();
   }
@@ -45,7 +52,7 @@ export async function run(options: RunOptions): Promise<BenchmarkResult[]> {
   const results: BenchmarkResult[] = [];
 
   for (const lib of options.libraries) {
-    const adapter = createAdapter(lib);
+    const adapter = await createAdapter(lib);
     await adapter.setup(options.redisUrl);
 
     console.log(`\n  Running benchmarks for ${adapter.name}...`);
