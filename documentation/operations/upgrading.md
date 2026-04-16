@@ -107,7 +107,7 @@ If your jobs routinely carry `data` or `result` larger than 64 bytes, the hash f
 hash-max-listpack-value 1024
 ```
 
-With that setting, payloads up to ~1 KB stay in listpack and wireVersion 6 is a memory win across the board. BullMQ — which has always used single-hash job storage — gives the same recommendation implicitly; we're calling it out explicitly because taskora's default (split storage) masked the need until now. See [Redis Tuning](/operations/redis-tuning) for the full guide on memory-efficient Redis settings.
+With that setting, payloads up to ~1 KB stay in listpack and wireVersion 6 is a memory win across the board. BullMQ — which has always used single-hash job storage — gives the same recommendation implicitly; we're calling it out explicitly because taskora's default (split storage) masked the need until now. See [Performance](/operations/performance#hash-max-listpack-value) for the full guide on memory-efficient Redis settings.
 
 **If you'd rather migrate manually.** Same as 1 → 2: drain your queues, confirm the task keyspace is empty, then deploy wireVersion 6. The new version finds a clean keyspace and writes fresh single-hash jobs from scratch.
 

@@ -23,7 +23,7 @@ const taskora = createTaskora({
 The adapter can accept a Redis URL string, an `ioredis` options object, or an existing `ioredis` instance.
 
 ::: tip Redis tuning for production
-For best memory efficiency, set `hash-max-listpack-value 1024` in your Redis config. This keeps job hashes in compact encoding for payloads up to ~1 KB. See [Redis Tuning](/operations/redis-tuning) for details.
+For best memory efficiency, set `hash-max-listpack-value 1024` in your Redis config. This keeps job hashes in compact encoding for payloads up to ~1 KB. See [Performance](/operations/performance#hash-max-listpack-value) for details.
 :::
 
 ## Define a Task
