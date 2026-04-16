@@ -234,9 +234,7 @@ describe("wire-format chained migration (v1 → current)", () => {
       const dataField = await redis.hget(`taskora:{migr-small}:${jid}`, "data");
       expect(dataField).not.toBeNull();
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      expect(JSON.parse(dataField as string).n).toBe(
-        jid === "j1" ? 1 : jid === "j2" ? 2 : 3,
-      );
+      expect(JSON.parse(dataField as string).n).toBe(jid === "j1" ? 1 : jid === "j2" ? 2 : 3);
     }
 
     // Dequeue via a worker. wireVersion-5 semantics: wait LIST is

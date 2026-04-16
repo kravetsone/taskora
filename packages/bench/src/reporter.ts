@@ -72,9 +72,7 @@ export function reportTable(results: BenchmarkResult[], ctx: ReportContext): voi
   console.log(`  ${separator}`);
 
   for (const r of results) {
-    const latencyStr = isLatencyResult(r)
-      ? `${fmt(r.p50)}/${fmt(r.p95)}/${fmt(r.p99)}`
-      : "—";
+    const latencyStr = isLatencyResult(r) ? `${fmt(r.p50)}/${fmt(r.p95)}/${fmt(r.p99)}` : "—";
 
     const memStr = r.memoryBytes !== undefined ? fmtBytes(r.memoryBytes) : "—";
     const perJobStr =

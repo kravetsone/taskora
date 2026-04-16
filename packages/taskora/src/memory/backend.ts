@@ -1074,9 +1074,7 @@ export class MemoryBackend implements Taskora.Adapter {
     return { next, ackedWorkflow };
   }
 
-  private readWorkflowBinding(
-    jobId: string,
-  ): { workflowId: string; nodeIndex: number } | null {
+  private readWorkflowBinding(jobId: string): { workflowId: string; nodeIndex: number } | null {
     const job = this.jobStore.get(jobId);
     if (!job || !job.fields._wf) return null;
     return {

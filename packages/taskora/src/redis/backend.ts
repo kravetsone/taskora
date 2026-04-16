@@ -242,7 +242,6 @@ export class RedisBackend implements Taskora.Adapter {
       this.migrationPausePromise = new Promise((resolve) => {
         this.migrationWake = resolve;
       });
-      // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
       console.log(
         "[taskora] foreign migration detected — pausing hot-path Redis ops until it clears",
       );
@@ -262,7 +261,6 @@ export class RedisBackend implements Taskora.Adapter {
       const compatError = await this.checkPostMigrationCompat();
       if (compatError) {
         this.migrationIncompatibleError = compatError;
-        // biome-ignore lint/suspicious/noConsole: fatal operator-facing error
         console.error(
           `[taskora] foreign migration completed but left the backend on a wire version we cannot read (${compatError.message}). Halting hot-path Redis ops — restart this process on a compatible taskora build.`,
         );
@@ -282,7 +280,6 @@ export class RedisBackend implements Taskora.Adapter {
         this.migrationWake = null;
       }
       this.migrationPausePromise = null;
-      // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
       console.log("[taskora] foreign migration cleared — resuming hot-path Redis ops");
     }
   }
@@ -478,7 +475,6 @@ export class RedisBackend implements Taskora.Adapter {
         "writtenAt",
         String(ours.writtenAt),
       ]);
-      // biome-ignore lint/suspicious/noConsole: one-shot operator-visible upgrade signal
       console.log(
         `[taskora] migrated ${keysMigrated} :wait structure${keysMigrated === 1 ? "" : "s"} (${jobsMigrated} jobs) from wireVersion ${stored.wireVersion} to ${ours.wireVersion}`,
       );
@@ -715,7 +711,6 @@ export class RedisBackend implements Taskora.Adapter {
       if (ourWireVersion > targetVersion) return; // we are past the migration
 
       if (first) {
-        // biome-ignore lint/suspicious/noConsole: operator-visible coordination signal
         console.log(
           `[taskora] migration in progress (targetWireVersion=${targetVersion}), waiting for \`${migrationLock}\` to clear…`,
         );
@@ -1288,9 +1283,7 @@ export class RedisBackend implements Taskora.Adapter {
   ): Taskora.AckAndDequeueResult {
     const [wf, wfNode, id, data, _v, attempt, ts] = raw;
     const ackedWorkflow =
-      wf && wf !== ""
-        ? { workflowId: wf, nodeIndex: Number(wfNode || "0") }
-        : null;
+      wf && wf !== "" ? { workflowId: wf, nodeIndex: Number(wfNode || "0") } : null;
     const next =
       id && id !== ""
         ? {

@@ -14,21 +14,13 @@ export interface BenchAdapter {
    * Pre-enqueue `count` jobs, then start a worker with the given concurrency.
    * Returns a handle whose `.done` resolves when all jobs are processed.
    */
-  startProcessing(
-    queueName: string,
-    concurrency: number,
-    count: number,
-  ): Promise<CompletionHandle>;
+  startProcessing(queueName: string, concurrency: number, count: number): Promise<CompletionHandle>;
 
   /**
    * Start a worker for latency measurement. The caller dispatches jobs
    * via `dispatchOne` with a timestamp; the handler records arrival time.
    */
-  startLatencyRun(
-    queueName: string,
-    concurrency: number,
-    count: number,
-  ): Promise<LatencyHandle>;
+  startLatencyRun(queueName: string, concurrency: number, count: number): Promise<LatencyHandle>;
 
   /** FLUSHDB — clean Redis between iterations. */
   cleanup(): Promise<void>;

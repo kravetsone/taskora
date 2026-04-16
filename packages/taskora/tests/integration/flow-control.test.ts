@@ -597,9 +597,7 @@ describe("priority", () => {
     // Wait LIST must be empty (or missing), prioritized ZSET holds all 3.
     const waitType = await redis.type("taskora:{priority-basic}:wait");
     expect(["none", "list"]).toContain(waitType);
-    const waitLen = waitType === "list"
-      ? await redis.llen("taskora:{priority-basic}:wait")
-      : 0;
+    const waitLen = waitType === "list" ? await redis.llen("taskora:{priority-basic}:wait") : 0;
     expect(waitLen).toBe(0);
     const prioritizedType = await redis.type("taskora:{priority-basic}:prioritized");
     expect(prioritizedType).toBe("zset");

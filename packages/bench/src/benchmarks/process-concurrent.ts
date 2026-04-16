@@ -12,11 +12,7 @@ export async function processConcurrent(
 
   // Warmup
   console.error("warmup...");
-  const warmupHandle = await adapter.startProcessing(
-    queueName,
-    config.concurrency,
-    config.warmup,
-  );
+  const warmupHandle = await adapter.startProcessing(queueName, config.concurrency, config.warmup);
   await withTimeout(warmupHandle.done, TIMEOUT, "process-concurrent warmup");
   await adapter.cleanup();
 
@@ -24,21 +20,12 @@ export async function processConcurrent(
   const durations: number[] = [];
   for (let i = 0; i < config.iterations; i++) {
     console.error(`  iter ${i + 1}/${config.iterations}...`);
-    const handle = await adapter.startProcessing(
-      `${queueName}-${i}`,
-      config.concurrency,
-      config.n,
-    );
+    const handle = await adapter.startProcessing(`${queueName}-${i}`, config.concurrency, config.n);
     const start = performance.now();
     await withTimeout(handle.done, TIMEOUT, `process-concurrent iter ${i}`);
     durations.push(performance.now() - start);
     await adapter.cleanup();
   }
 
-  return buildResult(
-    `process (c=${config.concurrency})`,
-    adapter.name,
-    config.n,
-    durations,
-  );
+  return buildResult(`process (c=${config.concurrency})`, adapter.name, config.n, durations);
 }

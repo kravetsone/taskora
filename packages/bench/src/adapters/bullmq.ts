@@ -1,6 +1,6 @@
 import Redis from "ioredis";
-import type { BenchAdapter, CompletionHandle, LatencyHandle } from "../types.js";
 import { parseRedisUrl, readUsedMemory } from "../redis.js";
+import type { BenchAdapter, CompletionHandle, LatencyHandle } from "../types.js";
 
 export class BullMQAdapter implements BenchAdapter {
   readonly name = "bullmq";
@@ -85,16 +85,12 @@ export class BullMQAdapter implements BenchAdapter {
       resolve = r;
     });
 
-    const worker = new Worker(
-      queueName,
-      async () => {},
-      {
-        connection: this.connection,
-        concurrency,
-        removeOnComplete: { count: 0 },
-        removeOnFail: { count: 0 },
-      },
-    );
+    const worker = new Worker(queueName, async () => {}, {
+      connection: this.connection,
+      concurrency,
+      removeOnComplete: { count: 0 },
+      removeOnFail: { count: 0 },
+    });
     this.currentWorker = worker;
 
     worker.on("completed", () => {

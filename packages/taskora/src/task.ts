@@ -378,6 +378,8 @@ export class Task<TInput, TOutput> {
 
     // Orchestrate: validate → bulk enqueue → resolve/reject handles
     const adapter = this.deps.adapter;
+    const enqueueBulk = adapter.enqueueBulk;
+    if (!enqueueBulk) throw new Error("unreachable: enqueueBulk guarded above");
     const taskName = this.name;
     const version = this.version;
     const retryAttempts = this.config.retry?.attempts;
@@ -409,11 +411,7 @@ export class Task<TInput, TOutput> {
         batchIndices.map(async (jobIndex, batchIdx) => {
           try {
             const job = jobs[jobIndex];
-            if (
-              shouldValidate &&
-              job.options?.skipValidation !== true &&
-              inputSchema
-            ) {
+            if (shouldValidate && job.options?.skipValidation !== true && inputSchema) {
               await validateSchema(inputSchema, job.data);
             }
             const serialized = serializer.serialize(job.data);
@@ -457,7 +455,7 @@ export class Task<TInput, TOutput> {
       }
 
       if (valid.length > 0) {
-        await adapter.enqueueBulk!(taskName, valid);
+        await enqueueBulk.call(adapter, taskName, valid);
       }
 
       // Resolve all valid handles

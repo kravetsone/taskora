@@ -5,7 +5,13 @@ import { enqueueSingle } from "./benchmarks/enqueue-single.js";
 import { latency } from "./benchmarks/latency.js";
 import { processConcurrent } from "./benchmarks/process-concurrent.js";
 import { processSingle } from "./benchmarks/process-single.js";
-import type { BenchAdapter, BenchmarkConfig, BenchmarkName, BenchmarkResult, LibraryName } from "./types.js";
+import type {
+  BenchAdapter,
+  BenchmarkConfig,
+  BenchmarkName,
+  BenchmarkResult,
+  LibraryName,
+} from "./types.js";
 
 async function createTaskoraBunAdapter(): Promise<BenchAdapter> {
   const { TaskoraBunAdapter } = await import("./adapters/taskora-bun.js");

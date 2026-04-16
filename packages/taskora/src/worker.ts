@@ -198,10 +198,11 @@ export class Worker {
     // Forward-declared so the loop body can install it in activeJobs entries
     // when transitioning mid-chain. Safe: the loop body only reads `tracked`
     // after its first await (by which time the assignment below has run).
+    // biome-ignore lint/style/useConst: definite-assignment forward reference
     let tracked!: Promise<void>;
 
     const promise = (async () => {
-      chain: while (true) {
+      while (true) {
         const raw = currentRaw;
         const token = currentToken;
         const controller = currentController;
@@ -218,7 +219,7 @@ export class Worker {
           } catch {
             // nack failed (e.g. lock expired)
           }
-          break chain;
+          break;
         }
 
         // Expired version — fail permanently, migration code is gone
@@ -229,7 +230,7 @@ export class Worker {
           } catch {
             // fail() itself failed
           }
-          break chain;
+          break;
         }
 
         let handlerResult: unknown;
@@ -325,7 +326,7 @@ export class Worker {
           if (controller.signal.aborted && controller.signal.reason === "cancelled") {
             await flushPendingWrites();
             await this.handleCancellation(raw.id, token, data, ctx);
-            break chain;
+            break;
           }
 
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -380,7 +381,7 @@ export class Worker {
               );
             } catch {
               // failAndDequeue failed (e.g. lock expired)
-              break chain;
+              break;
             }
 
             // Fire-and-forget workflow failure notification — don't block
@@ -403,9 +404,9 @@ export class Worker {
                 token: currentToken,
                 controller: currentController,
               });
-              continue chain;
+              continue;
             }
-            break chain;
+            break;
           }
 
           // Shutdown or adapter without failAndDequeue → plain fail
@@ -413,19 +414,19 @@ export class Worker {
             await this.adapter.fail(this.task.name, raw.id, token, errorMsg, retryInfo);
           } catch {
             // fail() itself failed (e.g. lock expired)
-            break chain;
+            break;
           }
           if (!retryInfo) {
             await this.failWorkflow(raw.id, errorMsg, null);
           }
-          break chain;
+          break;
         }
 
         // Cancelled while handler was running (handler didn't check signal)
         if (controller.signal.aborted && controller.signal.reason === "cancelled") {
           await flushPendingWrites();
           await this.handleCancellation(raw.id, token, data, ctx);
-          break chain;
+          break;
         }
 
         // Handler succeeded — drain any fire-and-forget progress/log writes
@@ -450,7 +451,7 @@ export class Worker {
             );
           } catch {
             // ackAndDequeue failed (e.g. lock expired) — stall check will clean up
-            break chain;
+            break;
           }
 
           // Fire-and-forget workflow advance — skipped entirely for jobs
@@ -459,11 +460,7 @@ export class Worker {
           // here; for non-workflow jobs we avoid even the promise
           // allocation.
           if (reply.ackedWorkflow) {
-            this.advanceWorkflow(
-              raw.id,
-              serializedResult,
-              reply.ackedWorkflow,
-            ).catch(() => {});
+            this.advanceWorkflow(raw.id, serializedResult, reply.ackedWorkflow).catch(() => {});
           }
 
           if (reply.next && this.running) {
@@ -477,19 +474,19 @@ export class Worker {
               token: currentToken,
               controller: currentController,
             });
-            continue chain;
+            continue;
           }
-          break chain;
+          break;
         }
 
         // Shutdown or adapter without ackAndDequeue → plain ack
         try {
           await this.adapter.ack(this.task.name, raw.id, token, serializedResult);
         } catch {
-          break chain;
+          break;
         }
         await this.advanceWorkflow(raw.id, serializedResult, null);
-        break chain;
+        break;
       }
     })();
 
@@ -571,8 +568,7 @@ export class Worker {
     meta: { workflowId: string; nodeIndex: number } | null,
   ): Promise<void> {
     try {
-      const resolved =
-        meta ?? (await this.adapter.getWorkflowMeta(this.task.name, jobId));
+      const resolved = meta ?? (await this.adapter.getWorkflowMeta(this.task.name, jobId));
       if (!resolved) return;
 
       const { toDispatch } = await this.adapter.advanceWorkflow(
@@ -599,8 +595,7 @@ export class Worker {
     meta: { workflowId: string; nodeIndex: number } | null,
   ): Promise<void> {
     try {
-      const resolved =
-        meta ?? (await this.adapter.getWorkflowMeta(this.task.name, jobId));
+      const resolved = meta ?? (await this.adapter.getWorkflowMeta(this.task.name, jobId));
       if (!resolved) return;
 
       const { activeJobIds } = await this.adapter.failWorkflow(

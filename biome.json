@@ -40,6 +40,16 @@
           }
         }
       }
+    },
+    {
+      "include": ["packages/bench/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off"
+          }
+        }
+      }
     }
   ]
 }
