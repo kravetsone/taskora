@@ -86,15 +86,13 @@ describe("inspector list queries", () => {
     });
 
     const t = app.task<{ n: number }, void>("list-test-2", async () => {});
-    t.dispatch({ n: 1 });
-    // 2ms gap so dispatches land in distinct milliseconds and the
-    // wait-list ordering (ts-based within a priority band) is
-    // deterministic. Sub-ms FIFO is explicitly unspecified — see
-    // scripts.ts > "Wait-list ordering" header.
-    await new Promise((r) => setTimeout(r, 2));
-    t.dispatch({ n: 2 });
-
-    await new Promise((r) => setTimeout(r, 100));
+    // Await each dispatch so the enqueue Lua call lands in Redis before the
+    // next one fires. Without this the wait LIST order is non-deterministic
+    // — Bun's auto-pipelining can interleave same-tick `.send()` calls so a
+    // bare `dispatch()` (returns sync, enqueue is async) doesn't guarantee
+    // FIFO ordering between back-to-back calls.
+    await t.dispatch({ n: 1 });
+    await t.dispatch({ n: 2 });
 
     const waiting = await app.inspect().waiting({ task: "list-test-2" });
     expect(waiting).toHaveLength(2);
